@@ -1,0 +1,140 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ *
+ */
+
+package org.opensearch.dataprepper.plugins.source.jira.rest;
+
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
+import lombok.extern.slf4j.Slf4j;
+import org.opensearch.dataprepper.metrics.PluginMetrics;
+import org.opensearch.dataprepper.plugins.source.atlassian.rest.AtlassianRestClient;
+import org.opensearch.dataprepper.plugins.source.atlassian.rest.auth.AtlassianAuthConfig;
+import org.opensearch.dataprepper.plugins.source.jira.JiraSourceConfig;
+import org.opensearch.dataprepper.plugins.source.jira.models.SearchResults;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
+
+import javax.inject.Inject;
+import javax.inject.Named;
+import java.net.URI;
+
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
+import static org.opensearch.dataprepper.plugins.source.jira.utils.JqlConstants.EXPAND_FIELD;
+import static org.opensearch.dataprepper.plugins.source.jira.utils.JqlConstants.EXPAND_VALUE;
+import static org.opensearch.dataprepper.plugins.source.jira.utils.JqlConstants.FIELDS_PARAM;
+import static org.opensearch.dataprepper.plugins.source.jira.utils.JqlConstants.FIELDS_VALUE;
+import static org.opensearch.dataprepper.plugins.source.jira.utils.JqlConstants.JQL_FIELD;
+
+@Slf4j
+@Named
+public class JiraRestClient extends AtlassianRestClient {
+
+    public static final String REST_API_SEARCH = "rest/api/3/search/jql";
+    public static final String REST_API_FETCH_ISSUE = "rest/api/3/issue";
+    public static final String FIFTY = "50";
+    public static final String NEXT_PAGE_TOKEN = "nextPageToken";
+    public static final String MAX_RESULT = "maxResults";
+    private static final String TICKET_FETCH_LATENCY_TIMER = "ticketFetchLatency";
+    private static final String SEARCH_CALL_LATENCY_TIMER = "searchCallLatency";
+    private static final String TICKETS_REQUESTED = "ticketsRequested";
+    private static final String TICKET_REQUESTS_FAILED = "ticketRequestsFailed";
+    private static final String TICKET_REQUESTS_SUCCESS = "ticketRequestsSuccess";
+    private static final String SEARCH_REQUESTS_FAILED = "searchRequestsFailed";
+    private final RestTemplate restTemplate;
+    private final AtlassianAuthConfig authConfig;
+    private final Timer ticketFetchLatencyTimer;
+    private final Timer searchCallLatencyTimer;
+    private final Counter ticketsRequestedCounter;
+    private final Counter ticketRequestsFailedCounter;
+    private final Counter ticketRequestsSuccessCounter;
+    private final Counter searchRequestsFailedCounter;
+
+    public JiraRestClient(RestTemplate restTemplate, AtlassianAuthConfig authConfig, PluginMetrics pluginMetrics) {
+        this(restTemplate, authConfig, pluginMetrics, false);
+    }
+
+    @Inject
+    public JiraRestClient(RestTemplate restTemplate, AtlassianAuthConfig authConfig,
+                          PluginMetrics pluginMetrics, JiraSourceConfig sourceConfig) {
+        this(restTemplate, authConfig, pluginMetrics, sourceConfig.isAllowLocalAddress());
+    }
+
+    private JiraRestClient(RestTemplate restTemplate, AtlassianAuthConfig authConfig,
+                           PluginMetrics pluginMetrics, boolean allowLocalAddress) {
+        super(restTemplate, authConfig, pluginMetrics, allowLocalAddress);
+        this.restTemplate = restTemplate;
+        this.authConfig = authConfig;
+
+        ticketFetchLatencyTimer = pluginMetrics.timer(TICKET_FETCH_LATENCY_TIMER);
+        searchCallLatencyTimer = pluginMetrics.timer(SEARCH_CALL_LATENCY_TIMER);
+        ticketsRequestedCounter = pluginMetrics.counter(TICKETS_REQUESTED);
+        ticketRequestsFailedCounter = pluginMetrics.counter(TICKET_REQUESTS_FAILED);
+        ticketRequestsSuccessCounter = pluginMetrics.counter(TICKET_REQUESTS_SUCCESS);
+        searchRequestsFailedCounter = pluginMetrics.counter(SEARCH_REQUESTS_FAILED);
+    }
+
+    /**
+     * Method to get Issues.
+     *
+     * @param jql           input parameter.
+     * @param nextPageToken the pagination token from previous response, or null for first page
+     * @return SearchResults search results
+     */
+    public SearchResults getAllIssues(StringBuilder jql, String nextPageToken) {
+
+        String url = authConfig.getUrl() + REST_API_SEARCH;
+
+        UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(url)
+                .queryParam(MAX_RESULT, FIFTY)
+                .queryParam(JQL_FIELD, jql)
+                .queryParam(EXPAND_FIELD, EXPAND_VALUE)
+                .queryParam(FIELDS_PARAM, FIELDS_VALUE);
+
+        if (nextPageToken != null) {
+            builder.queryParam(NEXT_PAGE_TOKEN, nextPageToken);
+        }
+
+        URI uri = builder.buildAndExpand().toUri();
+        return searchCallLatencyTimer.record(
+                () -> {
+                    try {
+                        return invokeRestApi(uri, SearchResults.class).getBody();
+                    } catch (Exception e) {
+                        log.error(NOISY, "Error while fetching issues with jql {}", jql, e);
+                        searchRequestsFailedCounter.increment();
+                        throw e;
+                    }
+                }
+        );
+    }
+
+    /**
+     * Gets issue.
+     *
+     * @param issueKey the item info
+     * @return the issue
+     */
+    public String getIssue(String issueKey) {
+        ticketsRequestedCounter.increment();
+        String url = authConfig.getUrl() + REST_API_FETCH_ISSUE + "/" + issueKey;
+        URI uri = UriComponentsBuilder.fromHttpUrl(url).buildAndExpand().toUri();
+        return ticketFetchLatencyTimer.record(() -> {
+            try {
+                String body = invokeRestApi(uri, String.class).getBody();
+                ticketRequestsSuccessCounter.increment();
+                return body;
+            } catch (Exception e) {
+                log.error("Error while fetching issue with key {}", issueKey);
+                ticketRequestsFailedCounter.increment();
+                throw e;
+            }
+        });
+    }
+}

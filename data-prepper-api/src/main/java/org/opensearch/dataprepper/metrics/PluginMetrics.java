@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.metrics;
@@ -23,11 +27,15 @@ public class PluginMetrics {
 
     private final String metricsPrefix;
 
-    public static PluginMetrics fromPluginSetting(final PluginSetting pluginSetting) {
+    public static PluginMetrics fromPluginSetting(final PluginSetting pluginSetting, final String name) {
         if(pluginSetting.getPipelineName() == null) {
             throw new IllegalArgumentException("PluginSetting.pipelineName must not be null");
         }
-        return PluginMetrics.fromNames(pluginSetting.getName(), pluginSetting.getPipelineName());
+        return PluginMetrics.fromNames(name, pluginSetting.getPipelineName());
+    }
+
+    public static PluginMetrics fromPluginSetting(final PluginSetting pluginSetting) {
+        return fromPluginSetting(pluginSetting, pluginSetting.getName());
     }
 
     /**
@@ -53,7 +61,7 @@ public class PluginMetrics {
         return new PluginMetrics(metricsPrefix);
     }
 
-    private  PluginMetrics(final String metricsPrefix) {
+    private PluginMetrics(final String metricsPrefix) {
         this.metricsPrefix = metricsPrefix;
     }
 
@@ -77,8 +85,20 @@ public class PluginMetrics {
         return Metrics.timer(getMeterName(name), tags);
     }
 
+    public Timer timer(final String name, final String metricsPrefix) {
+        return Metrics.timer(new StringJoiner(MetricNames.DELIMITER).add(metricsPrefix).add(name).toString());
+    }
+
     public DistributionSummary summary(final String name) {
         return Metrics.summary(getMeterName(name));
+    }
+
+    public DistributionSummary summaryWithTags(final String name, final String... tags) {
+        return Metrics.summary(getMeterName(name), tags);
+    }
+
+    public DistributionSummary summary(final String name, final String metricsPrefix) {
+        return Metrics.summary(new StringJoiner(MetricNames.DELIMITER).add(metricsPrefix).add(name).toString());
     }
 
     public <T extends Number> T gauge(final String name, T number) {

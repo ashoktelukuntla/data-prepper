@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.sink.s3;
@@ -8,26 +12,42 @@ package org.opensearch.dataprepper.plugins.sink.s3;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.AwsAuthenticationOptions;
+import org.opensearch.dataprepper.plugins.sink.s3.configuration.ClientOptions;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.retry.RetryPolicy;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
+import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.S3AsyncClientBuilder;
 
 public final class ClientFactory {
     private ClientFactory() { }
 
-    static S3Client createS3Client(final S3SinkConfig s3SinkConfig, final AwsCredentialsSupplier awsCredentialsSupplier) {
+    static S3AsyncClient createS3AsyncClient(final S3SinkConfig s3SinkConfig, final AwsCredentialsSupplier awsCredentialsSupplier) {
         final AwsCredentialsOptions awsCredentialsOptions = convertToCredentialsOptions(s3SinkConfig.getAwsAuthenticationOptions());
         final AwsCredentialsProvider awsCredentialsProvider = awsCredentialsSupplier.getProvider(awsCredentialsOptions);
 
-        return S3Client.builder()
+        final S3AsyncClientBuilder s3AsyncClientBuilder = S3AsyncClient.builder()
                 .region(s3SinkConfig.getAwsAuthenticationOptions().getAwsRegion())
+                .crossRegionAccessEnabled(true)
                 .credentialsProvider(awsCredentialsProvider)
-                .overrideConfiguration(createOverrideConfiguration(s3SinkConfig)).build();
+                .overrideConfiguration(createOverrideConfiguration(s3SinkConfig));
+
+        if (s3SinkConfig.getClientOptions() != null) {
+            final ClientOptions clientOptions = s3SinkConfig.getClientOptions();
+            final SdkAsyncHttpClient httpClient = NettyNioAsyncHttpClient.builder()
+                    .connectionAcquisitionTimeout(clientOptions.getAcquireTimeout())
+                    .maxConcurrency(clientOptions.getMaxConnections())
+                    .build();
+            s3AsyncClientBuilder.httpClient(httpClient);
+        }
+
+        return s3AsyncClientBuilder.build();
     }
 
     private static ClientOverrideConfiguration createOverrideConfiguration(final S3SinkConfig s3SinkConfig) {
-        final RetryPolicy retryPolicy = RetryPolicy.builder().numRetries(s3SinkConfig.getMaxConnectionRetries()).build();
+        final RetryPolicy retryPolicy = RetryPolicy.builder().numRetries(s3SinkConfig.getMaxConnectionRetries() * s3SinkConfig.getMaxUploadRetries()).build();
         return ClientOverrideConfiguration.builder()
                 .retryPolicy(retryPolicy)
                 .build();

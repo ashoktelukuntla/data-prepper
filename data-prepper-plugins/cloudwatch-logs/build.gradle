@@ -1,22 +1,46 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 plugins {
     id 'java'
     id 'java-library'
 }
 
+sourceSets {
+    integrationTest {
+        java {
+            compileClasspath += main.output + test.output
+            runtimeClasspath += main.output + test.output
+            srcDir file('src/integrationTest/java')
+        }
+    }
+}
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntime.extendsFrom testRuntime
+}
+
 dependencies {
     implementation project(':data-prepper-plugins:aws-plugin-api')
     implementation project(path: ':data-prepper-plugins:common')
+    implementation project(path: ':data-prepper-plugins:failures-common')
     implementation 'io.micrometer:micrometer-core'
     implementation 'com.fasterxml.jackson.core:jackson-core'
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
     implementation 'software.amazon.awssdk:cloudwatch'
     implementation 'software.amazon.awssdk:cloudwatchlogs'
+    implementation 'software.amazon.awssdk:s3'
     implementation libs.commons.lang3
     implementation 'org.projectlombok:lombok:1.18.26'
     implementation 'org.hibernate.validator:hibernate-validator:8.0.0.Final'
-    testImplementation project(path: ':data-prepper-test-common')
-    testImplementation testLibs.mockito.inline
+    testImplementation project(path: ':data-prepper-test:test-common')
+    testImplementation project(':data-prepper-core')
+    integrationTestImplementation 'org.wiremock:wiremock:3.13.2'
+    integrationTestImplementation project(':data-prepper-api').sourceSets.test.output
     compileOnly 'org.projectlombok:lombok:1.18.24'
     annotationProcessor 'org.projectlombok:lombok:1.18.24'
 }
@@ -34,4 +58,22 @@ jacocoTestCoverageVerification {
 
 test {
     useJUnitPlatform()
+}
+
+task integrationTest(type: Test) {
+    group = 'verification'
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+
+    useJUnitPlatform()
+    forkEvery = 1
+
+    classpath = sourceSets.integrationTest.runtimeClasspath
+    systemProperty 'tests.cloudwatch.log_group', System.getProperty('tests.cloudwatch.log_group')
+    systemProperty 'tests.cloudwatch.log_stream', System.getProperty('tests.cloudwatch.log_stream')
+    systemProperty 'tests.aws.region', System.getProperty('tests.aws.region')
+    systemProperty 'tests.aws.role', System.getProperty('tests.aws.role')
+    systemProperty 'tests.s3.bucket', System.getProperty('tests.s3.bucket')
+    filter {
+        includeTestsMatching '*IT'
+    }
 }

@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.event;
@@ -134,6 +138,36 @@ public class DefaultEventMetadataTest {
         assertThat(eventMetadata.getAttribute(key), equalTo(value));
     }
 
+    private static Stream<Arguments> getNestedAttributeTestInputs() {
+        return Stream.of(Arguments.of(Map.of("k1", "v1", "k2", Map.of("k3", "v3")), "k1", "v1"),
+                         Arguments.of(Map.of("k1", "v1", "k2", Map.of("k3", "v3")), "k2/k3", "v3"),
+                         Arguments.of(Map.of("k1", "v1", "k2", Map.of("k3", Map.of("k4", 4))), "k2/k3/k4", 4),
+                         Arguments.of(Map.of("k1", "v1", "k2", Map.of("k3", 4)), "k2/k3/k4", null),
+                         Arguments.of(Map.of("k1","v1"),"k1", "v1"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("getNestedAttributeTestInputs")
+    public void testNestedGetAttribute(Map<String, Object> attributes, final String key, final Object expectedValue) {
+        eventMetadata = DefaultEventMetadata.builder()
+                .withEventType(testEventType)
+                .withTimeReceived(testTimeReceived)
+                .withAttributes(attributes)
+                .build();
+        assertThat(eventMetadata.getAttribute(key), equalTo(expectedValue));
+    }
+
+    @Test
+    public void test_with_ExternalOriginationTime() {
+        Instant now = Instant.now();
+        eventMetadata = DefaultEventMetadata.builder()
+                .withEventType(testEventType)
+                .withTimeReceived(testTimeReceived)
+                .withExternalOriginationTime(now)
+                .build();
+        assertThat(eventMetadata.getExternalOriginationTime(), equalTo(now));
+    }
+
     @Test
     public void testAttributes_without_attributes_is_empty() {
         eventMetadata = DefaultEventMetadata.builder()
@@ -143,6 +177,20 @@ public class DefaultEventMetadataTest {
         final Map<String, Object> attributes = eventMetadata.getAttributes();
         assertThat(attributes, notNullValue());
         assertThat(attributes.size(), equalTo(0));
+
+    }
+
+    @Test
+    public void testAttributes_with_attributes_of_not_map_type() {
+        Object v1 = new Object();
+        eventMetadata = DefaultEventMetadata.builder()
+                .withEventType(testEventType)
+                .withTimeReceived(testTimeReceived)
+                .withAttributes(Map.of("key1", v1))
+                .build();
+        assertThat(eventMetadata.getAttribute("key1"), equalTo(v1));
+        assertThat(eventMetadata.getAttribute("key1/key2/"), equalTo(null));
+        assertThat(eventMetadata.getAttribute("key3"), equalTo(null));
 
     }
 
@@ -273,6 +321,40 @@ public class DefaultEventMetadataTest {
         @Test
         void equals_returns_false_for_null() {
             assertThat(event.equals(null), equalTo(false));
+            assertThat(event.equals(new Object()), equalTo(false));
+        }
+
+        @Test
+        void equals_returns_false_when_timeinstance_not_match() {
+            DefaultEventMetadata newEvent = DefaultEventMetadata.builder()
+                    .withEventType(eventType)
+                    .withTimeReceived(Instant.now())
+                    .withAttributes(Collections.singletonMap(attributeKey, attributeValue))
+                    .build();
+            assertThat(event.equals(newEvent), equalTo(false));
+        }
+
+        @Test
+        void equals_returns_false_when_attributes_not_match() {
+            String newAttributeKey = UUID.randomUUID().toString();
+            String newAttributeValue = UUID.randomUUID().toString();
+            DefaultEventMetadata newEvent = DefaultEventMetadata.builder()
+                    .withEventType(eventType)
+                    .withTimeReceived(timeReceived)
+                    .withAttributes(Collections.singletonMap(newAttributeKey, newAttributeValue))
+                    .build();
+            assertThat(event.equals(newEvent), equalTo(false));
+        }
+
+        @Test
+        void equals_returns_false_when_tags_not_match() {
+            DefaultEventMetadata newEvent = DefaultEventMetadata.builder()
+                    .withEventType(eventType)
+                    .withTimeReceived(timeReceived)
+                    .withAttributes(Collections.singletonMap(attributeKey, attributeValue))
+                    .withTags(Set.of("some","new","tag"))
+                    .build();
+            assertThat(event.equals(newEvent), equalTo(false));
         }
 
         @Test

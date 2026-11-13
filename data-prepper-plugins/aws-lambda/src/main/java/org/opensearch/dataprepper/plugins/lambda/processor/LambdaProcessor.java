@@ -1,0 +1,438 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.dataprepper.plugins.lambda.processor;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.annotations.VisibleForTesting;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Timer;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
+import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
+
+import org.opensearch.dataprepper.metrics.PluginMetrics;
+import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
+import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
+import org.opensearch.dataprepper.model.breaker.CircuitBreaker;
+import org.opensearch.dataprepper.model.codec.InputCodec;
+import org.opensearch.dataprepper.model.configuration.PluginModel;
+import org.opensearch.dataprepper.model.configuration.PluginSetting;
+import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventMetadata;
+import org.opensearch.dataprepper.model.plugin.PluginFactory;
+import org.opensearch.dataprepper.model.processor.AbstractProcessor;
+import org.opensearch.dataprepper.model.processor.Processor;
+import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.plugins.codec.json.JsonOutputCodecConfig;
+
+import org.opensearch.dataprepper.plugins.lambda.common.ResponseEventHandlingStrategy;
+import org.opensearch.dataprepper.plugins.lambda.common.accumlator.Buffer;
+import org.opensearch.dataprepper.plugins.lambda.common.client.LambdaClientFactory;
+import org.opensearch.dataprepper.plugins.lambda.common.config.ClientOptions;
+import org.opensearch.dataprepper.plugins.lambda.common.config.InvocationType;
+import org.opensearch.dataprepper.plugins.lambda.common.config.ResponseHandling;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.services.lambda.LambdaAsyncClient;
+import software.amazon.awssdk.services.lambda.model.InvokeResponse;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Weigher;
+
+
+@DataPrepperPlugin(name = "aws_lambda", pluginType = Processor.class, pluginConfigurationType = LambdaProcessorConfig.class)
+public class LambdaProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
+    private static final ObjectMapper OBJECT_MAPPER =  new ObjectMapper();
+
+    public static final String NUMBER_OF_RECORDS_FLUSHED_TO_LAMBDA_SUCCESS = "recordsSuccessfullySentToLambda";
+    public static final String NUMBER_OF_RECORDS_FLUSHED_TO_LAMBDA_FAILED = "recordsFailedToSentLambda";
+    public static final String NUMBER_OF_SUCCESSFUL_REQUESTS_TO_LAMBDA = "numberOfRequestsSucceeded";
+    public static final String NUMBER_OF_FAILED_REQUESTS_TO_LAMBDA = "numberOfRequestsFailed";
+
+    public static final String NUMBER_OF_CACHE_ENTRIES = "numberOfCacheEntries";
+
+    public static final String CACHE_HIT_COUNT = "cacheHitCount";
+
+    public static final String CACHE_EVICTION_COUNT = "cacheEvictionCount";
+    public static final String LAMBDA_LATENCY_METRIC = "lambdaFunctionLatency";
+    public static final String REQUEST_PAYLOAD_SIZE = "requestPayloadSize";
+    public static final String RESPONSE_PAYLOAD_SIZE = "responsePayloadSize";
+    public static final String LAMBDA_RESPONSE_RECORDS_COUNTER = "lambdaResponseRecordsCounter";
+    public static final String RECORDS_EXCEEDING_THRESHOLD = "recordsExceedingThreshold";
+    public static final String CIRCUIT_BREAKER_TRIPS = "circuitBreakerTrips";
+    private static final byte[] NO_RETURN_RESPONSE = "null".getBytes(StandardCharsets.UTF_8);
+    private static final String EXCEEDING_PAYLOAD_LIMIT_EXCEPTION = "Status Code: 413";
+
+    private static final Logger LOG = LoggerFactory.getLogger(LambdaProcessor.class);
+    final PluginSetting codecPluginSetting;
+    final PluginFactory pluginFactory;
+    final LambdaProcessorConfig lambdaProcessorConfig;
+    private final String whenCondition;
+    private final ExpressionEvaluator expressionEvaluator;
+    final Counter numberOfRecordsSuccessCounter;
+    final Counter numberOfRecordsFailedCounter;
+    final Counter numberOfRequestsSuccessCounter;
+    final Counter numberOfRequestsFailedCounter;
+    final Counter lambdaResponseRecordsCounter;
+    final Counter batchExceedingThresholdCounter;
+    final Timer lambdaLatencyMetric;
+    private final List<String> tagsOnFailure;
+    final LambdaAsyncClient lambdaAsyncClient;
+    final DistributionSummary requestPayloadMetric;
+    final DistributionSummary responsePayloadMetric;
+    private final ResponseEventHandlingStrategy responseStrategy;
+    private final JsonOutputCodecConfig jsonOutputCodecConfig;
+    private final CircuitBreaker circuitBreaker;
+    private final Cache<LambdaCacheKey, Event> cache;
+
+    private final LambdaProcessorConfig.CacheConfig cacheConfig;
+
+    private LambdaResponseMode responseMode;
+    
+    // Reusable codec instance to avoid per-invocation creation overhead
+    private final InputCodec responseCodec;
+    
+    // Strategy pattern for Lambda invocation (streaming vs synchronous)
+    private final LambdaInvoker lambdaInvoker;
+
+    @DataPrepperPluginConstructor
+    public LambdaProcessor(final PluginFactory pluginFactory, final PluginSetting pluginSetting,
+                           final LambdaProcessorConfig lambdaProcessorConfig,
+                           final AwsCredentialsSupplier awsCredentialsSupplier,
+                           final ExpressionEvaluator expressionEvaluator,
+                           final CircuitBreaker circuitBreaker) {
+        super(
+                PluginMetrics.fromPluginSetting(pluginSetting, pluginSetting.getName() + "_processor"));
+
+        this.expressionEvaluator = expressionEvaluator;
+        this.pluginFactory = pluginFactory;
+        this.lambdaProcessorConfig = lambdaProcessorConfig;
+        //Mostly used with HeapCircuitBreaker
+        this.circuitBreaker = circuitBreaker;
+        this.numberOfRecordsSuccessCounter = pluginMetrics.counter(
+                NUMBER_OF_RECORDS_FLUSHED_TO_LAMBDA_SUCCESS);
+        this.numberOfRecordsFailedCounter = pluginMetrics.counter(
+                NUMBER_OF_RECORDS_FLUSHED_TO_LAMBDA_FAILED);
+        this.numberOfRequestsSuccessCounter = pluginMetrics.counter(
+                NUMBER_OF_SUCCESSFUL_REQUESTS_TO_LAMBDA);
+        this.numberOfRequestsFailedCounter = pluginMetrics.counter(
+                NUMBER_OF_FAILED_REQUESTS_TO_LAMBDA);
+
+        this.lambdaLatencyMetric = pluginMetrics.timer(LAMBDA_LATENCY_METRIC);
+        this.requestPayloadMetric = pluginMetrics.summary(REQUEST_PAYLOAD_SIZE);
+        this.responsePayloadMetric = pluginMetrics.summary(RESPONSE_PAYLOAD_SIZE);
+        this.lambdaResponseRecordsCounter = pluginMetrics.counter(LAMBDA_RESPONSE_RECORDS_COUNTER);
+        this.batchExceedingThresholdCounter = pluginMetrics.counter(RECORDS_EXCEEDING_THRESHOLD);
+
+        this.whenCondition = lambdaProcessorConfig.getWhenCondition();
+        this.tagsOnFailure = lambdaProcessorConfig.getTagsOnFailure();
+
+        this.cacheConfig = lambdaProcessorConfig.getCacheConfig();
+        if (cacheConfig != null) {
+            cache = createCache(lambdaProcessorConfig.getCacheConfig());
+
+            pluginMetrics.gauge(NUMBER_OF_CACHE_ENTRIES, cache, c -> (double)c.estimatedSize());
+            pluginMetrics.gauge(CACHE_HIT_COUNT, cache, c -> (double)c.stats().hitCount());
+            pluginMetrics.gauge(CACHE_EVICTION_COUNT, cache, c ->(double) c.stats().evictionCount());
+
+            responseMode = LambdaResponseMode.MERGE;
+        } else {
+            cache = null;
+            responseMode = lambdaProcessorConfig.getResponseMode();
+        }
+
+
+        PluginModel responseCodecConfig = lambdaProcessorConfig.getResponseCodecConfig();
+
+        if (responseCodecConfig == null) {
+            // Default to JsonInputCodec with default settings
+            codecPluginSetting = new PluginSetting("json", Collections.emptyMap());
+        } else {
+            codecPluginSetting = new PluginSetting(responseCodecConfig.getPluginName(),
+                    responseCodecConfig.getPluginSettings());
+        }
+
+        jsonOutputCodecConfig = new JsonOutputCodecConfig();
+        jsonOutputCodecConfig.setKeyName(lambdaProcessorConfig.getBatchOptions().getKeyName());
+
+        ClientOptions clientOptions = lambdaProcessorConfig.getClientOptions();
+        if (clientOptions == null) {
+            clientOptions = new ClientOptions();
+        }
+        lambdaAsyncClient = LambdaClientFactory.createAsyncLambdaClient(
+                lambdaProcessorConfig.getAwsAuthenticationOptions(),
+                awsCredentialsSupplier,
+                clientOptions
+        );
+
+
+        // Select the correct strategy based on the configuration
+        if (lambdaProcessorConfig.getResponseEventsMatch()) {
+            this.responseStrategy = new StrictResponseEventHandlingStrategy();
+        } else {
+            this.responseStrategy = new AggregateResponseEventHandlingStrategy();
+        }
+
+        // Initialize response codec once to avoid per-invocation overhead
+        this.responseCodec = pluginFactory.loadPlugin(InputCodec.class, codecPluginSetting);
+        
+        // Validate reconstruct-document configuration
+        if (lambdaProcessorConfig.getStreamingOptions() != null &&
+            lambdaProcessorConfig.getStreamingOptions().getResponseHandling() == ResponseHandling.RECONSTRUCT_DOCUMENT) {
+            
+            int eventCount = lambdaProcessorConfig.getBatchOptions().getThresholdOptions().getEventCount();
+            if (eventCount > 1) {
+                String errorMessage = String.format(
+                    "Invalid configuration: When using streaming with response_handling: 'reconstruct-document', " +
+                    "batch.threshold.event_count must be set to 1. Multi-event batching with reconstruct-document " +
+                    "is not currently supported. Current event_count value: %d.",
+                    eventCount
+                );
+                LOG.error(errorMessage);
+                throw new IllegalArgumentException(errorMessage);
+            }
+        }
+        
+        // Initialize appropriate Lambda invoker based on configuration (Strategy Pattern)
+        if (lambdaProcessorConfig.getStreamingOptions() != null && 
+            lambdaProcessorConfig.getStreamingOptions().isEnabled() &&
+            lambdaProcessorConfig.getInvocationType() == InvocationType.STREAMING_RESPONSE) {
+            this.lambdaInvoker = new StreamingLambdaInvoker(
+                    lambdaProcessorConfig,
+                    lambdaAsyncClient,
+                    responseCodec,
+                    this);
+        } else {
+            this.lambdaInvoker = new SyncLambdaInvoker(
+                    lambdaProcessorConfig,
+                    lambdaAsyncClient,
+                    responseCodec,
+                    this);
+        }
+    }
+
+    private Cache<LambdaCacheKey, Event> createCache(LambdaProcessorConfig.CacheConfig cacheConfig) {
+        return Caffeine.newBuilder()
+                .maximumWeight(cacheConfig.getMaxSize())
+                .weigher(new Weigher<LambdaCacheKey, Event>() {
+                    @Override
+                    public int weigh(LambdaCacheKey key, Event value) {
+                        // The weight is the length of the string value
+                        return key.length() + value.toJsonString().length();
+                    }
+                })
+                .expireAfterWrite(cacheConfig.getTtl(), TimeUnit.SECONDS)
+                .recordStats()
+                .build();
+    }
+
+    @VisibleForTesting
+    long getCacheEntries() {
+        synchronized (cache) {
+            cache.cleanUp();
+            return cache.estimatedSize();
+        }
+    }
+
+    @VisibleForTesting
+    long getCacheHitCount() {
+        synchronized (cache) {
+            cache.cleanUp();
+            return cache.stats().hitCount();
+        }
+    }
+
+    @VisibleForTesting
+    long getCacheEvictionCount() {
+        synchronized (cache) {
+            cache.cleanUp();
+            return cache.stats().evictionCount();
+        }
+    }
+
+    @VisibleForTesting
+    long getCacheMissCount() {
+        synchronized (cache) {
+            cache.cleanUp();
+            return cache.stats().missCount();
+        }
+    }
+    private Event getFromCache(final Event event) {
+        LambdaCacheKey cacheKey = new LambdaCacheKey(event, lambdaProcessorConfig.getKeys());
+        return cache.getIfPresent(cacheKey);
+    }
+
+    private void putInCache(final Event originalEvent, final Event responseEvent) {
+        LambdaCacheKey cacheKey = new LambdaCacheKey(originalEvent, lambdaProcessorConfig.getKeys());
+        cache.put(cacheKey, responseEvent);
+    }
+
+    @Override
+    public Collection<Record<Event>> doExecute(Collection<Record<Event>> records) {
+        if (records.isEmpty()) {
+            return records;
+        }
+
+        List<Record<Event>> resultRecords = new ArrayList<>();
+        List<Record<Event>> recordsToLambda = new ArrayList<>();
+        for (Record<Event> record : records) {
+            final Event event = record.getData();
+            // If the condition is false, add the event to resultRecords as-is
+            if (whenCondition != null && !expressionEvaluator.evaluateConditional(whenCondition,
+                    event)) {
+                resultRecords.add(record);
+                continue;
+            }
+            if (cacheConfig != null) {
+                List<Object> valuesToFindInCache = new ArrayList<>();
+                Event cachedValue = getFromCache(event);
+                if (cachedValue != null) {
+                    record.getData().merge(cachedValue);
+                    resultRecords.add(record);
+                    continue;
+                }
+            }
+
+            recordsToLambda.add(record);
+        }
+
+        if (recordsToLambda.size() == 0) {
+            return resultRecords;
+        }
+        
+        // Check if circuit breaker is open - if so, wait until it closes
+        try {
+            checkCircuitBreaker();
+        } catch (Exception e) {
+            LOG.error(NOISY, "Circuit breaker check failed", e);
+            numberOfRecordsFailedCounter.increment(recordsToLambda.size());
+            numberOfRequestsFailedCounter.increment();
+            resultRecords.addAll(addFailureTags(recordsToLambda));
+            return resultRecords;
+        }
+        
+        // Use the strategy pattern - invoker handles streaming vs sync logic
+        return lambdaInvoker.invoke(recordsToLambda, resultRecords);
+    }
+
+    private void checkCircuitBreaker() {
+        if (circuitBreaker != null && circuitBreaker.isOpen()) {
+            LOG.warn("Circuit breaker is open. Will wait up to {} retries with {}ms interval before proceeding.",
+                    lambdaProcessorConfig.getCircuitBreakerRetries(),
+                    lambdaProcessorConfig.getCircuitBreakerWaitInterval());
+
+            // Wait until the circuit breaker is closed
+            int retries = 0;
+            while (circuitBreaker.isOpen() && retries < lambdaProcessorConfig.getCircuitBreakerRetries()) {
+                try {
+                    LOG.warn(NOISY, "Circuit breaker is open," +
+                            "Retry count: {}/{}", retries + 1, lambdaProcessorConfig.getCircuitBreakerRetries());
+                    // Sleep for a short time before checking again
+                    Thread.sleep(lambdaProcessorConfig.getCircuitBreakerWaitInterval());
+                    retries++;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    LOG.warn("Interrupted while waiting for circuit breaker to close", e);
+                    break;
+                }
+            }
+            if (circuitBreaker.isOpen()) {
+                LOG.warn("Proceeding with Lambda invocation after {} retries, even though circuit breaker is still open. " +
+                        "This may lead to increased memory pressure.", retries);
+            } else {
+                LOG.info("Circuit breaker closed after {} retries. Resuming Lambda invocation.", retries);
+            }
+        }
+    }
+
+    /*
+     * Assumption: Lambda always returns json array.
+     * 1. If response has an array, we assume that we split the individual events.
+     * 2. If it is not an array, then create one event per response.
+     */
+    public List<Record<Event>> convertLambdaResponseToEvent(Buffer flushedBuffer,
+                                                             final InvokeResponse lambdaResponse) throws IOException {
+        // Use the reusable response codec instance created during construction
+        List<Record<Event>> originalRecords = flushedBuffer.getRecords();
+
+        List<Event> parsedEvents = new ArrayList<>();
+
+        SdkBytes payload = lambdaResponse.payload();
+        // Considering "null" payload as empty response from lambda and not parsing it.
+        if (!(Arrays.equals(NO_RETURN_RESPONSE, payload.asByteArrayUnsafe()))) {
+            //Convert using response codec
+            InputStream inputStream = payload.asInputStream();
+            responseCodec.parse(inputStream, record -> {
+                Event event = record.getData();
+                parsedEvents.add(event);
+            });
+        }
+        LOG.debug("Parsed Event Size:{}, FlushedBuffer eventCount:{}, " +
+                        "FlushedBuffer size:{}", parsedEvents.size(), flushedBuffer.getEventCount(),
+                flushedBuffer.getSize());
+        lambdaResponseRecordsCounter.increment(parsedEvents.size());
+        return responseStrategy.handleEvents(parsedEvents, originalRecords, (originalEvent, responseEvent) -> {
+
+            if (cacheConfig != null) {
+                putInCache(originalEvent, responseEvent);
+            } else if (responseMode == LambdaResponseMode.REPLACE) {
+                originalEvent.clear();
+            }
+            originalEvent.merge(responseEvent);
+        });
+
+    }
+
+    /*
+     * If one event in the Buffer fails, we consider that the entire
+     * Batch fails and tag each event in that Batch.
+     */
+    List<Record<Event>> addFailureTags(List<Record<Event>> records) {
+        if (tagsOnFailure == null || tagsOnFailure.isEmpty()) {
+            return records;
+        }
+        // Add failure tags to each event in the batch
+        for (Record<Event> record : records) {
+            Event event = record.getData();
+            EventMetadata metadata = event.getMetadata();
+            if (metadata != null) {
+                metadata.addTags(tagsOnFailure);
+            } else {
+                LOG.warn("Event metadata is null, cannot add failure tags.");
+            }
+        }
+        return records;
+    }
+
+
+    @Override
+    public void prepareForShutdown() {
+    }
+
+    @Override
+    public boolean isReadyForShutdown() {
+        return true;
+    }
+
+    @Override
+    public void shutdown() {
+    }
+
+}

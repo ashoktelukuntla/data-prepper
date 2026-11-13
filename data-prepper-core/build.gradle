@@ -1,23 +1,46 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
+
+plugins {
+    id 'data-prepper.publish'
+}
+
+def dataPrepperVersion = version
+def generatedSourcesDir = "${project.buildDir}/generated/sources/version/java"
 
 sourceSets {
     main {
+        java {
+            srcDirs += generatedSourcesDir
+        }
         resources {
             srcDirs += "../shared-config"
         }
     }
 }
 
+group = 'org.opensearch.dataprepper.core'
+
 dependencies {
     implementation project(':data-prepper-api')
     implementation project(':data-prepper-expression')
+    implementation project(':data-prepper-event')
     implementation project(':data-prepper-plugins:blocking-buffer')
     implementation project(':data-prepper-plugins:common')
+    implementation project(':data-prepper-plugins:encryption-plugin')
     implementation project(':data-prepper-logstash-configuration')
+    implementation project(':data-prepper-pipeline-parser')
+    implementation project(':data-prepper-plugin-framework')
+    runtimeOnly project(':plugin-framework-osgi')
+    testImplementation project(':data-prepper-plugin-framework').sourceSets.test.output
     testImplementation project(':data-prepper-plugins:common').sourceSets.test.output
+    testImplementation project(':data-prepper-plugins:file-source')
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
     implementation libs.reflections.core
@@ -26,8 +49,7 @@ dependencies {
     implementation 'io.micrometer:micrometer-registry-cloudwatch2'
     implementation 'javax.ws.rs:javax.ws.rs-api:2.1.1'
     implementation 'software.amazon.awssdk:cloudwatch'
-    implementation 'org.hibernate.validator:hibernate-validator:8.0.1.Final'
-    implementation platform('org.apache.logging.log4j:log4j-bom:2.22.1')
+    implementation platform('org.apache.logging.log4j:log4j-bom:2.26.0')
     implementation 'org.apache.logging.log4j:log4j-core'
     implementation 'org.apache.logging.log4j:log4j-slf4j2-impl'
     implementation 'javax.inject:javax.inject:1'
@@ -39,7 +61,6 @@ dependencies {
         exclude group: 'commons-logging', module: 'commons-logging'
     }
     implementation 'software.amazon.cloudwatchlogs:aws-embedded-metrics:2.0.0-beta-1'
-    testImplementation 'org.apache.logging.log4j:log4j-jpl:2.22.1'
     testImplementation testLibs.spring.test
     implementation libs.armeria.core
     implementation libs.armeria.grpc
@@ -47,12 +68,13 @@ dependencies {
     implementation 'software.amazon.awssdk:acm'
     implementation 'software.amazon.awssdk:s3'
     implementation 'software.amazon.awssdk:apache-client'
-    implementation 'commons-validator:commons-validator:1.8.0'
+    implementation 'commons-validator:commons-validator:1.10.1'
     implementation 'software.amazon.awssdk:servicediscovery'
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
     testImplementation testLibs.junit.vintage
-    testImplementation testLibs.mockito.inline
     testImplementation libs.commons.lang3
+    testImplementation project(':data-prepper-test:test-event')
+    testImplementation project(':data-prepper-test:test-common')
     testImplementation project(':data-prepper-api').sourceSets.test.output
 }
 
@@ -71,6 +93,29 @@ configurations {
     integrationTestRuntime.extendsFrom testRuntime
 }
 
+task generateVersionProvider {
+    inputs.property('version', dataPrepperVersion)
+    inputs.file('src/main/java/org/opensearch/dataprepper/core/CoreVersionProvider.java.template')
+    outputs.dir(generatedSourcesDir)
+
+    doLast {
+        def outputDir = file("$generatedSourcesDir/org/opensearch/dataprepper/core")
+        outputDir.mkdirs()
+
+        def templateFile = file('src/main/java/org/opensearch/dataprepper/core/CoreVersionProvider.java.template')
+        def versionProviderFile = file("$outputDir/CoreVersionProvider.java")
+        versionProviderFile.text = templateFile.text.replace('${version}', dataPrepperVersion)
+    }
+}
+
+compileJava.dependsOn generateVersionProvider
+sourcesJar.dependsOn generateVersionProvider
+spotlessJava.mustRunAfter generateVersionProvider
+
+test {
+    systemProperty 'project.version', version
+}
+
 task integrationTest(type: Test) {
     group = 'verification'
     testClassesDirs = sourceSets.integrationTest.output.classesDirs
@@ -78,8 +123,6 @@ task integrationTest(type: Test) {
     useJUnitPlatform()
 
     classpath = sourceSets.integrationTest.runtimeClasspath
-
-    systemProperty 'log4j.configurationFile', 'src/test/resources/log4j2.properties'
 
     filter {
         includeTestsMatching '*IT'

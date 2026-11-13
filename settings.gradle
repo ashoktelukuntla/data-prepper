@@ -1,9 +1,18 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 pluginManagement {
+    // Supplies the 'org.opensearch.dataprepper.plugin' Gradle plugin, which bakes OSGi manifests
+    // into Data Prepper plugin JARs at build time. It is the only build plugin this repository adds
+    // for OSGi support; bnd is reached solely through that plugin's own runtime classpath, so no
+    // third-party build plugin is declared here.
+    includeBuild('data-prepper-gradle-plugins/osgi-plugin')
     repositories {
         mavenCentral()
         gradlePluginPortal()
@@ -30,50 +39,63 @@ dependencyResolutionManagement {
         libs {
             version('slf4j', '2.0.6')
             library('slf4j-api', 'org.slf4j', 'slf4j-api').versionRef('slf4j')
-            version('armeria', '1.26.4')
+            version('armeria', '1.32.6')
             library('armeria-core', 'com.linecorp.armeria', 'armeria').versionRef('armeria')
             library('armeria-grpc', 'com.linecorp.armeria', 'armeria-grpc').versionRef('armeria')
             library('armeria-junit', 'com.linecorp.armeria', 'armeria-junit5').versionRef('armeria')
-            version('grpc', '1.58.0')
+            version('grpc', '1.70.0')
             library('grpc-inprocess', 'io.grpc', 'grpc-inprocess').versionRef('grpc')
-            version('protobuf', '3.24.3')
+            version('protobuf', '3.25.5')
             library('protobuf-core', 'com.google.protobuf', 'protobuf-java').versionRef('protobuf')
             library('protobuf-util', 'com.google.protobuf', 'protobuf-java-util').versionRef('protobuf')
-            version('opentelemetry', '0.16.0-alpha')
-            library('opentelemetry-proto', 'io.opentelemetry.proto', 'opentelemetry-proto').versionRef('opentelemetry')
-            version('opensearchJava', '2.8.1')
+            version('opensearchJava', '2.20.0')
             library('opensearch-java', 'org.opensearch.client', 'opensearch-java').versionRef('opensearchJava')
             version('opensearch', '1.3.14')
             library('opensearch-client', 'org.opensearch.client', 'opensearch-rest-client').versionRef('opensearch')
             library('opensearch-rhlc', 'org.opensearch.client', 'opensearch-rest-high-level-client').versionRef('opensearch')
-            version('spring', '5.3.28')
+            version('spring', '5.3.39')
             library('spring-core', 'org.springframework', 'spring-core').versionRef('spring')
             library('spring-context', 'org.springframework', 'spring-context').versionRef('spring')
-            version('bouncycastle', '1.76')
+            library('spring-web', 'org.springframework', 'spring-web').versionRef('spring')
+            version('bouncycastle', '1.85')
             library('bouncycastle-bcprov', 'org.bouncycastle', 'bcprov-jdk18on').versionRef('bouncycastle')
             library('bouncycastle-bcpkix', 'org.bouncycastle', 'bcpkix-jdk18on').versionRef('bouncycastle')
             version('guava', '32.1.2-jre')
             library('guava-core', 'com.google.guava', 'guava').versionRef('guava')
-            version('reflections', '0.9.12')
+            version('reflections', '0.10.2')
             library('reflections-core', 'org.reflections', 'reflections').versionRef('reflections')
-            library('commons-lang3', 'org.apache.commons', 'commons-lang3').version('3.14.0')
+            library('commons-lang3', 'org.apache.commons', 'commons-lang3').version('3.18.0')
             library('commons-io', 'commons-io', 'commons-io').version('2.15.1')
             library('commons-codec', 'commons-codec', 'commons-codec').version('1.16.0')
             library('commons-compress', 'org.apache.commons', 'commons-compress').version('1.24.0')
-            version('hadoop', '3.3.6')
+            library('hibernate-validator', 'org.hibernate.validator', 'hibernate-validator').version('8.0.0.Final')
+            version('parquet', '1.15.2')
+            library('parquet-common', 'org.apache.parquet', 'parquet-common').versionRef('parquet')
+            library('parquet-avro', 'org.apache.parquet', 'parquet-avro').versionRef('parquet')
+            library('parquet-column', 'org.apache.parquet', 'parquet-column').versionRef('parquet')
+            library('parquet-hadoop', 'org.apache.parquet', 'parquet-hadoop').versionRef('parquet')
+            version('hadoop', '3.4.0')
             library('hadoop-common', 'org.apache.hadoop', 'hadoop-common').versionRef('hadoop')
             library('hadoop-mapreduce', 'org.apache.hadoop', 'hadoop-mapreduce-client-core').versionRef('hadoop')
-            version('avro', '1.11.3')
+            version('avro', '1.11.4')
             library('avro-core', 'org.apache.avro', 'avro').versionRef('avro')
+            library('caffeine', 'com.github.ben-manes.caffeine', 'caffeine').version('3.1.8')
+            library('lz4', 'org.lz4', 'lz4-java').version('1.8.0')
+            // Apache Felix is an Apache Software Foundation project (Apache-2.0). 7.0.5 is the latest
+            // published release of the framework and is pinned exactly — never a range — so the
+            // resolved artifact is reproducible. Only plugin-framework-osgi depends on it, and only
+            // when -Ddata-prepper.plugin.framework=osgi actually starts a framework.
+            version('felix', '7.0.5')
+            library('felix-framework', 'org.apache.felix', 'org.apache.felix.framework').versionRef('felix')
         }
         testLibs {
             version('junit', '5.8.2')
-            version('mockito', '3.11.2')
+            version('mockito', '5.12.0')
             version('hamcrest', '2.2')
             version('awaitility', '4.2.0')
             version('spring', '5.3.28')
             version('slf4j', '2.0.6')
-            version('hadoop', '3.3.6')
+            version('assertj', '3.27.3')
             library('junit-core', 'org.junit.jupiter', 'junit-jupiter').versionRef('junit')
             library('junit-params', 'org.junit.jupiter', 'junit-jupiter-params').versionRef('junit')
             library('junit-engine', 'org.junit.jupiter', 'junit-jupiter-engine').versionRef('junit')
@@ -87,19 +109,33 @@ dependencyResolutionManagement {
             library('awaitility', 'org.awaitility', 'awaitility').versionRef('awaitility')
             library('spring-test', 'org.springframework', 'spring-test').versionRef('spring')
             library('slf4j-simple', 'org.slf4j', 'slf4j-simple').versionRef('slf4j')
-            library('hadoop-common', 'org.apache.hadoop', 'hadoop-common').versionRef('hadoop')
+            library('assertj', 'org.assertj', 'assertj-core').versionRef('assertj')
         }
     }
 }
 
 include 'data-prepper-api'
 include 'data-prepper-plugins'
+include 'data-prepper-event'
+include 'data-prepper-test:test-common'
+include 'data-prepper-test:test-event'
+include 'data-prepper-test:plugin-test-framework'
+include 'data-prepper-test:test-data-prepper-version'
 include 'data-prepper-core'
 include 'data-prepper-main'
+include 'data-prepper-pipeline-parser'
+include 'data-prepper-plugin-framework'
+include 'data-prepper-plugin-schema-cli'
+include 'plugin-framework-osgi'
+// osgi-plugin is included via pluginManagement { includeBuild } for plugin resolution
+// include 'data-prepper-gradle-plugins:osgi-plugin'
 include 'data-prepper-plugins:common'
 include 'data-prepper-plugins:armeria-common'
 include 'data-prepper-plugins:anomaly-detector-processor'
+include 'data-prepper-plugins:detect-format-processor'
 include 'data-prepper-plugins:opensearch'
+include 'data-prepper-plugins:opensearch-pull-kafka'
+include 'data-prepper-plugins:ocsf'
 include 'data-prepper-plugins:service-map-stateful'
 include 'data-prepper-plugins:mapdb-processor-state'
 include 'data-prepper-plugins:otel-proto-common'
@@ -109,21 +145,22 @@ include 'data-prepper-plugins:otel-trace-source'
 include 'data-prepper-plugins:otel-metrics-source'
 include 'data-prepper-plugins:otel-metrics-raw-processor'
 include 'data-prepper-plugins:otel-logs-source'
+include 'data-prepper-plugins:otlp-source'
 include 'data-prepper-plugins:blocking-buffer'
 include 'data-prepper-plugins:http-source'
 include 'data-prepper-plugins:drop-events-processor'
+include 'data-prepper-plugins:event-json-codecs'
 include 'data-prepper-plugins:key-value-processor'
-include 'data-prepper-plugins:type-conversion-processor'
 include 'data-prepper-plugins:mutate-event-processors'
 include 'data-prepper-plugins:geoip-processor'
 include 'data-prepper-plugins:grok-processor'
 include 'data-prepper-plugins:aggregate-processor'
 include 'data-prepper-plugins:log-generator-source'
+include 'data-prepper-plugins:write-json-processor'
 include 'data-prepper-logstash-configuration'
 include 'e2e-test'
 include 'e2e-test:trace'
 include 'e2e-test:log'
-include 'data-prepper-test-common'
 include 'performance-test'
 include 'data-prepper-plugins:date-processor'
 include 'data-prepper-expression'
@@ -137,6 +174,7 @@ include 'data-prepper-plugins:trace-peer-forwarder-processor'
 include 'data-prepper-plugins:translate-processor'
 include 'data-prepper-plugins:truncate-processor'
 include 'data-prepper-plugins:dynamodb-source-coordination-store'
+include 'data-prepper-plugins:jdbc-source-coordination-store'
 include 'release'
 include 'release:archives'
 include 'release:archives:linux'
@@ -145,6 +183,7 @@ include 'release:maven'
 include 'e2e-test:peerforwarder'
 include 'data-prepper-plugins:failures-common'
 include 'data-prepper-plugins:newline-codecs'
+include 'data-prepper-plugins:multiline-codecs'
 include 'data-prepper-plugins:avro-codecs'
 include 'data-prepper-plugins:kafka-plugins'
 include 'data-prepper-plugins:user-agent-processor'
@@ -155,14 +194,48 @@ include 'data-prepper-plugins:obfuscate-processor'
 include 'data-prepper-plugins:parquet-codecs'
 include 'data-prepper-plugins:aws-sqs-common'
 include 'data-prepper-plugins:buffer-common'
-//include 'data-prepper-plugins:sqs-source'
-//include 'data-prepper-plugins:cloudwatch-logs'
-//include 'data-prepper-plugins:http-sink'
+include 'data-prepper-plugins:sqs-source'
+include 'data-prepper-plugins:sqs-common'
+include 'data-prepper-plugins:cloudwatch-logs'
+include 'data-prepper-plugins:sqs-sink'
+include 'data-prepper-plugins:http-sink'
 //include 'data-prepper-plugins:sns-sink'
-//include 'data-prepper-plugins:prometheus-sink'
+include 'data-prepper-plugins:prometheus-sink'
+include 'data-prepper-plugins:prometheus-source'
+include 'data-prepper-plugins:personalize-sink'
 include 'data-prepper-plugins:dissect-processor'
 include 'data-prepper-plugins:dynamodb-source'
 include 'data-prepper-plugins:decompress-processor'
 include 'data-prepper-plugins:split-event-processor'
-include 'data-prepper-plugins:http-common'
+include 'data-prepper-plugins:file-source'
 include 'data-prepper-plugins:flatten-processor'
+include 'data-prepper-plugins:mongodb'
+include 'data-prepper-plugins:rds-source'
+include 'data-prepper-plugins:iceberg-source'
+include 'data-prepper-plugins:http-source-common'
+include 'data-prepper-plugins:http-common'
+include 'data-prepper-plugins:http-client-common'
+include 'data-prepper-plugins:aws-lambda'
+include 'data-prepper-plugins:ml-inference-processor'
+include 'data-prepper-plugins:s3-common'
+include 'data-prepper-plugins:s3-enrich-processor'
+//include 'data-prepper-plugins:dummy-plugin'
+include 'data-prepper-plugin-schema'
+include 'data-prepper-plugins:kinesis-source'
+include 'data-prepper-plugins:opensearch-api-source'
+include 'data-prepper-plugins:splunk-hec-source'
+include 'data-prepper-plugins:saas-source-plugins'
+include 'data-prepper-plugins:saas-source-plugins:source-crawler'
+include 'data-prepper-plugins:saas-source-plugins:jira-source'
+include 'data-prepper-plugins:encryption-plugin'
+include 'data-prepper-plugins:saas-source-plugins:confluence-source'
+include 'data-prepper-plugins:saas-source-plugins:atlassian-commons'
+include 'data-prepper-plugins:saas-source-plugins:crowdstrike-source'
+include 'data-prepper-plugins:saas-source-plugins:microsoft-office365-source'
+include 'data-prepper-plugins:otlp-sink'
+include 'data-prepper-plugins:otel-apm-service-map-processor'
+include 'data-prepper-plugins:rate-limiter-processor'
+include 'data-prepper-test:osgi-test-plugin'
+
+
+include 'e2e-test:kafka-buffer-backward-compatibility'

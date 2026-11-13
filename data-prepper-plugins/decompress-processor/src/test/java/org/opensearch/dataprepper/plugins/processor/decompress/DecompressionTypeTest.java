@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.decompress;
@@ -32,6 +36,12 @@ public class DecompressionTypeTest {
     @ArgumentsSource(EnumToDecompressionEngineClassArgumentsProvider.class)
     void getDecompressionEngine_returns_expected_DecompressionEngine(final DecompressionType enumValue, final Class<DecompressionEngine> decompressionEngineClass) {
         assertThat(enumValue.getDecompressionEngine(), instanceOf(decompressionEngineClass));
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(EnumToStringNameArgumentsProvider.class)
+    void getOptionValue_returns_data_type_name(final DecompressionType decompressionType, final String optionValue) {
+        assertThat(decompressionType.getOptionValue(), equalTo(optionValue));
     }
 
     private static class EnumToStringNameArgumentsProvider implements ArgumentsProvider {

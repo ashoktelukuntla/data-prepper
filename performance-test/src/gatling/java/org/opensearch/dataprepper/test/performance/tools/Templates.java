@@ -1,33 +1,77 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.test.performance.tools;
 
 import io.gatling.javaapi.core.Session;
+import org.opensearch.dataprepper.test.data.generation.IpAddress;
+import org.opensearch.dataprepper.test.data.generation.UserAgent;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public final class Templates {
     private static final String APACHE_COMMON_LOG_DATETIME_PATTERN = "dd/LLL/uuuu:HH:mm:ss";
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern(APACHE_COMMON_LOG_DATETIME_PATTERN);
+
+    private static final Random RANDOM = new Random();
+    private static final List<String> HTTP_METHODS = List.of("GET", "HEAD", "PUT", "POST");
+    private static final List<String> HTTP_STATUS_CODES = List.of("200", "201", "400", "401", "403", "404", "500");
+
 
     public static String now() {
         return FORMATTER.format(LocalDateTime.now()) + " -0700";
     }
     
     public static Function<Session, String> apacheCommonLogTemplate(final int batchSize) {
-        return session -> {
-            final String log = "{\"log\": \"127.0.0.1 - frank [" + now() + "] \\\"GET /apache_pb.gif HTTP/1.0\\\" 200 2326\"}";
-            final List<String> logs = Collections.nCopies(batchSize, log);
-            final String logArray = String.join(",", logs);
-            return "[" + logArray + "]";
-        };
+        return generateLogArray(batchSize,
+                () -> ipAddress() + " - frank [" + now() + "] \\\"" + httpMethod() + " /apache_pb.gif HTTP/1.0\\\" "+ statusCode() + " " + responseSize());
+    }
+
+    public static Function<Session, String> userAgent(final int batchSize) {
+        return generateLogArray(batchSize, () -> userAgent());
+    }
+
+    private static Function<Session, String> generateLogArray(final int batchSize, final Supplier<String> stringSupplier) {
+        return session -> IntStream.range(0, batchSize)
+                .mapToObj(i -> "{\"log\": \"" + stringSupplier.get() + "\"}")
+                .collect(Collectors.joining(",", "[", "]"));
+    }
+
+    private static String ipAddress() {
+        return IpAddress.getInstance().ipAddress();
+    }
+
+    private static String userAgent() {
+        return UserAgent.getInstance().userAgent();
+    }
+
+    private static String httpMethod() {
+        return randomFromList(HTTP_METHODS);
+    }
+
+    private static String statusCode() {
+        return randomFromList(HTTP_STATUS_CODES);
+    }
+
+    private static int responseSize() {
+        return RANDOM.nextInt(2900) + 100;
+    }
+
+    private static <T> T randomFromList(final List<T> list) {
+        return list.get(RANDOM.nextInt(list.size()));
     }
 
     private Templates() {

@@ -8,7 +8,9 @@ package org.opensearch.dataprepper.plugins.source.dynamodb;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
@@ -16,16 +18,31 @@ import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.source.coordinator.enhanced.EnhancedSourceCoordinator;
+import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.StreamConfig;
 import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.TableConfig;
+import org.opensearch.dataprepper.plugins.source.dynamodb.leader.LeaderScheduler;
+import org.opensearch.dataprepper.plugins.source.dynamodb.stream.StreamScheduler;
+import org.opensearch.dataprepper.plugins.source.dynamodb.utils.BackoffCalculator;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.s3.S3Client;
 
+import java.lang.reflect.Field;
+import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
+import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class DynamoDBServiceTest {
@@ -52,6 +69,9 @@ class DynamoDBServiceTest {
     private TableConfig tableConfig;
 
     @Mock
+    private StreamConfig streamConfig;
+
+    @Mock
     private PluginMetrics pluginMetrics;
 
     @Mock
@@ -59,6 +79,9 @@ class DynamoDBServiceTest {
 
     @Mock
     private AcknowledgementSetManager acknowledgementSetManager;
+
+    @Mock
+    private ExecutorService executorService;
 
     private DynamoDBService dynamoDBService;
 
@@ -73,16 +96,99 @@ class DynamoDBServiceTest {
     }
 
     private DynamoDBService createObjectUnderTest() {
-        DynamoDBService objectUnderTest = new DynamoDBService(coordinator, clientFactory, sourceConfig, pluginMetrics, acknowledgementSetManager);
-        return objectUnderTest;
+
+        try (final MockedStatic<Executors> executorsMockedStatic = mockStatic(Executors.class)) {
+            executorsMockedStatic.when(() -> Executors.newFixedThreadPool(eq(4))).thenReturn(executorService);
+
+            return new DynamoDBService(coordinator, clientFactory, sourceConfig, pluginMetrics, acknowledgementSetManager);
+        }
     }
 
     @Test
-    void test_normal_start() {
+    void test_normal_start_with_stream_config() {
+        when(tableConfig.getStreamConfig()).thenReturn(streamConfig);
         dynamoDBService = createObjectUnderTest();
         assertThat(dynamoDBService, notNullValue());
+
+        final ArgumentCaptor<Runnable> runnableArgumentCaptor = ArgumentCaptor.forClass(Runnable.class);
+
         dynamoDBService.start(buffer);
 
+        verify(executorService, times(4)).submit(runnableArgumentCaptor.capture());
+
+        assertThat(runnableArgumentCaptor.getAllValues(), notNullValue());
+        assertThat(runnableArgumentCaptor.getAllValues().size(), equalTo(4));
+    }
+
+    @Test
+    void test_leader_scheduler_receives_configured_shard_discovery_interval() throws NoSuchFieldException, IllegalAccessException {
+        final Duration configuredInterval = Duration.ofSeconds(20);
+        when(tableConfig.getStreamConfig()).thenReturn(streamConfig);
+        when(streamConfig.getShardDiscoveryInterval()).thenReturn(configuredInterval);
+        dynamoDBService = createObjectUnderTest();
+
+        final ArgumentCaptor<Runnable> runnableArgumentCaptor = ArgumentCaptor.forClass(Runnable.class);
+        dynamoDBService.start(buffer);
+        verify(executorService, times(4)).submit(runnableArgumentCaptor.capture());
+
+        final LeaderScheduler leaderScheduler = runnableArgumentCaptor.getAllValues().stream()
+                .filter(runnable -> runnable instanceof LeaderScheduler)
+                .map(runnable -> (LeaderScheduler) runnable)
+                .findFirst()
+                .orElseThrow();
+
+        final Field leaseIntervalField = LeaderScheduler.class.getDeclaredField("leaseInterval");
+        leaseIntervalField.setAccessible(true);
+        assertThat(leaseIntervalField.get(leaderScheduler), equalTo(configuredInterval));
+    }
+
+    @Test
+    void test_stream_scheduler_receives_configured_backoff_maxes() throws NoSuchFieldException, IllegalAccessException {
+        final Duration configuredNewShardAcquisitionBackoffMax = Duration.ofSeconds(2);
+        final Duration configuredShardDistributionBackoffMax = Duration.ofSeconds(5);
+        when(tableConfig.getStreamConfig()).thenReturn(streamConfig);
+        when(streamConfig.getNewShardAcquisitionBackoffMax()).thenReturn(configuredNewShardAcquisitionBackoffMax);
+        when(streamConfig.getShardDistributionBackoffMax()).thenReturn(configuredShardDistributionBackoffMax);
+        dynamoDBService = createObjectUnderTest();
+
+        final ArgumentCaptor<Runnable> runnableArgumentCaptor = ArgumentCaptor.forClass(Runnable.class);
+        dynamoDBService.start(buffer);
+        verify(executorService, times(4)).submit(runnableArgumentCaptor.capture());
+
+        final StreamScheduler streamScheduler = runnableArgumentCaptor.getAllValues().stream()
+                .filter(runnable -> runnable instanceof StreamScheduler)
+                .map(runnable -> (StreamScheduler) runnable)
+                .findFirst()
+                .orElseThrow();
+
+        final Field backoffCalculatorField = StreamScheduler.class.getDeclaredField("backoffCalculator");
+        backoffCalculatorField.setAccessible(true);
+        final BackoffCalculator backoffCalculator = (BackoffCalculator) backoffCalculatorField.get(streamScheduler);
+
+        final Field newShardAcquisitionBackoffMaxField = BackoffCalculator.class.getDeclaredField("newShardAcquisitionBackoffMax");
+        newShardAcquisitionBackoffMaxField.setAccessible(true);
+        assertThat(newShardAcquisitionBackoffMaxField.get(backoffCalculator), equalTo(configuredNewShardAcquisitionBackoffMax));
+
+        final Field shardDistributionBackoffMaxField = BackoffCalculator.class.getDeclaredField("shardDistributionBackoffMax");
+        shardDistributionBackoffMaxField.setAccessible(true);
+        assertThat(shardDistributionBackoffMaxField.get(backoffCalculator), equalTo(configuredShardDistributionBackoffMax));
+    }
+
+    @Test
+    void test_normal_start_without_stream_config() {
+        when(tableConfig.getStreamConfig()).thenReturn(null);
+
+        dynamoDBService = createObjectUnderTest();
+        assertThat(dynamoDBService, notNullValue());
+
+        final ArgumentCaptor<Runnable> runnableArgumentCaptor = ArgumentCaptor.forClass(Runnable.class);
+
+        dynamoDBService.start(buffer);
+
+        verify(executorService, times(3)).submit(runnableArgumentCaptor.capture());
+
+        assertThat(runnableArgumentCaptor.getAllValues(), notNullValue());
+        assertThat(runnableArgumentCaptor.getAllValues().size(), equalTo(3));
     }
 
 
@@ -90,6 +196,8 @@ class DynamoDBServiceTest {
     void test_normal_shutdown() {
         dynamoDBService = createObjectUnderTest();
         assertThat(dynamoDBService, notNullValue());
+
+        when(executorService.shutdownNow()).thenReturn(Collections.emptyList());
         dynamoDBService.shutdown();
     }
 

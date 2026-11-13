@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.aws;
@@ -8,12 +12,16 @@ package org.opensearch.dataprepper.plugins.aws;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+
+import java.util.Optional;
 
 class DefaultAwsCredentialsSupplier implements AwsCredentialsSupplier {
     private final CredentialsProviderFactory credentialsProviderFactory;
     private final CredentialsCache credentialsCache;
 
-    DefaultAwsCredentialsSupplier(final CredentialsProviderFactory credentialsProviderFactory, final CredentialsCache credentialsCache) {
+    DefaultAwsCredentialsSupplier(final CredentialsProviderFactory credentialsProviderFactory,
+                                  final CredentialsCache credentialsCache) {
         this.credentialsProviderFactory = credentialsProviderFactory;
         this.credentialsCache = credentialsCache;
     }
@@ -21,5 +29,21 @@ class DefaultAwsCredentialsSupplier implements AwsCredentialsSupplier {
     @Override
     public AwsCredentialsProvider getProvider(final AwsCredentialsOptions options) {
         return credentialsCache.getOrCreate(options, () -> credentialsProviderFactory.providerFromOptions(options));
+    }
+
+    @Override
+    public AwsCredentialsProvider getProvider(final String configurationName) {
+        final AwsCredentialsOptions options = credentialsProviderFactory.resolveNamedConfiguration(configurationName);
+        return getProvider(options);
+    }
+
+    @Override
+    public Optional<Region> getDefaultRegion() {
+        return Optional.ofNullable(credentialsProviderFactory.getDefaultRegion());
+    }
+
+    @Override
+    public Optional<String> getDefaultStsRoleArn() {
+        return Optional.ofNullable(credentialsProviderFactory.getDefaultStsRoleArn());
     }
 }

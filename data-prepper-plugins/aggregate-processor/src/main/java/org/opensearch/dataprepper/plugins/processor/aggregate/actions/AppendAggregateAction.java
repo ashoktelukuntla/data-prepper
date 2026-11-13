@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
@@ -80,10 +84,14 @@ public class AppendAggregateAction implements AggregateAction {
 
     @Override
     public AggregateActionOutput concludeGroup(final AggregateActionInput aggregateActionInput) {
+        if (aggregateActionInput.getGroupState().isEmpty()) {
+            return null;
+        }
 
         final Event event = JacksonEvent.builder()
                 .withEventType(EVENT_TYPE)
                 .withData(aggregateActionInput.getGroupState())
+                .withEventHandle(aggregateActionInput.getEventHandle())
                 .build();
         return new AggregateActionOutput(List.of(event));
     }

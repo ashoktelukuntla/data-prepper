@@ -12,8 +12,6 @@ import io.micrometer.core.instrument.DistributionSummary;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.commons.io.IOUtils;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.Path;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.column.page.PageReadStore;
 import org.apache.parquet.example.data.Group;
@@ -21,8 +19,8 @@ import org.apache.parquet.example.data.simple.SimpleGroup;
 import org.apache.parquet.example.data.simple.convert.GroupRecordConverter;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
-import org.apache.parquet.hadoop.util.HadoopInputFile;
 import org.apache.parquet.io.ColumnIOFactory;
+import org.apache.parquet.io.LocalInputFile;
 import org.apache.parquet.io.MessageColumnIO;
 import org.apache.parquet.io.RecordReader;
 import org.apache.parquet.schema.MessageType;
@@ -34,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.codec.OutputCodec;
 import org.opensearch.dataprepper.model.event.DefaultEventMetadata;
@@ -54,12 +53,17 @@ import org.opensearch.dataprepper.plugins.sink.s3.accumulator.BufferFactory;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.CompressionBufferFactory;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.InMemoryBufferFactory;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.ObjectKey;
+import org.opensearch.dataprepper.plugins.sink.s3.codec.CodecFactory;
 import org.opensearch.dataprepper.plugins.sink.s3.compression.CompressionOption;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.AwsAuthenticationOptions;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.ObjectKeyOptions;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.ThresholdOptions;
+import org.opensearch.dataprepper.plugins.sink.s3.grouping.S3GroupIdentifierFactory;
+import org.opensearch.dataprepper.plugins.sink.s3.grouping.S3GroupManager;
+import org.opensearch.dataprepper.plugins.sink.s3.ownership.BucketOwnerProvider;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
@@ -73,6 +77,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -90,6 +95,7 @@ import java.util.UUID;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
@@ -99,6 +105,8 @@ class S3SinkServiceIT {
     private static final String PATH_PREFIX = UUID.randomUUID() + "/%{yyyy}/%{MM}/%{dd}/";
     private static final int numberOfRecords = 2;
     private S3Client s3Client;
+
+    private S3AsyncClient s3AsyncClient;
     private String bucketName;
     private String s3region;
     private ParquetOutputCodecConfig parquetOutputCodecConfig;
@@ -107,6 +115,9 @@ class S3SinkServiceIT {
     private static final String FILE_SUFFIX = ".parquet";
     @Mock
     private S3SinkConfig s3SinkConfig;
+
+    private S3GroupManager s3GroupManager;
+
     @Mock
     private ThresholdOptions thresholdOptions;
     @Mock
@@ -126,8 +137,17 @@ class S3SinkServiceIT {
     @Mock
     private DistributionSummary s3ObjectSizeSummary;
 
+    @Mock
+    private ExpressionEvaluator expressionEvaluator;
+
+    @Mock
+    private BucketOwnerProvider bucketOwnerProvider;
+
     private OutputCodec codec;
     private KeyGenerator keyGenerator;
+
+    @Mock
+    private CodecFactory codecFactory;
 
     @Mock
     NdjsonOutputConfig ndjsonOutputConfig;
@@ -138,6 +158,7 @@ class S3SinkServiceIT {
         s3region = System.getProperty("tests.s3sink.region");
 
         s3Client = S3Client.builder().region(Region.of(s3region)).build();
+        s3AsyncClient = S3AsyncClient.builder().region(Region.of(s3region)).build();
         bucketName = System.getProperty("tests.s3sink.bucket");
         bufferFactory = new InMemoryBufferFactory();
 
@@ -157,11 +178,18 @@ class S3SinkServiceIT {
         lenient().when(pluginMetrics.counter(S3SinkService.NUMBER_OF_RECORDS_FLUSHED_TO_S3_FAILED)).
                 thenReturn(numberOfRecordsFailedCounter);
         lenient().when(pluginMetrics.summary(S3SinkService.S3_OBJECTS_SIZE)).thenReturn(s3ObjectSizeSummary);
+
+        when(expressionEvaluator.extractDynamicExpressionsFromFormatExpression(anyString()))
+                .thenReturn(Collections.emptyList());
+        when(expressionEvaluator.extractDynamicKeysFromFormatExpression(anyString()))
+                .thenReturn(Collections.emptyList());
     }
 
     @Test
     void verify_flushed_object_count_into_s3_bucket() {
         configureNewLineCodec();
+        when(codecFactory.provideCodec()).thenReturn(codec);
+
         int s3ObjectCountBeforeIngest = gets3ObjectCount();
         S3SinkService s3SinkService = createObjectUnderTest();
         s3SinkService.output(setEventQueue());
@@ -171,12 +199,14 @@ class S3SinkServiceIT {
 
     void configureNewLineCodec() {
         codec = new NdjsonOutputCodec(ndjsonOutputConfig);
-        keyGenerator = new KeyGenerator(s3SinkConfig, StandardExtensionProvider.create(codec, CompressionOption.NONE));
+        keyGenerator = new KeyGenerator(s3SinkConfig, null, StandardExtensionProvider.create(codec, CompressionOption.NONE), expressionEvaluator);
     }
 
     @Test
     void verify_flushed_records_into_s3_bucketNewLine() throws JsonProcessingException {
         configureNewLineCodec();
+
+        when(codecFactory.provideCodec()).thenReturn(codec);
         S3SinkService s3SinkService = createObjectUnderTest();
         Collection<Record<Event>> recordsData = setEventQueue();
 
@@ -206,6 +236,8 @@ class S3SinkServiceIT {
     @Test
     void verify_flushed_records_into_s3_bucketNewLine_with_compression() throws IOException {
         configureNewLineCodec();
+        when(codecFactory.provideCodec()).thenReturn(codec);
+
         bufferFactory = new CompressionBufferFactory(bufferFactory, CompressionOption.GZIP.getCompressionEngine(), codec);
         S3SinkService s3SinkService = createObjectUnderTest();
         Collection<Record<Event>> recordsData = setEventQueue();
@@ -240,7 +272,10 @@ class S3SinkServiceIT {
 
     private S3SinkService createObjectUnderTest() {
         OutputCodecContext codecContext = new OutputCodecContext("Tag", Collections.emptyList(), Collections.emptyList());
-        return new S3SinkService(s3SinkConfig, bufferFactory, codec, codecContext, s3Client, keyGenerator, Duration.ofSeconds(5), pluginMetrics);
+        final S3GroupIdentifierFactory groupIdentifierFactory = new S3GroupIdentifierFactory(keyGenerator, expressionEvaluator, s3SinkConfig, null);
+        s3GroupManager = new S3GroupManager(s3SinkConfig, groupIdentifierFactory, bufferFactory, codecFactory, s3AsyncClient, bucketOwnerProvider);
+
+        return new S3SinkService(s3SinkConfig, codecContext, Duration.ofSeconds(5), pluginMetrics, s3GroupManager);
     }
 
     private int gets3ObjectCount() {
@@ -333,6 +368,8 @@ class S3SinkServiceIT {
     @Disabled
     void verify_flushed_records_into_s3_bucket_Parquet() throws IOException {
         configureParquetCodec();
+        when(codecFactory.provideCodec()).thenReturn(codec);
+
         S3SinkService s3SinkService = createObjectUnderTest();
         Collection<Record<Event>> recordsData = getRecordList();
 
@@ -352,7 +389,7 @@ class S3SinkServiceIT {
         parquetOutputCodecConfig = new ParquetOutputCodecConfig();
         parquetOutputCodecConfig.setSchema(parseSchema().toString());
         codec = new ParquetOutputCodec(parquetOutputCodecConfig);
-        keyGenerator = new KeyGenerator(s3SinkConfig, StandardExtensionProvider.create(codec, CompressionOption.NONE));
+        keyGenerator = new KeyGenerator(s3SinkConfig, null, StandardExtensionProvider.create(codec, CompressionOption.NONE), expressionEvaluator);
     }
 
     private Collection<Record<Event>> getRecordList() {
@@ -375,7 +412,7 @@ class S3SinkServiceIT {
         final File tempFile = File.createTempFile(FILE_NAME, FILE_SUFFIX);
         Files.copy(inputStream, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
         List<HashMap<String, Object>> actualRecordList = new ArrayList<>();
-        try (ParquetFileReader parquetFileReader = new ParquetFileReader(HadoopInputFile.fromPath(new Path(tempFile.toURI()), new Configuration()), ParquetReadOptions.builder().build())) {
+        try (final ParquetFileReader parquetFileReader = new ParquetFileReader(new LocalInputFile(Path.of(tempFile.toURI())), ParquetReadOptions.builder().build())) {
             final ParquetMetadata footer = parquetFileReader.getFooter();
             final MessageType schema = createdParquetSchema(footer);
             PageReadStore pages;

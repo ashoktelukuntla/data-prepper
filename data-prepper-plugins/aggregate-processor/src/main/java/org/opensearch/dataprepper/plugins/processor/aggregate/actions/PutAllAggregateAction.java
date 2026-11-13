@@ -1,10 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
 
+import com.fasterxml.jackson.annotation.JsonClassDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
@@ -22,7 +28,7 @@ import java.util.List;
  * most recently handled Event.
  * @since 1.3
  */
-@DataPrepperPlugin(name = "put_all", pluginType = AggregateAction.class)
+@DataPrepperPlugin(name = "put_all", pluginType = AggregateAction.class, pluginConfigurationType = PutAllAggregateAction.PutAllAggregateActionConfig.class)
 public class PutAllAggregateAction implements AggregateAction {
     static final String EVENT_TYPE = "event";
 
@@ -39,8 +45,15 @@ public class PutAllAggregateAction implements AggregateAction {
         final Event event = JacksonEvent.builder()
                 .withEventType(EVENT_TYPE)
                 .withData(aggregateActionInput.getGroupState())
+                .withEventHandle(aggregateActionInput.getEventHandle())
                 .build();
 
         return new AggregateActionOutput(List.of(event));
+    }
+
+    @JsonPropertyOrder
+    @JsonClassDescription("The <code>put_all</code> action combines events belonging to the same group by overwriting existing keys and adding new keys, similarly to the Java `Map.putAll`. " +
+            "The action drops all events that make up the combined event.")
+    static class PutAllAggregateActionConfig {
     }
 }

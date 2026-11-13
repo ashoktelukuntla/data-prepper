@@ -6,6 +6,7 @@
 package org.opensearch.dataprepper.plugins.sink.s3;
 
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
+import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.codec.OutputCodec;
@@ -25,11 +26,16 @@ import org.opensearch.dataprepper.plugins.sink.s3.accumulator.BufferTypeOptions;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.CodecBufferFactory;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.CompressionBufferFactory;
 import org.opensearch.dataprepper.plugins.sink.s3.codec.BufferedCodec;
-import org.opensearch.dataprepper.plugins.sink.s3.compression.CompressionEngine;
+import org.opensearch.dataprepper.plugins.sink.s3.codec.CodecFactory;
+import org.opensearch.dataprepper.model.codec.CompressionEngine;
 import org.opensearch.dataprepper.plugins.sink.s3.compression.CompressionOption;
+import org.opensearch.dataprepper.plugins.sink.s3.grouping.S3GroupIdentifierFactory;
+import org.opensearch.dataprepper.plugins.sink.s3.grouping.S3GroupManager;
+import org.opensearch.dataprepper.plugins.sink.s3.ownership.BucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.sink.s3.ownership.ConfigBucketOwnerProviderFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 
 import java.time.Duration;
 import java.util.Collection;
@@ -42,8 +48,9 @@ import java.util.Collection;
 public class S3Sink extends AbstractSink<Record<Event>> {
 
     private static final Logger LOG = LoggerFactory.getLogger(S3Sink.class);
+
+    private static final Duration RETRY_FLUSH_BACKOFF = Duration.ofSeconds(5);
     private final S3SinkConfig s3SinkConfig;
-    private final OutputCodec codec;
     private volatile boolean sinkInitialized;
     private final S3SinkService s3SinkService;
     private final BufferFactory bufferFactory;
@@ -53,42 +60,85 @@ public class S3Sink extends AbstractSink<Record<Event>> {
      * @param pluginSetting dp plugin settings.
      * @param s3SinkConfig  s3 sink configurations.
      * @param pluginFactory dp plugin factory.
+     * @param sinkContext sink context
+     * @param awsCredentialsSupplier aws credentials supplier
+     * @param expressionEvaluator expression evaluator
      */
     @DataPrepperPluginConstructor
     public S3Sink(final PluginSetting pluginSetting,
                   final S3SinkConfig s3SinkConfig,
                   final PluginFactory pluginFactory,
                   final SinkContext sinkContext,
-                  final AwsCredentialsSupplier awsCredentialsSupplier) {
+                  final AwsCredentialsSupplier awsCredentialsSupplier,
+                  final ExpressionEvaluator expressionEvaluator) {
         super(pluginSetting);
         this.s3SinkConfig = s3SinkConfig;
         this.sinkContext = sinkContext;
         final PluginModel codecConfiguration = s3SinkConfig.getCodec();
+        final CodecFactory codecFactory = new CodecFactory(pluginFactory, codecConfiguration);
+        final ConfigBucketOwnerProviderFactory configBucketOwnerProviderFactory = new ConfigBucketOwnerProviderFactory();
+        final BucketOwnerProvider bucketOwnerProvider = configBucketOwnerProviderFactory.createBucketOwnerProvider(s3SinkConfig);
+
         final PluginSetting codecPluginSettings = new PluginSetting(codecConfiguration.getPluginName(),
                 codecConfiguration.getPluginSettings());
-        codec = pluginFactory.loadPlugin(OutputCodec.class, codecPluginSettings);
+        final OutputCodec testCodec = pluginFactory.loadPlugin(OutputCodec.class, codecPluginSettings);
         sinkInitialized = Boolean.FALSE;
 
-        final S3Client s3Client = ClientFactory.createS3Client(s3SinkConfig, awsCredentialsSupplier);
+        final S3AsyncClient s3Client = ClientFactory.createS3AsyncClient(s3SinkConfig, awsCredentialsSupplier);
         BufferFactory innerBufferFactory = s3SinkConfig.getBufferType().getBufferFactory();
-        if(codec instanceof ParquetOutputCodec && s3SinkConfig.getBufferType() != BufferTypeOptions.INMEMORY) {
+        if(testCodec instanceof ParquetOutputCodec && s3SinkConfig.getBufferType() != BufferTypeOptions.INMEMORY) {
             throw new InvalidPluginConfigurationException("The Parquet sink codec is an in_memory buffer only.");
         }
-        if(codec instanceof BufferedCodec) {
-            innerBufferFactory = new CodecBufferFactory(innerBufferFactory, (BufferedCodec) codec);
+        if(testCodec instanceof BufferedCodec) {
+            innerBufferFactory = new CodecBufferFactory(innerBufferFactory, (BufferedCodec) testCodec);
         }
         CompressionOption compressionOption = s3SinkConfig.getCompression();
         final CompressionEngine compressionEngine = compressionOption.getCompressionEngine();
-        bufferFactory = new CompressionBufferFactory(innerBufferFactory, compressionEngine, codec);
+        bufferFactory = new CompressionBufferFactory(innerBufferFactory, compressionEngine, testCodec);
 
-        ExtensionProvider extensionProvider = StandardExtensionProvider.create(codec, compressionOption);
-        KeyGenerator keyGenerator = new KeyGenerator(s3SinkConfig, extensionProvider);
+        ExtensionProvider extensionProvider = StandardExtensionProvider.create(testCodec, compressionOption);
+        String bucketName;
+        S3BucketSelector s3BucketSelector = null;
+        if (s3SinkConfig.getBucketSelector() != null) {
+            s3BucketSelector = loadS3BucketSelector(pluginFactory);
+            s3BucketSelector.initialize(s3SinkConfig);
+            bucketName = s3BucketSelector.getBucketName();
+        } else {
+            bucketName = s3SinkConfig.getBucketName();
+        }
+
+        KeyGenerator keyGenerator = new KeyGenerator(s3SinkConfig, s3BucketSelector, extensionProvider, expressionEvaluator);
+
+        if (s3SinkConfig.getObjectKeyOptions().getPathPrefix() != null &&
+            !expressionEvaluator.isValidFormatExpression(s3SinkConfig.getObjectKeyOptions().getPathPrefix())) {
+            throw new InvalidPluginConfigurationException("path_prefix is not a valid format expression");
+        }
+
+        if (s3SinkConfig.getObjectKeyOptions().getNamePattern() != null &&
+                !expressionEvaluator.isValidFormatExpression(s3SinkConfig.getObjectKeyOptions().getNamePattern())) {
+            throw new InvalidPluginConfigurationException("name_pattern is not a valid format expression");
+        }
+
+        if (bucketName != null &&
+                !expressionEvaluator.isValidFormatExpression(bucketName)) {
+            throw new InvalidPluginConfigurationException("bucket name is not a valid format expression");
+        }
 
         S3OutputCodecContext s3OutputCodecContext = new S3OutputCodecContext(OutputCodecContext.fromSinkContext(sinkContext), compressionOption);
 
-        codec.validateAgainstCodecContext(s3OutputCodecContext);
+        testCodec.validateAgainstCodecContext(s3OutputCodecContext);
 
-        s3SinkService = new S3SinkService(s3SinkConfig, bufferFactory, codec, s3OutputCodecContext, s3Client, keyGenerator, Duration.ofSeconds(5), pluginMetrics);
+        final S3GroupIdentifierFactory s3GroupIdentifierFactory = new S3GroupIdentifierFactory(keyGenerator, expressionEvaluator, s3SinkConfig, s3BucketSelector);
+        final S3GroupManager s3GroupManager = new S3GroupManager(s3SinkConfig, s3GroupIdentifierFactory, bufferFactory, codecFactory, s3Client, bucketOwnerProvider);
+
+
+        s3SinkService = new S3SinkService(s3SinkConfig, s3OutputCodecContext, RETRY_FLUSH_BACKOFF, pluginMetrics, s3GroupManager);
+    }
+
+    private S3BucketSelector loadS3BucketSelector(PluginFactory pluginFactory) {
+        final PluginModel modeConfiguration = s3SinkConfig.getBucketSelector();
+        final PluginSetting modePluginSetting = new PluginSetting(modeConfiguration.getPluginName(), modeConfiguration.getPluginSettings());
+        return pluginFactory.loadPlugin(S3BucketSelector.class, modePluginSetting);
     }
 
     @Override
@@ -124,5 +174,24 @@ public class S3Sink extends AbstractSink<Record<Event>> {
     @Override
     public void doOutput(final Collection<Record<Event>> records) {
         s3SinkService.output(records);
+    }
+
+    /**
+     * Shutdown the S3 sink by flushing all remaining data to S3 before shutting down.
+     * This ensures no data is lost during shutdown.
+     */
+    @Override
+    public void shutdown() {
+        LOG.info("S3 sink shutdown initiated. Flushing all remaining data to S3.");
+        try {
+            // Force flush all remaining groups to S3
+            s3SinkService.flushAllRemainingGroups();
+        } catch (Exception e) {
+            LOG.error("Error occurred while flushing remaining data during shutdown", e);
+        } finally {
+            // Call parent shutdown to stop retry thread
+            super.shutdown();
+            LOG.info("S3 sink shutdown completed.");
+        }
     }
 }

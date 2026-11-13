@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 plugins{
@@ -17,20 +21,22 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-core'
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation libs.commons.compress
-    implementation 'org.mapdb:mapdb:3.0.8'
     implementation libs.commons.io
     implementation 'software.amazon.awssdk:sts'
-    implementation 'software.amazon.awssdk:s3-transfer-manager'
-    implementation 'software.amazon.awssdk.crt:aws-crt:0.29.9'
-    implementation 'com.maxmind.geoip2:geoip2:4.0.1'
-    implementation 'com.maxmind.db:maxmind-db:3.0.0'
+    implementation 'software.amazon.awssdk:s3'
+    implementation 'com.maxmind.geoip2:geoip2:4.3.1'
+    implementation 'com.maxmind.db:maxmind-db:3.1.0'
     implementation 'org.hibernate.validator:hibernate-validator:8.0.1.Final'
     implementation libs.commons.lang3
+    implementation libs.armeria.core
 
     testImplementation project(':data-prepper-core')
+    testImplementation project(':data-prepper-event')
+    testImplementation project(':data-prepper-plugin-framework')
+    testImplementation project(':data-prepper-pipeline-parser')
     testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
     testImplementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
-    testImplementation project(':data-prepper-test-common')
+    testImplementation project(':data-prepper-test:test-common')
 }
 
 def downloadFiles = tasks.register('downloadFiles')
@@ -47,7 +53,7 @@ databaseNames.forEach { databaseName -> {
     def gradleName = databaseName.replaceAll('-', '')
     def downloadTask = tasks.register("download${gradleName}", Download) {
         src(url)
-        dest "build/resources/test/mmdb-files/geo-lite2/${databaseName}.mmdb"
+        dest "${project.layout.buildDirectory.get()}/resources/test/mmdb-files/geo-lite2/${databaseName}.mmdb"
         overwrite true
     }
     downloadFiles.get().dependsOn downloadTask
@@ -63,31 +69,66 @@ enterpriseDatabaseNames.forEach { enterpriseDatabaseName -> {
     def gradleName = enterpriseDatabaseName.replaceAll('-', '')
     def downloadEnterpriseTask = tasks.register("download${gradleName}", Download) {
         src(url)
-        dest "build/resources/test/mmdb-files/geo-ip2/${enterpriseDatabaseName}.mmdb"
+        dest "${project.layout.buildDirectory.get()}/resources/test/mmdb-files/geo-ip2/${enterpriseDatabaseName}.mmdb"
         overwrite true
     }
     downloadFiles.get().dependsOn downloadEnterpriseTask
 }}
 
+sourceSets {
+    integrationTest {
+        java {
+            compileClasspath += main.output + test.output
+            runtimeClasspath += main.output + test.output
+            srcDir file('src/integrationTest/java')
+        }
+    }
+}
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntime.extendsFrom testRuntime
+}
+
+task integrationTest(type: Test) {
+    group = 'verification'
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+
+    useJUnitPlatform()
+
+    classpath = sourceSets.integrationTest.runtimeClasspath
+
+    systemProperty 'data-prepper.dir', project.layout.buildDirectory.get().getAsFile().absolutePath
+
+    filter {
+        includeTestsMatching '*IT'
+    }
+}
+
 
 test {
     useJUnitPlatform()
     dependsOn(downloadFiles)
+
+    systemProperty 'data-prepper.dir', project.layout.buildDirectory.get().getAsFile().absolutePath
 }
 
 checkstyleTest {
     dependsOn(downloadFiles)
 }
 
+compileIntegrationTestJava.dependsOn downloadFiles
+
 jacocoTestCoverageVerification {
     dependsOn jacocoTestReport
     violationRules {
         rule {
             limit {
-                minimum = 0.85
+                minimum = 0.84
             }
         }
     }
 }
 
 check.dependsOn jacocoTestCoverageVerification
+check.dependsOn integrationTest

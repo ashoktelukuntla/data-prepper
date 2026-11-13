@@ -1,0 +1,767 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+package org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.metrics.PluginMetrics;
+import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
+import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
+import org.opensearch.dataprepper.model.acknowledgements.ProgressCheck;
+import org.opensearch.dataprepper.model.buffer.Buffer;
+import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.model.source.coordinator.SourcePartitionStoreItem;
+import org.opensearch.dataprepper.model.source.coordinator.enhanced.EnhancedSourceCoordinator;
+import org.opensearch.dataprepper.model.source.coordinator.enhanced.EnhancedSourcePartition;
+import org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException;
+import org.opensearch.dataprepper.plugins.source.source_crawler.base.Crawler;
+import org.opensearch.dataprepper.plugins.source.source_crawler.base.CrawlerSourceConfig;
+import org.opensearch.dataprepper.plugins.source.source_crawler.base.SaasWorkerProgressState;
+import org.opensearch.dataprepper.plugins.source.source_crawler.coordination.PartitionFactory;
+import org.opensearch.dataprepper.plugins.source.source_crawler.coordination.partition.SaasSourcePartition;
+import org.opensearch.dataprepper.plugins.source.source_crawler.coordination.state.DimensionalTimeSliceWorkerProgressState;
+import org.opensearch.dataprepper.plugins.source.source_crawler.coordination.state.PaginationCrawlerWorkerProgressState;
+import org.opensearch.dataprepper.plugins.source.source_crawler.coordination.state.CrowdStrikeWorkerProgressState;
+import org.opensearch.dataprepper.plugins.source.source_crawler.exception.SaaSCrawlerException;
+import io.micrometer.core.instrument.Counter;
+
+import java.time.Instant;
+import java.util.Optional;
+import java.time.Duration;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.ACKNOWLEDGEMENT_CALLBACK_FAILURES;
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.ACKNOWLEDGEMENT_SET_TIMEOUT;
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.OWNERSHIP_RENEWAL_INTERVAL;
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.PARTITION_OWNERSHIP_RENEWAL_FAILURES;
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.WORKER_PARTITIONS_FAILED;
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.WORKER_PARTITIONS_COMPLETED;
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.ACKNOWLEDGEMENT_SET_SUCCESS_METRIC_NAME;
+import static org.opensearch.dataprepper.plugins.source.source_crawler.coordination.scheduler.WorkerScheduler.ACKNOWLEDGEMENT_SET_FAILURES_METRIC_NAME;
+
+@ExtendWith(MockitoExtension.class)
+public class WorkerSchedulerTest {
+
+    private final String pluginName = "sampleTestPlugin";
+    @Mock
+    Buffer<Record<Event>> buffer;
+    @Mock
+    private EnhancedSourceCoordinator coordinator;
+    @Mock
+    private CrawlerSourceConfig sourceConfig;
+    @Mock
+    private Crawler crawler;
+    @Mock
+    private PluginMetrics pluginMetrics;
+    @Mock
+    private AcknowledgementSetManager acknowledgementSetManager;
+    @Mock
+    private AcknowledgementSet acknowledgementSet;
+    @Mock
+    private SourcePartitionStoreItem sourcePartitionStoreItem;
+    @Mock
+    private Counter renewalFailureCounter;
+    @Mock
+    private SaasSourcePartition mockSaasPartition;
+
+    @Test
+    void testUnableToAcquireLeaderPartition() throws InterruptedException {
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE)).willReturn(Optional.empty());
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+        Thread.sleep(100);
+        executorService.shutdownNow();
+        verifyNoInteractions(crawler);
+    }
+
+    @Test
+    void testDeserializePaginationCrawlerWorkerProgressState() throws Exception {
+        String json = "{\n" +
+                "  \"@class\": \"org.opensearch.dataprepper.plugins.source.source_crawler.coordination.state.PaginationCrawlerWorkerProgressState\",\n" +
+                "  \"keyAttributes\": {\"project\": \"project-1\"},\n" +
+                "  \"totalItems\": 10,\n" +
+                "  \"loadedItems\": 5,\n" +
+                "  \"exportStartTime\": 1729391235717,\n" +
+                "  \"itemIds\": [\"GTMS-25\", \"GTMS-24\"]\n" +
+                "}";
+
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.registerSubtypes(PaginationCrawlerWorkerProgressState.class);
+        mapper.registerModule(new JavaTimeModule());
+
+        SaasWorkerProgressState state = mapper.readValue(json, SaasWorkerProgressState.class);
+
+        assertTrue(state instanceof PaginationCrawlerWorkerProgressState);
+        PaginationCrawlerWorkerProgressState paginationCrawlerState = (PaginationCrawlerWorkerProgressState) state;
+
+        assertEquals(10, paginationCrawlerState.getTotalItems());
+        assertEquals(5, paginationCrawlerState.getLoadedItems());
+        assertEquals("project-1", paginationCrawlerState.getKeyAttributes().get("project"));
+        assertEquals(2, paginationCrawlerState.getItemIds().size());
+    }
+
+    @Test
+    void testDeserializeCrowdStrikeWorkerProgressState() throws Exception {
+        String json = "{\n" +
+                "  \"@class\": \"org.opensearch.dataprepper.plugins.source.source_crawler.coordination.state.CrowdStrikeWorkerProgressState\",\n" +
+                "  \"startTime\": 1729391235717,\n" +
+                "  \"endTime\": 1729395235717,\n" +
+                "  \"marker\": \"2717455246896ffb25d9fcba251f7afa6dad7c1f1ffa\"\n" +
+                "}";
+
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.registerSubtypes(CrowdStrikeWorkerProgressState.class);
+        mapper.registerModule(new JavaTimeModule());
+
+        SaasWorkerProgressState state = mapper.readValue(json, SaasWorkerProgressState.class);
+
+        assertTrue(state instanceof CrowdStrikeWorkerProgressState);
+        CrowdStrikeWorkerProgressState csState = (CrowdStrikeWorkerProgressState) state;
+
+        assertEquals("2717455246896ffb25d9fcba251f7afa6dad7c1f1ffa", csState.getMarker());
+        assertNotNull(csState.getStartTime());
+        assertNotNull(csState.getEndTime());
+    }
+
+    @Test
+    void testDeserializeDimensionalTimeSliceWorkerProgressState() throws Exception {
+        String json = "{\n" +
+                "  \"@class\": \"org.opensearch.dataprepper.plugins.source.source_crawler.coordination.state.DimensionalTimeSliceWorkerProgressState\",\n" +
+                "  \"startTime\": 1729391235717,\n" +
+                "  \"endTime\": 1729395235717,\n" +
+                "  \"dimensionType\": \"Exchange\"\n" +
+                "}";
+
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.registerSubtypes(DimensionalTimeSliceWorkerProgressState.class);
+        mapper.registerModule(new JavaTimeModule());
+
+        SaasWorkerProgressState state = mapper.readValue(json, SaasWorkerProgressState.class);
+
+        assertTrue(state instanceof DimensionalTimeSliceWorkerProgressState);
+        DimensionalTimeSliceWorkerProgressState dimensionalState =
+                (DimensionalTimeSliceWorkerProgressState) state;
+
+        assertNotNull(dimensionalState.getStartTime());
+        assertNotNull(dimensionalState.getEndTime());
+        assertEquals("Exchange", dimensionalState.getDimensionType());
+    }
+
+
+    @Test
+    void testEmptyProgressState() throws InterruptedException {
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+
+        String sourceId = UUID.randomUUID() + "|" + SaasSourcePartition.PARTITION_TYPE;
+        when(sourcePartitionStoreItem.getPartitionProgressState()).thenReturn(null);
+        when(sourcePartitionStoreItem.getSourceIdentifier()).thenReturn(sourceId);
+        PartitionFactory factory = new PartitionFactory();
+        EnhancedSourcePartition sourcePartition = factory.apply(sourcePartitionStoreItem);
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE)).willReturn(Optional.of(sourcePartition));
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        Thread.sleep(50);
+        executorService.shutdownNow();
+
+        // Check if crawler was invoked and updated leader lease renewal time
+        verifyNoInteractions(crawler);
+        verify(coordinator, atLeast(1)).completePartition(eq(sourcePartition));
+    }
+
+    @Test
+    void testExceptionWhileAcquiringWorkerPartition() throws InterruptedException {
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE)).willThrow(RuntimeException.class);
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        Thread.sleep(10);
+        executorService.shutdownNow();
+
+        // Crawler shouldn't be invoked in this case
+        verifyNoInteractions(crawler);
+    }
+
+    @Test
+    void testWhenNoPartitionToWorkOn() throws InterruptedException {
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        //Wait for more than a minute as the default while loop wait time in leader scheduler is 1 minute
+        Thread.sleep(10);
+        executorService.shutdownNow();
+
+        // Crawler shouldn't be invoked in this case
+        verifyNoInteractions(crawler);
+    }
+
+    @Test
+    void testRetryBackOffTriggeredWhenExceptionOccurred() throws InterruptedException {
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE)).willThrow(RuntimeException.class);
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        //Wait for more than a minute as the default while loop wait time in leader scheduler is 1 minute
+        Thread.sleep(10);
+        executorService.shutdownNow();
+
+        // Crawler shouldn't be invoked in this case
+        verifyNoInteractions(crawler);
+    }
+
+    @Test
+    void testCompletePartitionWithAcknowledgements() throws InterruptedException {
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+        WorkerScheduler spyWorkerScheduler = org.mockito.Mockito.spy(workerScheduler);
+        
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        
+        PaginationCrawlerWorkerProgressState mockProgressState = new PaginationCrawlerWorkerProgressState();
+        
+        EnhancedSourcePartition mockPartition = org.mockito.Mockito.mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(mockProgressState));
+        
+        org.mockito.Mockito.doAnswer(invocation -> {
+            coordinator.completePartition(mockPartition);
+            return acknowledgementSet;
+        }).when(spyWorkerScheduler).createAcknowledgementSet(any(EnhancedSourcePartition.class), any(AtomicBoolean.class));
+        
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+            .willReturn(Optional.of(mockPartition))
+            .willReturn(Optional.empty());
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(spyWorkerScheduler);
+
+        Thread.sleep(500);
+        executorService.shutdownNow();
+        
+        verify(mockPartition, atLeast(1)).getProgressState();
+        verify(sourceConfig, atLeast(1)).isAcknowledgments();
+        
+        // Verify that createAcknowledgementSet was called
+        verify(spyWorkerScheduler, times(1)).createAcknowledgementSet(eq(mockPartition), any(AtomicBoolean.class));
+        
+        // Verify that crawler.executePartition was called with acknowledgement set
+        verify(crawler, times(1)).executePartition(any(SaasWorkerProgressState.class), eq(buffer), eq(acknowledgementSet));
+        
+        // Verify that coordinator.completePartition was called (from the acknowledgement callback with true)
+        verify(coordinator, times(1)).completePartition(eq(mockPartition));
+    }
+
+    @Test
+    void testOwnershipRenewalIsRegisteredBeforeEmittingWhenAcknowledgmentsAreEnabled() throws InterruptedException {
+        stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        when(acknowledgementSetManager.create(any(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT))).thenReturn(acknowledgementSet);
+
+        EnhancedSourcePartition mockPartition = mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(new PaginationCrawlerWorkerProgressState()));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        InOrder inOrder = inOrder(acknowledgementSet, crawler);
+        inOrder.verify(acknowledgementSet).addProgressCheck(any(), eq(OWNERSHIP_RENEWAL_INTERVAL));
+        inOrder.verify(crawler).executePartition(any(SaasWorkerProgressState.class), eq(buffer), eq(acknowledgementSet));
+
+        verify(coordinator, never()).renewPartitionOwnership(any());
+        verify(coordinator, never()).saveProgressStateForPartition(any(), any());
+        verify(coordinator, never()).completePartition(any());
+    }
+
+    @Test
+    void testProgressCheckCallbackRenewsOwnership() throws InterruptedException {
+        stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        when(acknowledgementSetManager.create(any(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT))).thenReturn(acknowledgementSet);
+
+        EnhancedSourcePartition mockPartition = mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(new PaginationCrawlerWorkerProgressState()));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        ArgumentCaptor<Consumer<ProgressCheck>> callbackCaptor = ArgumentCaptor.forClass(Consumer.class);
+        verify(acknowledgementSet).addProgressCheck(callbackCaptor.capture(), eq(OWNERSHIP_RENEWAL_INTERVAL));
+
+        callbackCaptor.getValue().accept(() -> 1.0d);
+        callbackCaptor.getValue().accept(() -> 1.0d);
+
+        verify(coordinator, times(2)).renewPartitionOwnership(eq(mockPartition));
+    }
+
+    @Test
+    void testOwnershipIsNotRenewedWhenAcknowledgmentsAreDisabled() throws InterruptedException {
+        stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(false);
+
+        EnhancedSourcePartition mockPartition = mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(new PaginationCrawlerWorkerProgressState()));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        verify(coordinator, never()).renewPartitionOwnership(any());
+        verify(coordinator, never()).saveProgressStateForPartition(any(), any());
+        verify(crawler, times(1)).executePartition(any(SaasWorkerProgressState.class), eq(buffer), isNull());
+        verify(coordinator, times(1)).completePartition(eq(mockPartition));
+        verifyNoInteractions(acknowledgementSetManager);
+    }
+
+    @Test
+    void testFailedOwnershipRenewalIsCountedAndNotPropagated() throws InterruptedException {
+        Counter mockCompletedCounter = stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        when(acknowledgementSetManager.create(any(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT))).thenReturn(acknowledgementSet);
+        doThrow(new RuntimeException("coordination store unavailable"))
+                .when(coordinator).renewPartitionOwnership(any());
+
+        EnhancedSourcePartition mockPartition = mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(new PaginationCrawlerWorkerProgressState()));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        verify(crawler, times(1)).executePartition(any(SaasWorkerProgressState.class), eq(buffer), eq(acknowledgementSet));
+        verify(mockCompletedCounter, times(1)).increment();
+
+        ArgumentCaptor<Consumer<ProgressCheck>> callbackCaptor = ArgumentCaptor.forClass(Consumer.class);
+        verify(acknowledgementSet).addProgressCheck(callbackCaptor.capture(), eq(OWNERSHIP_RENEWAL_INTERVAL));
+
+        assertDoesNotThrow(() -> callbackCaptor.getValue().accept(() -> 1.0d));
+        verify(renewalFailureCounter, times(1)).increment();
+    }
+
+    @Test
+    void testAcknowledgementSetIsCancelledWhenTheCrawlerThrows() throws InterruptedException {
+        final Counter mockCompletedCounter = stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        when(acknowledgementSetManager.create(any(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT))).thenReturn(acknowledgementSet);
+        doThrow(new RuntimeException("buffer write timed out"))
+                .when(crawler).executePartition(any(), any(), any());
+
+        EnhancedSourcePartition mockPartition = mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(new PaginationCrawlerWorkerProgressState()));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        verify(acknowledgementSet, times(1)).cancel();
+        verify(coordinator, never()).completePartition(any());
+        verify(mockCompletedCounter, never()).increment();
+    }
+
+    @Test
+    void testProgressCheckDoesNotRenewOwnershipAfterARenewalFailed() throws InterruptedException {
+        stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        when(acknowledgementSetManager.create(any(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT))).thenReturn(acknowledgementSet);
+        failRenewalOnFirstProgressCheck();
+
+        EnhancedSourcePartition mockPartition = mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(new PaginationCrawlerWorkerProgressState()));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        ArgumentCaptor<Consumer<ProgressCheck>> progressCheckCaptor = ArgumentCaptor.forClass(Consumer.class);
+        verify(acknowledgementSet).addProgressCheck(progressCheckCaptor.capture(), eq(OWNERSHIP_RENEWAL_INTERVAL));
+        progressCheckCaptor.getValue().accept(() -> 1.0d);
+
+        verify(coordinator, times(1)).renewPartitionOwnership(eq(mockPartition));
+        verify(renewalFailureCounter, times(1)).increment();
+    }
+
+    @Test
+    void testAcknowledgementCallbackDoesNotCompleteOrGiveUpPartitionAfterARenewalFailed() throws InterruptedException {
+        stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        when(acknowledgementSetManager.create(any(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT))).thenReturn(acknowledgementSet);
+        failRenewalOnFirstProgressCheck();
+
+        EnhancedSourcePartition mockPartition = mock(EnhancedSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(new PaginationCrawlerWorkerProgressState()));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        ArgumentCaptor<Consumer<Boolean>> callbackCaptor = ArgumentCaptor.forClass(Consumer.class);
+        verify(acknowledgementSetManager).create(callbackCaptor.capture(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT));
+        callbackCaptor.getValue().accept(true);
+        callbackCaptor.getValue().accept(false);
+
+        verify(coordinator, never()).completePartition(any());
+        verify(coordinator, never()).giveUpPartition(any());
+    }
+
+    @Test
+    void testNonRetryableCrawlerFailureDoesNotWritePartitionAfterARenewalFailed() throws InterruptedException {
+        stubCounters();
+        when(sourceConfig.isAcknowledgments()).thenReturn(true);
+        when(acknowledgementSetManager.create(any(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT))).thenReturn(acknowledgementSet);
+        lenient().when(sourceConfig.getDurationToGiveUpRetry()).thenReturn(Duration.ofDays(30));
+        lenient().when(sourceConfig.getDurationToDelayRetry()).thenReturn(Duration.ofDays(1));
+        failRenewalOnFirstProgressCheck();
+        doThrow(new SaaSCrawlerException("Non-retryable error", false))
+                .when(crawler).executePartition(any(), any(), any());
+
+        DimensionalTimeSliceWorkerProgressState progressState = new DimensionalTimeSliceWorkerProgressState();
+        progressState.setPartitionCreationTime(Instant.now());
+        when(mockSaasPartition.getProgressState()).thenReturn(Optional.of(progressState));
+        given(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(mockSaasPartition))
+                .willReturn(Optional.empty());
+
+        runWorkerSchedulerOnce();
+
+        verify(acknowledgementSet).cancel();
+        verify(coordinator, never()).saveProgressStateForPartition(any(), any());
+        verify(coordinator, never()).giveUpPartition(any());
+    }
+
+    private void failRenewalOnFirstProgressCheck() {
+        doThrow(new PartitionUpdateException("stale version", null))
+                .when(coordinator).renewPartitionOwnership(any());
+        doAnswer(invocation -> {
+            final Consumer<ProgressCheck> progressCheck = invocation.getArgument(0);
+            progressCheck.accept(() -> 1.0d);
+            return null;
+        }).when(acknowledgementSet).addProgressCheck(any(), eq(OWNERSHIP_RENEWAL_INTERVAL));
+    }
+
+    private Counter stubCounters() {
+        Counter mockCompletedCounter = mock(Counter.class);
+        when(pluginMetrics.counter(WORKER_PARTITIONS_FAILED)).thenReturn(mock(Counter.class));
+        when(pluginMetrics.counter(WORKER_PARTITIONS_COMPLETED)).thenReturn(mockCompletedCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_SUCCESS_METRIC_NAME)).thenReturn(mock(Counter.class));
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_FAILURES_METRIC_NAME)).thenReturn(mock(Counter.class));
+        when(pluginMetrics.counter(PARTITION_OWNERSHIP_RENEWAL_FAILURES)).thenReturn(renewalFailureCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_CALLBACK_FAILURES)).thenReturn(mock(Counter.class));
+        return mockCompletedCounter;
+    }
+
+    private void runWorkerSchedulerOnce() throws InterruptedException {
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+        Thread.sleep(500);
+        executorService.shutdownNow();
+    }
+
+    @Test
+    void testRetryableAndNonRetryableSaaSSaaSCrawlerExceptions() throws InterruptedException {
+        // Given
+        Counter mockFailedCounter = mock(Counter.class);
+        Counter mockCompletedCounter = mock(Counter.class);
+        Counter mockAckSuccessCounter = mock(Counter.class);
+        Counter mockAckFailureCounter = mock(Counter.class);
+
+        when(pluginMetrics.counter(WORKER_PARTITIONS_FAILED)).thenReturn(mockFailedCounter);
+        when(pluginMetrics.counter(WORKER_PARTITIONS_COMPLETED)).thenReturn(mockCompletedCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_SUCCESS_METRIC_NAME)).thenReturn(mockAckSuccessCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_FAILURES_METRIC_NAME)).thenReturn(mockAckFailureCounter);
+        when(sourceConfig.getDurationToGiveUpRetry()).thenReturn(Duration.ofDays(30));
+        when(sourceConfig.getDurationToDelayRetry()).thenReturn(Duration.ofDays(1));
+
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+
+        // Mock partition and state
+        DimensionalTimeSliceWorkerProgressState mockProgressState = new DimensionalTimeSliceWorkerProgressState();
+        mockProgressState.setPartitionCreationTime(Instant.now());
+        SaasSourcePartition mockPartition = org.mockito.Mockito.mock(SaasSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(mockProgressState));
+
+        // Set up coordinator to return our mock partition
+        when(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .thenReturn(Optional.of(mockPartition))
+                .thenReturn(Optional.empty());
+
+        // Mock crawler to throw retryable exception
+        doThrow(new SaaSCrawlerException("Retryable error", true))
+                .when(crawler).executePartition(any(), any(), any());
+
+        // When
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        Thread.sleep(500);
+        executorService.shutdownNow();
+
+        // Then - Verify retryable exception handling
+        verify(coordinator, never()).saveProgressStateForPartition(any(), any());
+        verify(coordinator, never()).giveUpPartition(any());
+        verify(mockFailedCounter).increment();
+
+        // Reset mocks for non-retryable test
+        when(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .thenReturn(Optional.of(mockPartition))
+                .thenReturn(Optional.empty());
+        doThrow(new SaaSCrawlerException("Non-retryable error", false))
+                .when(crawler).executePartition(any(), any(), any());
+
+        // When - Run again with non-retryable exception
+        executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        Thread.sleep(500);
+        executorService.shutdownNow();
+
+        // Then - Verify non-retryable exception handling
+        verify(coordinator).saveProgressStateForPartition(eq(mockPartition), eq(Duration.ofDays(1)));
+        verify(mockFailedCounter, times(2)).increment();
+    }
+
+    @Test
+    void testNonRetryableExceptionWithNonSupportedWorkerProgressState() throws InterruptedException {
+        // Given
+        Counter mockFailedCounter = mock(Counter.class);
+        Counter mockCompletedCounter = mock(Counter.class);
+        Counter mockAckSuccessCounter = mock(Counter.class);
+        Counter mockAckFailureCounter = mock(Counter.class);
+
+        // Setup all counter mocks
+        when(pluginMetrics.counter(WORKER_PARTITIONS_FAILED)).thenReturn(mockFailedCounter);
+        when(pluginMetrics.counter(WORKER_PARTITIONS_COMPLETED)).thenReturn(mockCompletedCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_SUCCESS_METRIC_NAME)).thenReturn(mockAckSuccessCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_FAILURES_METRIC_NAME)).thenReturn(mockAckFailureCounter);
+
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+
+        // Create a non-supported progress state type
+        PaginationCrawlerWorkerProgressState mockProgressState = new PaginationCrawlerWorkerProgressState();
+        SaasSourcePartition mockPartition = org.mockito.Mockito.mock(SaasSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(mockProgressState));
+
+        when(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .thenReturn(Optional.of(mockPartition))
+                .thenReturn(Optional.empty());
+
+        // Throw non-retryable exception
+        doThrow(new SaaSCrawlerException("Non-retryable error", false))
+                .when(crawler).executePartition(any(), any(), any());
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        Thread.sleep(500);
+        executorService.shutdownNow();
+
+        // Verify:
+        // 1. Never called saveProgressStateForPartition because it's not a supported type
+        verify(coordinator, never()).saveProgressStateForPartition(any(), any());
+        // 2. Never called giveUpPartition because we fallback to backoff retry
+        verify(coordinator, never()).giveUpPartition(any());
+        // 3. Failed counter was incremented once
+        verify(mockFailedCounter, times(1)).increment();
+    }
+
+    @Test
+    void testNonRetryableExceptionWithOldPartition() throws InterruptedException {
+        // Given
+        Counter mockFailedCounter = mock(Counter.class);
+        Counter mockCompletedCounter = mock(Counter.class);
+        Counter mockAckSuccessCounter = mock(Counter.class);
+        Counter mockAckFailureCounter = mock(Counter.class);
+
+        when(pluginMetrics.counter(WORKER_PARTITIONS_FAILED)).thenReturn(mockFailedCounter);
+        when(pluginMetrics.counter(WORKER_PARTITIONS_COMPLETED)).thenReturn(mockCompletedCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_SUCCESS_METRIC_NAME)).thenReturn(mockAckSuccessCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_FAILURES_METRIC_NAME)).thenReturn(mockAckFailureCounter);
+
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+
+        // Mock partition and state with creation time > 30 days ago
+        DimensionalTimeSliceWorkerProgressState mockProgressState = new DimensionalTimeSliceWorkerProgressState();
+        mockProgressState.setPartitionCreationTime(Instant.now().minus(Duration.ofDays(31)));
+        SaasSourcePartition mockPartition = org.mockito.Mockito.mock(SaasSourcePartition.class);
+        when(mockPartition.getProgressState()).thenReturn(Optional.of(mockProgressState));
+
+        // Set up coordinator to return our mock partition
+        when(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .thenReturn(Optional.of(mockPartition))
+                .thenReturn(Optional.empty());
+
+        // Mock crawler to throw non-retryable exception
+        doThrow(new SaaSCrawlerException("Non-retryable error", false))
+                .when(crawler).executePartition(any(), any(), any());
+
+        // When
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        Thread.sleep(500);
+        executorService.shutdownNow();
+
+        // Then
+        // Verify partition is given up due to age
+        verify(coordinator).giveUpPartition(eq(mockPartition));
+        verify(coordinator, never()).saveProgressStateForPartition(any(), any());
+        verify(mockFailedCounter).increment();
+    }
+
+    @Test
+    void testNonRetryableExceptionWithNullWorkerPartition() throws InterruptedException {
+        // Given
+        Counter mockFailedCounter = mock(Counter.class);
+        Counter mockCompletedCounter = mock(Counter.class);
+        Counter mockAckSuccessCounter = mock(Counter.class);
+        Counter mockAckFailureCounter = mock(Counter.class);
+
+        when(pluginMetrics.counter(WORKER_PARTITIONS_FAILED)).thenReturn(mockFailedCounter);
+        when(pluginMetrics.counter(WORKER_PARTITIONS_COMPLETED)).thenReturn(mockCompletedCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_SUCCESS_METRIC_NAME)).thenReturn(mockAckSuccessCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_FAILURES_METRIC_NAME)).thenReturn(mockAckFailureCounter);
+
+        WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+
+        // Mock coordinator to throw SaaSCrawlerException when acquiring partition
+        when(coordinator.acquireAvailablePartition(SaasSourcePartition.PARTITION_TYPE))
+                .thenThrow(new SaaSCrawlerException("Non-retryable error", false))
+                .thenReturn(Optional.empty());
+
+        // When
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(workerScheduler);
+
+        Thread.sleep(500);
+        executorService.shutdownNow();
+
+        // Then
+        // Verify fallback to backoff retry
+        verify(coordinator, never()).saveProgressStateForPartition(any(), any());
+        verify(coordinator, never()).giveUpPartition(any());
+        // Failed counter should be incremented
+        verify(mockFailedCounter, times(1)).increment();
+    }
+
+    @Test
+    void testPositiveAcknowledgementCountsSuccessOnlyAfterPartitionIsCompleted() {
+        final Counter ackSuccessCounter = mock(Counter.class);
+        final Counter callbackFailureCounter = mock(Counter.class);
+        final Consumer<Boolean> callback = captureAcknowledgementCallback(ackSuccessCounter, mock(Counter.class), callbackFailureCounter);
+
+        callback.accept(true);
+
+        verify(coordinator).completePartition(mockSaasPartition);
+        verify(ackSuccessCounter).increment();
+        verify(callbackFailureCounter, never()).increment();
+    }
+
+    @Test
+    void testPositiveAcknowledgementWithStaleVersionCountsCallbackFailureNotSuccess() {
+        final Counter ackSuccessCounter = mock(Counter.class);
+        final Counter callbackFailureCounter = mock(Counter.class);
+        final Consumer<Boolean> callback = captureAcknowledgementCallback(ackSuccessCounter, mock(Counter.class), callbackFailureCounter);
+        doThrow(new PartitionUpdateException("stale version", null)).when(coordinator).completePartition(mockSaasPartition);
+
+        assertDoesNotThrow(() -> callback.accept(true));
+
+        verify(ackSuccessCounter, never()).increment();
+        verify(callbackFailureCounter).increment();
+    }
+
+    @Test
+    void testNegativeAcknowledgementWithFailedGiveUpCountsCallbackFailure() {
+        final Counter ackFailureCounter = mock(Counter.class);
+        final Counter callbackFailureCounter = mock(Counter.class);
+        final Consumer<Boolean> callback = captureAcknowledgementCallback(mock(Counter.class), ackFailureCounter, callbackFailureCounter);
+        doThrow(new PartitionUpdateException("stale version", null)).when(coordinator).giveUpPartition(mockSaasPartition);
+
+        assertDoesNotThrow(() -> callback.accept(false));
+
+        verify(ackFailureCounter).increment();
+        verify(callbackFailureCounter).increment();
+    }
+
+    private Consumer<Boolean> captureAcknowledgementCallback(final Counter ackSuccessCounter, final Counter ackFailureCounter,
+                                                             final Counter callbackFailureCounter) {
+        when(pluginMetrics.counter(WORKER_PARTITIONS_FAILED)).thenReturn(mock(Counter.class));
+        when(pluginMetrics.counter(WORKER_PARTITIONS_COMPLETED)).thenReturn(mock(Counter.class));
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_SUCCESS_METRIC_NAME)).thenReturn(ackSuccessCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_SET_FAILURES_METRIC_NAME)).thenReturn(ackFailureCounter);
+        when(pluginMetrics.counter(PARTITION_OWNERSHIP_RENEWAL_FAILURES)).thenReturn(renewalFailureCounter);
+        when(pluginMetrics.counter(ACKNOWLEDGEMENT_CALLBACK_FAILURES)).thenReturn(callbackFailureCounter);
+        final WorkerScheduler workerScheduler = new WorkerScheduler(pluginName, buffer,
+                coordinator, sourceConfig, crawler, pluginMetrics, acknowledgementSetManager);
+
+        workerScheduler.createAcknowledgementSet(mockSaasPartition, new AtomicBoolean());
+
+        final ArgumentCaptor<Consumer<Boolean>> callbackCaptor = ArgumentCaptor.forClass(Consumer.class);
+        verify(acknowledgementSetManager).create(callbackCaptor.capture(), eq(ACKNOWLEDGEMENT_SET_TIMEOUT));
+        return callbackCaptor.getValue();
+    }
+
+}

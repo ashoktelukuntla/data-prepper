@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.configuration;
@@ -17,6 +21,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Represents an extension of the {@link PluginModel} which is specific to Sink
@@ -29,8 +34,12 @@ import java.util.Map;
 @JsonDeserialize(using = SinkModel.SinkModelDeserializer.class)
 public class SinkModel extends PluginModel {
 
-    SinkModel(final String pluginName, final List<String> routes, final String tagsTargetKey, final List<String> includeKeys, final List<String> excludeKeys, final Map<String, Object> pluginSettings) {
-        this(pluginName, new SinkInternalJsonModel(routes, tagsTargetKey, includeKeys, excludeKeys, pluginSettings));
+    public SinkModel(final String pluginName, final List<String> routes, final String tagsTargetKey, final List<String> includeKeys, final List<String> excludeKeys, final Map<String, Object> pluginSettings) {
+        this(pluginName, new SinkInternalJsonModel(routes, tagsTargetKey, includeKeys, excludeKeys, null, pluginSettings));
+    }
+
+    public SinkModel(final String pluginName, final List<String> routes, final String tagsTargetKey, final List<String> includeKeys, final List<String> excludeKeys, final SinkForwardConfig forwardConfig, final Map<String, Object> pluginSettings) {
+        this(pluginName, new SinkInternalJsonModel(routes, tagsTargetKey, includeKeys, excludeKeys, forwardConfig, pluginSettings));
     }
 
     private SinkModel(final String pluginName, final SinkInternalJsonModel sinkInnerModel) {
@@ -55,6 +64,9 @@ public class SinkModel extends PluginModel {
         return this.<SinkInternalJsonModel>getInternalJsonModel().excludeKeys;
     }
 
+    public SinkForwardConfig getForwardConfig() {
+        return this.<SinkInternalJsonModel>getInternalJsonModel().forwardConfig;
+    }
 
     /**
      * Gets the tags target key associated with this Sink.
@@ -74,6 +86,7 @@ public class SinkModel extends PluginModel {
 
         private final List<String> includeKeys;
         private final List<String> excludeKeys;
+        private final SinkForwardConfig forwardConfig;
 
         private SinkModelBuilder(final PluginModel pluginModel) {
             this.pluginModel = pluginModel;
@@ -81,10 +94,11 @@ public class SinkModel extends PluginModel {
             this.tagsTargetKey = null;
             this.includeKeys = Collections.emptyList();
             this.excludeKeys = Collections.emptyList();
+            this.forwardConfig = null;
         }
 
         public SinkModel build() {
-            return new SinkModel(pluginModel.getPluginName(), routes, tagsTargetKey, includeKeys, excludeKeys, pluginModel.getPluginSettings());
+            return new SinkModel(pluginModel.getPluginName(), routes, tagsTargetKey, includeKeys, excludeKeys, forwardConfig, pluginModel.getPluginSettings());
         }
     }
 
@@ -110,19 +124,23 @@ public class SinkModel extends PluginModel {
         @JsonProperty("exclude_keys")
         private final List<String> excludeKeys;
 
+        @JsonInclude(JsonInclude.Include.NON_EMPTY)
+        @JsonProperty("forward_to")
+        private final SinkForwardConfig forwardConfig;
+
         @JsonCreator
-        private SinkInternalJsonModel(@JsonProperty("routes") final List<String> routes, @JsonProperty("tags_target_key") final String tagsTargetKey, @JsonProperty("include_keys") final List<String> includeKeys, @JsonProperty("exclude_keys") final List<String> excludeKeys) {
-            this(routes, tagsTargetKey, includeKeys, excludeKeys, new HashMap<>());
+        private SinkInternalJsonModel(@JsonProperty("routes") final List<String> routes, @JsonProperty("tags_target_key") final String tagsTargetKey, @JsonProperty("include_keys") final List<String> includeKeys, @JsonProperty("exclude_keys") final List<String> excludeKeys, @JsonProperty("forward_to") final SinkForwardConfig forwardConfig) {
+            this(routes, tagsTargetKey, includeKeys, excludeKeys, forwardConfig, new HashMap<>());
         }
 
-        private SinkInternalJsonModel(final List<String> routes, final String tagsTargetKey, final List<String> includeKeys, final List<String> excludeKeys, final Map<String, Object> pluginSettings) {
+        private SinkInternalJsonModel(final List<String> routes, final String tagsTargetKey, final List<String> includeKeys, final List<String> excludeKeys, final SinkForwardConfig forwardConfig, final Map<String, Object> pluginSettings) {
             super(pluginSettings);
             this.routes = routes != null ? routes : Collections.emptyList();
-            this.includeKeys = includeKeys != null ? includeKeys : Collections.emptyList();
-            this.excludeKeys = excludeKeys != null ? excludeKeys : Collections.emptyList();
+            this.includeKeys = includeKeys != null ? validateKeys(includeKeys, "include_keys") : Collections.emptyList();
+            this.excludeKeys = excludeKeys != null ? validateKeys(excludeKeys, "exclude_keys") : Collections.emptyList();
+            this.forwardConfig = forwardConfig;
             this.tagsTargetKey = tagsTargetKey;
             validateConfiguration();
-            validateKeys();
         }
 
         void validateConfiguration() {
@@ -134,22 +152,20 @@ public class SinkModel extends PluginModel {
         /**
          * Validates both include and exclude keys if they contain /
          */
-        private void validateKeys() {
-            includeKeys.forEach(key -> {
+        private static List<String> validateKeys(List<String> input, String tag) {
+            input.forEach(key -> {
                 if(key.contains("/"))
-                    throw new InvalidPluginConfigurationException("include_keys cannot contain /");
+                    throw new InvalidPluginConfigurationException(tag + " cannot contain /");
             });
-            excludeKeys.forEach(key -> {
-                if(key.contains("/"))
-                    throw new InvalidPluginConfigurationException("exclude_keys cannot contain /");
-            });
+            return input.stream().sorted().collect(Collectors.toList());
         }
     }
 
 
     static class SinkModelDeserializer extends AbstractPluginModelDeserializer<SinkModel, SinkInternalJsonModel> {
         SinkModelDeserializer() {
-            super(SinkModel.class, SinkInternalJsonModel.class, SinkModel::new, () -> new SinkInternalJsonModel(null, null, null, null));
+            super(SinkModel.class, SinkInternalJsonModel.class, SinkModel::new,
+                    () -> new SinkInternalJsonModel(null, null, null, null, null, null));
         }
     }
 }

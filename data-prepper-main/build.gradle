@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+plugins {
+    id 'data-prepper.publish'
+}
+
 sourceSets {
     main {
         resources {
@@ -10,6 +14,8 @@ sourceSets {
         }
     }
 }
+
+group = 'org.opensearch.dataprepper.core'
 
 dependencies {
     implementation project(':data-prepper-core')

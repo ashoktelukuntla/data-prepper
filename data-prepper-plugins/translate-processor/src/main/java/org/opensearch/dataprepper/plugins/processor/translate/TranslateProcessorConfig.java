@@ -6,8 +6,11 @@
 package org.opensearch.dataprepper.plugins.processor.translate;
 
 
+import com.fasterxml.jackson.annotation.JsonClassDescription;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.AssertTrue;
 
@@ -15,14 +18,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-
+@JsonPropertyOrder
+@JsonClassDescription("The <code>translate</code> processor transforms values in events into preconfigured values.")
 public class TranslateProcessorConfig {
 
     @JsonProperty("file")
+    @JsonPropertyDescription("Points to the file that contains mapping configurations.")
     @Valid
     private FileParameterConfig fileParameterConfig;
 
     @JsonProperty("mappings")
+    @JsonPropertyDescription("Defines inline mappings.")
     @Valid
     private List<MappingsParameterConfig> mappingsParameterConfigs = new ArrayList<>();
 

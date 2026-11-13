@@ -34,9 +34,43 @@ class CompressionOptionTest {
     }
 
     @Test
+    void testFromFileName_zstd() {
+        assertThat(CompressionOption.fromFileName("temp.zst"), is(CompressionOption.ZSTD));
+    }
+
+    @Test
+    void testFromFileName_zstd_longExtension() {
+        assertThat(CompressionOption.fromFileName("temp.zstd"), is(CompressionOption.ZSTD));
+    }
+
+    @Test
     void testFromFileName_default() {
         assertThat(CompressionOption.fromFileName("temp.txt"), is(CompressionOption.NONE));
     }
+
+
+
+    @ParameterizedTest
+    @EnumSource(value = CompressionOption.class, names = {"AUTOMATIC"}, mode = EnumSource.Mode.EXCLUDE)
+    void testCompressionDecompression(final CompressionOption option) throws Exception {
+        String testData = "This is test data for compression and decompression";
+        byte[] originalBytes = testData.getBytes();
+
+        java.io.ByteArrayOutputStream compressedOutput = new java.io.ByteArrayOutputStream();
+        java.io.OutputStream compressor = option.getCompressionEngine().createOutputStream(compressedOutput);
+        compressor.write(originalBytes);
+        compressor.close();
+
+        byte[] compressedBytes = compressedOutput.toByteArray();
+        java.io.InputStream decompressor = option.getDecompressionEngine().createInputStream(new java.io.ByteArrayInputStream(compressedBytes));
+        byte[] decompressedBytes = decompressor.readAllBytes();
+
+        assertThat(decompressedBytes, is(originalBytes));
+    }
+
+
+
+
 
 
 }

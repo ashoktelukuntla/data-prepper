@@ -18,10 +18,13 @@ import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
 import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.plugins.s3.common.ownership.BucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.s3.common.source.S3ObjectPluginMetrics;
+import org.opensearch.dataprepper.plugins.s3.common.source.S3ObjectReference;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.S3SelectCSVOption;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.S3SelectJsonOption;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.S3SelectSerializationFormatOption;
-import org.opensearch.dataprepper.plugins.source.s3.ownership.BucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3DataSelection;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.CompressionType;
@@ -127,7 +130,7 @@ class S3SelectObjectWorkerTest {
         lenient().doAnswer(a -> {
             numEventsAdded++;
             return null;
-        }).when(acknowledgementSet).add(any());
+        }).when(acknowledgementSet).add(any(Event.class));
         final String bucketName = UUID.randomUUID().toString();
         final String objectKey = UUID.randomUUID().toString();
 
@@ -151,6 +154,7 @@ class S3SelectObjectWorkerTest {
         lenient().when(selectJsonOption.getType()).thenReturn(JSON_LINES_TYPE);
 
         given(s3ObjectRequest.getS3ObjectPluginMetrics()).willReturn(s3ObjectPluginMetrics);
+        lenient().when(s3ObjectPluginMetrics.getS3ObjectReadFailedCounter()).thenReturn(mock(Counter.class));
         bucketOwnerProvider = mock(BucketOwnerProvider.class);
         given(bucketOwnerProvider.getBucketOwner(any(String.class))).willReturn(Optional.of("my-bucket-1"));
         given(s3ObjectRequest.getBucketOwnerProvider()).willReturn(bucketOwnerProvider);
@@ -178,7 +182,7 @@ class S3SelectObjectWorkerTest {
         given(selectObjectResponseFuture.join()).willReturn(mock(Void.class));
         given(s3AsyncClient.selectObjectContent(any(SelectObjectContentRequest.class), eq(selectResponseHandler))).willReturn(selectObjectResponseFuture);
 
-        assertThrows(IOException.class, () -> createObjectUnderTest().parseS3Object(s3ObjectReference, null, null, null));
+        assertThrows(IOException.class, () -> createObjectUnderTest().processS3Object(s3ObjectReference, S3DataSelection.DATA_AND_METADATA, null, null, null));
 
         assertHeadObjectRequestIsCorrect();
 
@@ -198,7 +202,7 @@ class S3SelectObjectWorkerTest {
         given(selectObjectResponseFuture.join()).willReturn(mock(Void.class));
         given(s3AsyncClient.selectObjectContent(any(SelectObjectContentRequest.class), eq(selectResponseHandler))).willReturn(selectObjectResponseFuture);
 
-        createObjectUnderTest().parseS3Object(s3ObjectReference, null, null, null);
+        createObjectUnderTest().processS3Object(s3ObjectReference, S3DataSelection.DATA_AND_METADATA, null, null, null);
 
         assertHeadObjectRequestIsCorrect();
 
@@ -232,7 +236,7 @@ class S3SelectObjectWorkerTest {
         given(s3AsyncClient.selectObjectContent(any(SelectObjectContentRequest.class), eq(selectResponseHandler))).willReturn(selectObjectResponseFuture);
         doAnswer(invocation -> null).when(eventConsumer).accept(any(Event.class), eq(s3ObjectReference));
 
-        createObjectUnderTest().parseS3Object(s3ObjectReference, null, null, null);
+        createObjectUnderTest().processS3Object(s3ObjectReference, S3DataSelection.DATA_AND_METADATA, null, null, null);
 
         if (isBatchingExpected) {
             assertHeadObjectRequestIsCorrect();
@@ -270,7 +274,7 @@ class S3SelectObjectWorkerTest {
         doAnswer(invocation -> null).when(eventConsumer).accept(any(Event.class), eq(s3ObjectReference));
 
         numEventsAdded = 0;
-        createObjectUnderTest().parseS3Object(s3ObjectReference, acknowledgementSet, null, null);
+        createObjectUnderTest().processS3Object(s3ObjectReference, S3DataSelection.DATA_AND_METADATA, acknowledgementSet, null, null);
         assertThat(numEventsAdded, equalTo(1));
 
         if (isBatchingExpected) {
@@ -305,7 +309,7 @@ class S3SelectObjectWorkerTest {
 
         doThrow(TimeoutException.class).doNothing().when(buffer).writeAll(any(Collection.class), anyInt());
 
-        createObjectUnderTest().parseS3Object(s3ObjectReference, null, null, null);
+        createObjectUnderTest().processS3Object(s3ObjectReference, S3DataSelection.DATA_AND_METADATA, null, null, null);
 
         assertHeadObjectRequestIsCorrect();
 
@@ -325,7 +329,7 @@ class S3SelectObjectWorkerTest {
         given(selectJsonOption.getType()).willReturn(jsonType);
         mockNonBatchedS3SelectCall(compressionType);
 
-        createObjectUnderTest().parseS3Object(s3ObjectReference, null, null, null);
+        createObjectUnderTest().processS3Object(s3ObjectReference, S3DataSelection.DATA_AND_METADATA, null, null, null);
 
         verifyNonBatchedS3SelectCall();
     }
@@ -345,7 +349,7 @@ class S3SelectObjectWorkerTest {
         given(selectCSVOption.getQuiteEscape()).willReturn(quoteEscape);
         mockNonBatchedS3SelectCall(compressionType);
 
-        createObjectUnderTest().parseS3Object(s3ObjectReference, null, null, null);
+        createObjectUnderTest().processS3Object(s3ObjectReference, S3DataSelection.DATA_AND_METADATA, null, null, null);
 
         verifyNonBatchedS3SelectCall();
     }

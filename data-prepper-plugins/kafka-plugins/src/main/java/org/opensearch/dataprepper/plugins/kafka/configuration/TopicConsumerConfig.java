@@ -16,6 +16,8 @@ public interface TopicConsumerConfig extends TopicConfig {
 
     String getGroupId();
 
+    String getClientId();
+
     Boolean getAutoCommit();
 
     String getAutoOffsetReset();
@@ -41,4 +43,6 @@ public interface TopicConsumerConfig extends TopicConfig {
     Integer getConsumerMaxPollRecords();
 
     Integer getWorkers();
+
+    Duration getConnectionsMaxIdle();
 }

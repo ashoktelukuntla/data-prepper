@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.kafka.buffer;
@@ -26,12 +30,15 @@ import org.opensearch.dataprepper.model.event.JacksonEvent;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.plugins.buffer.blockingbuffer.BlockingBuffer;
+import org.opensearch.dataprepper.plugins.codec.CompressionOption;
+import org.opensearch.dataprepper.plugins.encryption.EncryptionSupplier;
 import org.opensearch.dataprepper.plugins.kafka.admin.KafkaAdminAccessor;
 import org.opensearch.dataprepper.plugins.kafka.common.KafkaMdc;
 import org.opensearch.dataprepper.plugins.kafka.common.thread.KafkaPluginThreadFactory;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.EncryptionConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.EncryptionType;
+import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerProperties;
 import org.opensearch.dataprepper.plugins.kafka.configuration.PlainTextAuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.consumer.KafkaCustomConsumer;
 import org.opensearch.dataprepper.plugins.kafka.consumer.KafkaCustomConsumerFactory;
@@ -132,6 +139,12 @@ class KafkaBufferTest {
     @Mock
     private CircuitBreaker circuitBreaker;
 
+    @Mock
+    private EncryptionSupplier encryptionSupplier;
+
+    @Mock
+    private KafkaProducerProperties kafkaProducerProperties;
+
     public KafkaBuffer createObjectUnderTest() {
         return createObjectUnderTest(List.of(consumer));
     }
@@ -142,12 +155,12 @@ class KafkaBufferTest {
             final MockedConstruction<KafkaCustomProducerFactory> producerFactoryMock =
                 mockConstruction(KafkaCustomProducerFactory.class, (mock, context) -> {
                 producerFactory = mock;
-                when(producerFactory.createProducer(any(), isNull(), isNull(), any(), any(), anyBoolean())).thenReturn(producer);
+                when(producerFactory.createProducer(any(), isNull(), isNull(), any(), any(), anyBoolean(), any())).thenReturn(producer);
             });
             final MockedConstruction<KafkaCustomConsumerFactory> consumerFactoryMock =
                 mockConstruction(KafkaCustomConsumerFactory.class, (mock, context) -> {
                 consumerFactory = mock;
-                when(consumerFactory.createConsumersForTopic(any(), any(), any(), any(), any(), any(), any(), anyBoolean(), any())).thenReturn(consumers);
+                when(consumerFactory.createConsumersForTopic(any(), any(), any(), any(), any(), any(), any(), anyBoolean(), any(), any(), anyBoolean())).thenReturn(consumers);
             });
             final MockedConstruction<KafkaAdminAccessor> adminAccessorMock =
                 mockConstruction(KafkaAdminAccessor.class, (mock, context) -> kafkaAdminAccessor = mock);
@@ -157,7 +170,7 @@ class KafkaBufferTest {
                  })) {
 
             executorsMockedStatic.when(() -> Executors.newFixedThreadPool(anyInt(), any(KafkaPluginThreadFactory.class))).thenReturn(executorService);
-            return new KafkaBuffer(pluginSetting, bufferConfig, acknowledgementSetManager, null, awsCredentialsSupplier, circuitBreaker);
+            return new KafkaBuffer(pluginSetting, bufferConfig, acknowledgementSetManager, null, awsCredentialsSupplier, circuitBreaker, encryptionSupplier);
         }
     }
 
@@ -196,9 +209,13 @@ class KafkaBufferTest {
         when(plainTextAuthConfig.getUsername()).thenReturn("username");
         when(plainTextAuthConfig.getPassword()).thenReturn("password");
 
+        when(bufferConfig.getBoundedBufferSize()).thenReturn(KafkaBufferConfig.DEFAULT_BOUNDED_BUFFER_SIZE);
+        when(bufferConfig.getBoundedBatchSize()).thenReturn(KafkaBufferConfig.DEFAULT_BOUNDED_BATCH_SIZE);
+
         executorService = mock(ExecutorService.class);
         when(executorService.submit(any(ProducerWorker.class))).thenReturn(futureTask);
 
+        when(bufferConfig.getKafkaProducerProperties()).thenReturn(kafkaProducerProperties);
     }
 
     @Test
@@ -334,6 +351,7 @@ class KafkaBufferTest {
         kafkaBuffer.shutdown();
         verify(executorService).shutdown();
         verify(executorService).awaitTermination(eq(EXECUTOR_SERVICE_SHUTDOWN_TIMEOUT), eq(TimeUnit.SECONDS));
+        verify(consumer).closeConsumer();
     }
 
     @Test
@@ -359,6 +377,44 @@ class KafkaBufferTest {
         verify(executorService).shutdownNow();
     }
 
+    @Test
+    void constructor_passes_configured_bounded_buffer_size_and_batch_size_to_BlockingBuffer() {
+        final int customBufferSize = 800000;
+        final int customBatchSize = 200000;
+        when(bufferConfig.getBoundedBufferSize()).thenReturn(customBufferSize);
+        when(bufferConfig.getBoundedBatchSize()).thenReturn(customBatchSize);
+
+        final List<List<?>> capturedArgs = new java.util.ArrayList<>();
+
+        try (
+            final MockedStatic<Executors> executorsMockedStatic = mockStatic(Executors.class);
+            final MockedConstruction<KafkaCustomProducerFactory> producerFactoryMock =
+                mockConstruction(KafkaCustomProducerFactory.class, (mock, context) -> {
+                    producerFactory = mock;
+                    when(producerFactory.createProducer(any(), isNull(), isNull(), any(), any(), anyBoolean(), any())).thenReturn(producer);
+                });
+            final MockedConstruction<KafkaCustomConsumerFactory> consumerFactoryMock =
+                mockConstruction(KafkaCustomConsumerFactory.class, (mock, context) -> {
+                    consumerFactory = mock;
+                    when(consumerFactory.createConsumersForTopic(any(), any(), any(), any(), any(), any(), any(), anyBoolean(), any(), any(), anyBoolean())).thenReturn(List.of(consumer));
+                });
+            final MockedConstruction<KafkaAdminAccessor> adminAccessorMock =
+                mockConstruction(KafkaAdminAccessor.class, (mock, context) -> kafkaAdminAccessor = mock);
+            final MockedConstruction<BlockingBuffer> blockingBufferMock =
+                mockConstruction(BlockingBuffer.class, (mock, context) -> {
+                    blockingBuffer = mock;
+                    capturedArgs.add(new java.util.ArrayList<>(context.arguments()));
+                })) {
+
+            executorsMockedStatic.when(() -> Executors.newFixedThreadPool(anyInt(), any(KafkaPluginThreadFactory.class))).thenReturn(executorService);
+            new KafkaBuffer(pluginSetting, bufferConfig, acknowledgementSetManager, null, awsCredentialsSupplier, circuitBreaker, encryptionSupplier);
+
+            assertThat(capturedArgs.size(), equalTo(1));
+            assertThat(capturedArgs.get(0).get(0), equalTo(customBufferSize));
+            assertThat(capturedArgs.get(0).get(1), equalTo(customBatchSize));
+        }
+    }
+
     @Nested
     class MdcTests {
         private MockedStatic<MDC> mdcMockedStatic;
@@ -374,8 +430,8 @@ class KafkaBufferTest {
         }
 
         @Test
-        void writeBytes_sets_and_clears_MDC() throws Exception {
-            createObjectUnderTest().writeBytes(new byte[] {}, UUID.randomUUID().toString(), 100);
+        void doWriteBytes_sets_and_clears_MDC() throws Exception {
+            createObjectUnderTest().doWriteBytes(new byte[] {}, UUID.randomUUID().toString(), 100);
 
             mdcMockedStatic.verify(() -> MDC.put(KafkaMdc.MDC_KAFKA_PLUGIN_KEY, "buffer"));
             mdcMockedStatic.verify(() -> MDC.remove(KafkaMdc.MDC_KAFKA_PLUGIN_KEY));
@@ -438,4 +494,81 @@ class KafkaBufferTest {
             mdcMockedStatic.verify(() -> MDC.remove(KafkaMdc.MDC_KAFKA_PLUGIN_KEY));
         }
     }
+
+    @Test
+    void test_kafkaBuffer_with_null_compressionType() throws Exception {
+        when(kafkaProducerProperties.getCompressionType()).thenReturn(null);
+        kafkaBuffer = createObjectUnderTest();
+        
+        Record<Event> record = new Record<Event>(JacksonEvent.fromMessage(UUID.randomUUID().toString()));
+        kafkaBuffer.doWrite(record, 10000);
+        
+        verify(producer).produceRecords(record);
+    }
+
+    @Test
+    void test_kafkaBuffer_with_null_producerProperties() throws Exception {
+        when(bufferConfig.getKafkaProducerProperties()).thenReturn(null);
+        kafkaBuffer = createObjectUnderTest();
+        
+        Record<Event> record = new Record<Event>(JacksonEvent.fromMessage(UUID.randomUUID().toString()));
+        kafkaBuffer.doWrite(record, 10000);
+        
+        verify(producer).produceRecords(record);
+    }
+
+    @Test
+    void test_kafkaBuffer_with_zstd_compressionType() throws Exception {
+        when(kafkaProducerProperties.getCompressionType()).thenReturn("zstd");
+        kafkaBuffer = createObjectUnderTest();
+        
+        Record<Event> record = new Record<Event>(JacksonEvent.fromMessage(UUID.randomUUID().toString()));
+        kafkaBuffer.doWrite(record, 10000);
+        
+        verify(producer).produceRecords(record);
+    }
+
+    @Test
+    void test_kafkaBuffer_with_encryption_and_null_compressionType() throws Exception {
+        when(bufferConfig.getTopic().encryptionAtRestEnabled()).thenReturn(true);
+        when(kafkaProducerProperties.getCompressionType()).thenReturn(null);
+        kafkaBuffer = createObjectUnderTest();
+        
+        Record<Event> record = new Record<Event>(JacksonEvent.fromMessage(UUID.randomUUID().toString()));
+        kafkaBuffer.doWrite(record, 10000);
+        
+        verify(producer).produceRecords(record);
+    }
+
+    @Test
+    void test_customCompressionOption_with_encryption_enabled_and_gzip_compression() {
+        when(bufferConfig.getTopic().encryptionAtRestEnabled()).thenReturn(true);
+        when(kafkaProducerProperties.getCompressionType()).thenReturn("gzip");
+        
+        kafkaBuffer = createObjectUnderTest();
+        
+        assertThat(kafkaBuffer.getCustomCompressionOption().name(), equalTo("GZIP"));
+        verify(kafkaProducerProperties).setCompressionType("none");
+    }
+
+    @Test
+    void test_customCompressionOption_with_encryption_disabled() {
+        when(bufferConfig.getTopic().encryptionAtRestEnabled()).thenReturn(false);
+        
+        kafkaBuffer = createObjectUnderTest();
+        
+        assertThat(kafkaBuffer.getCustomCompressionOption().name(), equalTo("NONE"));
+    }
+
+    @Test
+    void test_compressionOption_supports_all_kafka_compression_types() {
+        String[] kafkaCompressionTypes = {"none", "gzip", "snappy", "zstd"};
+        
+        for (String compressionType : kafkaCompressionTypes) {
+            CompressionOption option = CompressionOption.fromOptionValue(compressionType);
+            assertThat("CompressionOption should support Kafka compression type to ensure that KafkaBuffer compresses data properly when encryption is enabled: " + compressionType,
+                      option, org.hamcrest.Matchers.notNullValue());
+        }
+    }
+
 }

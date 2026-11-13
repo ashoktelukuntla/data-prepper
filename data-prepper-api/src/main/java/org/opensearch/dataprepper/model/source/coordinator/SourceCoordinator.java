@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.source.coordinator;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -42,6 +47,31 @@ public interface SourceCoordinator<T> {
      * @since 2.2
      */
     Optional<SourcePartition<T>> getNextPartition(final Function<Map<String, Object>, List<PartitionIdentifier>> partitionCreationSupplier);
+
+
+    /**
+     * This should be called by the source when it needs to get the next partition it should process on.
+     * This method will attempt to acquire a partition for this instance of the source to work on, and if no partition is acquired, the partitionCreatorSupplier will be called to potentially create
+     * new partitions. This method will then attempt to acquire a partition again after creating new partitions from the supplier, and will return the result of that attempt whether a partition was
+     * acquired successfully or not. It is recommended to backoff and retry at the source level when this method returns an empty Optional.
+     * @param partitionCreationSupplier - The Function that will provide partitions. This supplier will be called by the SourceCoordinator when no partitions are acquired
+     *     for this instance of Data Prepper. This function will be passed a global state map, which will be empty until it is used and modified in the supplier function passed.
+     *     If the global state map is not needed, then it can be ignored. Updating the global state map will save it, so the next time the supplier function is run,
+     *     it will contain the most recent state from the previous supplier function run.
+     * @param forceSupplier - If set to true, the SourceCoordinator will check if the supplier has been run in the last X minutes, and if it has not, will force it to run
+     * @return {@link SourcePartition} with the details about how to process this partition. Will repeatedly return the partition until
+     * {@link SourceCoordinator#completePartition(String, Boolean)}
+     * or {@link SourceCoordinator#closePartition(String, Duration, int, Boolean)} are called by the source,
+     * or until the partition ownership times out.
+     * @since 2.2
+     */
+    Optional<SourcePartition<T>> getNextPartition(final Function<Map<String, Object>, List<PartitionIdentifier>> partitionCreationSupplier, final boolean forceSupplier);
+
+    /**
+     * Can be used to directly create partitions for source coordination, as an alternative to relying on getNextPartition to create partitions.
+     * @param partitionIdentifiers  - The partitions to be created.
+     */
+    void createPartitions(final List<PartitionIdentifier> partitionIdentifiers);
 
     /**
      * Should be called by the source when it has fully processed a given partition
@@ -91,12 +121,35 @@ public interface SourceCoordinator<T> {
 
     /**
      * Should be called by the source when it is shutting down to indicate that it will no longer be able to perform work on partitions,
-     * or can be called to give up ownership of its partitions in order to pick up new ones with {@link #getNextPartition(Function)} ()}.
+     * or can be called to give up ownership of a partition in order to pick up new ones with {@link #getNextPartition(Function)} ()}.
+     * This is used when source coordinator is shared by multiple threads.
+     * @param partitionKey partition to giveup ownership
      * @throws org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException if the partition could not be given up due to some failure
-     * @since 2.2
+     * @since 2.8
      */
-    void giveUpPartitions();
+    void giveUpPartition(String partitionKey);
 
+    /**
+     * Should be called by the source when it is shutting down to indicate that it will no longer be able to perform work on partitions,
+     * or can be called to give up ownership of its partitions in order to pick up new ones with {@link #getNextPartition(Function)} ()}.
+     * @param partitionKey - Key used as the partition key.
+     * @param priorityTimestamp - A timestamp that will determine the order that UNASSIGNED partitions are acquired after they are given up.
+     * @throws org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException if the partition could not be given up due to some failure
+     * @since 2.8
+     */
+    void giveUpPartition(final String partitionKey, final Instant priorityTimestamp);
+
+
+    /**
+     * Should be called by the source when it is shutting down to indicate that it will no longer be able to perform work on partitions,
+     * or can be called to give up ownership of its partitions in order to pick up new ones with {@link #getNextPartition(Function)} ()}.
+     * @param partitionKey - Key used as the partition key.
+     * @param priorityTimestamp - A timestamp that will determine the order that UNASSIGNED partitions are acquired after they are given up.
+     * @param maxRetries - The number of times to retry giving up the partition before throwing an exception
+     * @throws org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException if the partition could not be given up due to some failure
+     * @since 2.12
+     */
+    void giveUpPartition(final String partitionKey, final Instant priorityTimestamp,final Integer maxRetries);
 
     /**
      * Should be called by the source after when acknowledgments are enabled to keep ownership of the partition for acknowledgmentTimeout amount of time
@@ -106,4 +159,13 @@ public interface SourceCoordinator<T> {
      *                             can pick it up for processing
      */
     void updatePartitionForAcknowledgmentWait(final String partitionKey, final Duration ackowledgmentTimeout);
+
+    /**
+     * Should be called by the source to keep ownership of the partition
+     * before another instance of Data Prepper can pick it up for processing.
+     * @param partitionKey - the partition to renew ownership for
+     */
+    void renewPartitionOwnership(final String partitionKey);
+
+    void deletePartition(final String partitionKey);
 }

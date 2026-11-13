@@ -5,23 +5,22 @@
 
 package org.opensearch.dataprepper.expression;
 
-import org.junit.jupiter.api.BeforeEach;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
-import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
-import java.util.Random;
 
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -30,18 +29,8 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import org.apache.commons.lang3.RandomStringUtils;
 
-class GenericExpressionEvaluator_MultiTypeIT {
-
-    private AnnotationConfigApplicationContext applicationContext;
-
-    @BeforeEach
-    void beforeEach() {
-        applicationContext = new AnnotationConfigApplicationContext();
-        applicationContext.scan("org.opensearch.dataprepper.expression");
-        applicationContext.refresh();
-    }
+class GenericExpressionEvaluator_MultiTypeIT extends BaseExpressionEvaluatorIT {
 
     @ParameterizedTest
     @MethodSource("validStringExpressionArguments")
@@ -143,7 +132,19 @@ class GenericExpressionEvaluator_MultiTypeIT {
                 Arguments.of("getMetadata(\"strAttr\")+\""+testString2+"\"+/key", testEvent, testString+testString2+"value", String.class),
                 Arguments.of("join(/list)", testEvent, "string,1,true", String.class),
                 Arguments.of("join(\"\\\\, \", /list)", testEvent, "string, 1, true", String.class),
-                Arguments.of("join(\" \", /list)", testEvent, "string 1 true", String.class)
+                Arguments.of("join(\" \", /list)", testEvent, "string 1 true", String.class),
+                Arguments.of("substringAfter(\"hello-world\", \"-\")", event("{}"), "world", String.class),
+                Arguments.of("substringAfter(/field, \"-\")", event("{\"field\": \"hello-world\"}"), "world", String.class),
+                Arguments.of("substringAfter(\"no-match\", \"xyz\")", event("{}"), "no-match", String.class),
+                Arguments.of("substringBefore(\"hello-world\", \"-\")", event("{}"), "hello", String.class),
+                Arguments.of("substringBefore(/field, \"-\")", event("{\"field\": \"hello-world\"}"), "hello", String.class),
+                Arguments.of("substringBefore(\"no-match\", \"xyz\")", event("{}"), "no-match", String.class),
+                Arguments.of("substringAfterLast(\"/app/src/main.py\", \"/\")", event("{}"), "main.py", String.class),
+                Arguments.of("substringAfterLast(/field, \"/\")", event("{\"field\": \"/app/src/main.py\"}"), "main.py", String.class),
+                Arguments.of("substringAfterLast(\"no-match\", \"xyz\")", event("{}"), "no-match", String.class),
+                Arguments.of("substringBeforeLast(\"/app/src/main.py\", \"/\")", event("{}"), "/app/src", String.class),
+                Arguments.of("substringBeforeLast(/field, \"/\")", event("{\"field\": \"/app/src/main.py\"}"), "/app/src", String.class),
+                Arguments.of("substringBeforeLast(\"no-match\", \"xyz\")", event("{}"), "no-match", String.class)
         );
     }
 
@@ -163,8 +164,14 @@ class GenericExpressionEvaluator_MultiTypeIT {
                 // Can't mix Numbers and Strings when using operators
                 Arguments.of("/status + /message", event("{\"status\": 200, \"message\":\"msg\"}")),
                 // Wrong number of arguments
+                Arguments.of("join(/list, \" \", \"third_arg\")", event("{\"list\":[\"string\", 1, true]}")),
                 Arguments.of("join()", event("{\"list\":[\"string\", 1, true]}")),
-                Arguments.of("join(/list, \" \", \"third_arg\")", event("{\"list\":[\"string\", 1, true]}"))
+                Arguments.of("contains()", event("{\"list\":[\"string\", 1, true]}")),
+                Arguments.of("startsWith()", event("{\"list\":[\"string\", 1, true]}")),
+                Arguments.of("substringAfter()", event("{\"list\":[\"string\", 1, true]}")),
+                Arguments.of("substringBefore()", event("{\"list\":[\"string\", 1, true]}")),
+                Arguments.of("substringAfterLast()", event("{\"list\":[\"string\", 1, true]}")),
+                Arguments.of("substringBeforeLast()", event("{\"list\":[\"string\", 1, true]}"))
         );
     }
 

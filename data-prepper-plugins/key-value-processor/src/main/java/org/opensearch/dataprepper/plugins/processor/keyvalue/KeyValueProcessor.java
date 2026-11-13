@@ -5,10 +5,15 @@
 
 package org.opensearch.dataprepper.plugins.processor.keyvalue;
 
+import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.common.TransformOption;
+import org.opensearch.dataprepper.model.event.FieldConflictStrategy;
+import org.opensearch.dataprepper.model.event.MergeSettings;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -40,8 +45,12 @@ import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
 @DataPrepperPlugin(name = "key_value", pluginType = Processor.class, pluginConfigurationType = KeyValueProcessorConfig.class)
 public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
     private static final Logger LOG = LoggerFactory.getLogger(KeyValueProcessor.class);
+    private static String startGroupStrings[] = {"\"","'", "(", "[", "<", "{", "http://", "https://"};
+    private static Character endGroupChars[] ={'"', '\'', ')', ']', '>', '}', ' ', ' '};
 
     private final KeyValueProcessorConfig keyValueProcessorConfig;
+
+    private final ExpressionEvaluator expressionEvaluator;
 
     private final Pattern fieldDelimiterPattern;
     private final Pattern keyValueDelimiterPattern;
@@ -49,21 +58,24 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
     private final Set<String> excludeKeysSet = new HashSet<String>();
     private final HashMap<String, Object> defaultValuesMap = new HashMap<>();
     private final Set<String> defaultValuesSet = new HashSet<String>();
-    private final String lowercaseKey = "lowercase";
-    private final String uppercaseKey = "uppercase";
-    private final String capitalizeKey = "capitalize";
-    private final Set<String> validTransformOptionSet = Set.of("", lowercaseKey, uppercaseKey, capitalizeKey);
     private final String whitespaceStrict = "strict";
     private final String whitespaceLenient = "lenient";
     private final Set<String> validWhitespaceSet = Set.of(whitespaceLenient, whitespaceStrict);
     final String delimiterBracketCheck = "[\\[\\]()<>]";
     private final Set<Character> bracketSet = Set.of('[', ']', '(', ')', '<', '>');
     private final List<String> tagsOnFailure;
+    private final Character stringLiteralCharacter;
+    private final String keyPrefix;
+    private final MergeSettings mergeSettings;
 
     @DataPrepperPluginConstructor
-    public KeyValueProcessor(final PluginMetrics pluginMetrics, final KeyValueProcessorConfig keyValueProcessorConfig) {
+    public KeyValueProcessor(final PluginMetrics pluginMetrics,
+                             final KeyValueProcessorConfig keyValueProcessorConfig,
+                             final ExpressionEvaluator expressionEvaluator) {
         super(pluginMetrics);
         this.keyValueProcessorConfig = keyValueProcessorConfig;
+
+        this.stringLiteralCharacter = keyValueProcessorConfig.getStringLiteralCharacter();
 
         tagsOnFailure = keyValueProcessorConfig.getTagsOnFailure();
 
@@ -155,14 +167,6 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
         }
 
         validateKeySets(includeKeysSet, excludeKeysSet, defaultValuesSet);
-        
-        if (!validTransformOptionSet.contains(keyValueProcessorConfig.getTransformKey())) {
-            throw new IllegalArgumentException(String.format("The transform_key value: %s is not a valid option", keyValueProcessorConfig.getTransformKey()));
-        }
-
-        if (!(validWhitespaceSet.contains(keyValueProcessorConfig.getWhitespace()))) {
-            throw new IllegalArgumentException(String.format("The whitespace value: %s is not a valid option", keyValueProcessorConfig.getWhitespace()));
-        }
 
         final Pattern boolCheck = Pattern.compile("true|false", Pattern.CASE_INSENSITIVE);
         final Matcher duplicateValueBoolMatch = boolCheck.matcher(String.valueOf(keyValueProcessorConfig.getSkipDuplicateValues()));
@@ -184,6 +188,44 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
         if (keyValueProcessorConfig.getRemoveBrackets() && keyValueProcessorConfig.getRecursive()) {
             throw new IllegalArgumentException("Cannot remove brackets needed for determining levels of recursion");
         }
+
+        this.expressionEvaluator = expressionEvaluator;
+        if (keyValueProcessorConfig.getKeyValueWhen() != null
+                && !expressionEvaluator.isValidExpressionStatement(keyValueProcessorConfig.getKeyValueWhen())) {
+            throw new InvalidPluginConfigurationException(
+                    String.format("key_value_when %s is not a valid expression statement", keyValueProcessorConfig.getKeyValueWhen()));
+        }
+
+        keyPrefix = keyValueProcessorConfig.getPrefix() != null ? keyValueProcessorConfig.getPrefix() : "";
+
+        final FieldConflictStrategy fieldConflictStrategy = resolveFieldConflictStrategy(keyValueProcessorConfig);
+        final boolean normalizeKeys = keyValueProcessorConfig.getNormalizeKeys();
+        this.mergeSettings = new MergeSettings(fieldConflictStrategy, normalizeKeys);
+    }
+
+    private static FieldConflictStrategy resolveFieldConflictStrategy(final KeyValueProcessorConfig config) {
+        final FieldConflictStrategy conflictStrategy = config.getFieldConflictStrategy();
+        final Boolean overwriteIfDestinationExists = config.getOverwriteIfDestinationExists();
+
+        if (conflictStrategy != null && overwriteIfDestinationExists != null) {
+            throw new InvalidPluginConfigurationException(
+                    "overwrite_if_destination_exists and destination_conflict_strategy cannot both be set. " +
+                            "Use destination_conflict_strategy only.");
+        }
+
+        if (conflictStrategy != null) {
+            return conflictStrategy;
+        }
+
+        if (Boolean.FALSE.equals(overwriteIfDestinationExists)) {
+            LOG.warn("overwrite_if_destination_exists is deprecated. Use destination_conflict_strategy: skip instead.");
+            return FieldConflictStrategy.SKIP;
+        }
+
+        if (overwriteIfDestinationExists != null) {
+            LOG.warn("overwrite_if_destination_exists is deprecated. Use destination_conflict_strategy: overwrite instead.");
+        }
+        return FieldConflictStrategy.OVERWRITE;
     }
 
     private String buildRegexFromCharacters(String s) {
@@ -230,6 +272,106 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
         }
     }
 
+    private boolean isEscapedQuote(final String str, int idx) {
+        if (idx > 0) {
+            if ((str.charAt(idx) == '"' || str.charAt(idx) == '\'') &&
+                (str.charAt(idx-1) == '\\'))
+                return true;
+        }
+        return false;
+    }
+
+    public int skipGroup(final String str, int idx, final Character endChar) {
+        int i = idx;
+        while (i < str.length()) {
+            if (isEscapedQuote(str, i)) {
+                i++;
+                continue;
+            } else if (str.charAt(i) == endChar) {
+                return i;
+            } else
+                i++;
+        }
+        if (keyValueProcessorConfig.isStrictGroupingEnabled()) {
+            throw new RuntimeException("Bad Input, no end character found in "+str+" after index " + idx +", expected end char = "+endChar);
+        }
+        return i-1;
+    }
+
+    private void addPart(List<String> parts, final String str, final int start, final int end) {
+        String part = str.substring(start,end).trim();
+        if (part.length() > 0) {
+            parts.add(part);
+        }
+    }
+
+    private int findInStartGroup(final String str, final int idx) {
+        if (idx < 0 || idx >= str.length()) {
+            return -1; // Invalid starting index
+        }
+
+        for (int j = 0; j < startGroupStrings.length; j++) {
+            String startGroup = startGroupStrings[j];
+            int startGroupLen = startGroup.length();
+
+            if (idx + startGroupLen <= str.length() && str.startsWith(startGroup, idx)) {
+                // For the first two elements, check for escape characters
+                if (j <= 1 && (idx == 0 || str.charAt(idx - 1) != '\\')) {
+                    return j;
+                } else if (j > 1) {
+                    return j;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private List<String> parseWithValueGrouping(String str) {
+        String fieldDelimiter = keyValueProcessorConfig.getFieldSplitCharacters();
+        Set<Character> fieldDelimiterSet = new HashSet<>();
+        for (char ch : fieldDelimiter.toCharArray()) {
+            fieldDelimiterSet.add(ch);
+        }
+        int i = 0;
+        int start = i;
+        List<String> parts = new ArrayList<>();
+        while (i < str.length()) {
+            // checks if a " or ' is escaped using \, if yes, it is
+            // not considered as a start of a group
+            if (isEscapedQuote(str, i)) {
+                i++;
+                continue;
+            }
+
+            int groupIndex = findInStartGroup(str, i);
+            boolean skippedGroup = false;
+            if (groupIndex >= 0) {
+                String[] s = keyValueDelimiterPattern.split(str.substring(start,i+1));
+                // Only handle Grouping patterns in the values, not keys
+                if (s.length > 1 || (stringLiteralCharacter != null && startGroupStrings[groupIndex].charAt(0) == stringLiteralCharacter)) {
+                    i = skipGroup(str, i+1, endGroupChars[groupIndex]);
+                    skippedGroup = true;
+                }
+            }
+            if (fieldDelimiterSet.contains(str.charAt(i))) {
+                // If end of group character is same as field delimiter, then include that in the value if value grouping is done
+                if (skippedGroup) {
+                    i++;
+                }
+                addPart(parts, str, start, i);
+                i++;
+                start = i;
+            } else {
+               i++;
+            }
+        }
+        if (start != i) {
+            addPart(parts, str, start, i);
+        }
+
+        return parts;
+    }
+
     @Override
     public Collection<Record<Event>> doExecute(final Collection<Record<Event>> records) {
         final ObjectMapper mapper = new ObjectMapper();
@@ -239,11 +381,20 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
             final Event recordEvent = record.getData();
 
             try {
+                if (keyValueProcessorConfig.getKeyValueWhen() != null && !expressionEvaluator.evaluateConditional(keyValueProcessorConfig.getKeyValueWhen(), recordEvent)) {
+                    continue;
+                }
+
                 final String groupsRaw = recordEvent.get(keyValueProcessorConfig.getSource(), String.class);
                 if (groupsRaw == null) {
                     continue;
                 }
-                final String[] groups = fieldDelimiterPattern.split(groupsRaw, 0);
+                String[] groups;
+                if (keyValueProcessorConfig.getValueGrouping()) {
+                    groups = parseWithValueGrouping(groupsRaw).stream().toArray(String[]::new);
+                } else {
+                    groups = fieldDelimiterPattern.split(groupsRaw, 0);
+                }
 
                 if (keyValueProcessorConfig.getRecursive()) {
                     try {
@@ -263,15 +414,7 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
                 }
 
                 final Map<String, Object> processedMap = executeConfigs(outputMap);
-
-                if (Objects.isNull(keyValueProcessorConfig.getDestination())) {
-                    writeToRoot(recordEvent, processedMap);
-                } else {
-                    if (keyValueProcessorConfig.getOverwriteIfDestinationExists() ||
-                            !recordEvent.containsKey(keyValueProcessorConfig.getDestination())) {
-                        recordEvent.put(keyValueProcessorConfig.getDestination(), processedMap);
-                    }
-                }
+                recordEvent.mergeFields(keyValueProcessorConfig.getDestination(), processedMap, mergeSettings);
             } catch (final Exception e) {
                 LOG.error(EVENT, "There was an exception while processing on Event [{}]: ", recordEvent, e);
                 recordEvent.getMetadata().addTags(tagsOnFailure);
@@ -354,7 +497,7 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
                     valueEnd = pair.length() - 1;
                     valueString = pair.substring(valueStart, valueEnd).stripLeading();
                     JsonNode child = ((ObjectNode) root).put(keyString, recurse(valueString, mapper));
-                } 
+                }
             } else {
                 valueString = pair.substring(valueStart).stripLeading();
                 ObjectNode child = ((ObjectNode)root).put(keyString, valueString);
@@ -378,15 +521,30 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
         return mapper.convertValue(node, new TypeReference<HashMap<String, Object>>() {});
     }
 
+    private boolean isIgnoredGroup(String group) {
+        // If a group starts and ends with stringLiteralCharacter,
+        // treat the entire group as key with null as the value
+        return stringLiteralCharacter != null &&
+            group.charAt(0) == stringLiteralCharacter &&
+            group.charAt(group.length()-1) == stringLiteralCharacter;
+    }
+
     private Map<String, Object> createNonRecursedMap(String[] groups) {
         Map<String, Object> nonRecursedMap = new LinkedHashMap<>();
         List<Object> valueList;
 
         for(final String group : groups) {
+            if (isIgnoredGroup(group)) {
+                if (validKeyAndValue(group, null)) {
+                    nonRecursedMap.put(group, null);
+                }
+                continue;
+            }
+
             final String[] terms = keyValueDelimiterPattern.split(group, 2);
             String key = terms[0];
             Object value;
-            
+
             if (terms.length == 2) {
                 value = terms[1];
             } else {
@@ -402,7 +560,9 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
                 } else {
                     valueList = new ArrayList<Object>();
                     valueList.add(existingValue);
-                    nonRecursedMap.put(key, valueList);
+                    if (validKeyAndValue(key, valueList)) {
+                        nonRecursedMap.put(key, valueList);
+                    }
                 }
 
                 if (keyValueProcessorConfig.getSkipDuplicateValues()) {
@@ -413,7 +573,9 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
                     valueList.add(value);
                 }
             } else {
-                nonRecursedMap.put(key, value);
+                if (validKeyAndValue(key, value)) {
+                    nonRecursedMap.put(key, value);
+                }
             }
         }
 
@@ -440,7 +602,7 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
             if (keyValueProcessorConfig.getDeleteKeyRegex() != null && !Objects.equals(keyValueProcessorConfig.getDeleteKeyRegex(), "")) {
                 key = key.replaceAll(keyValueProcessorConfig.getDeleteKeyRegex(), "");
             }
-            key = keyValueProcessorConfig.getPrefix() + key;
+            key = keyPrefix + key;
 
             if (value != null
                     && value instanceof String
@@ -449,14 +611,14 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
                 value = ((String)value).replaceAll(keyValueProcessorConfig.getDeleteValueRegex(), "");
             }
 
-            if (keyValueProcessorConfig.getWhitespace().equals(whitespaceStrict)) {
+            if (keyValueProcessorConfig.getWhitespace() == WhitespaceOption.STRICT) {
                 String[] whitespace_arr = trimWhitespace(key, value);
                 key = whitespace_arr[0];
                 value = whitespace_arr[1];
             }
 
             if (keyValueProcessorConfig.getTransformKey() != null
-                    && !keyValueProcessorConfig.getTransformKey().isEmpty()) {
+                    && keyValueProcessorConfig.getTransformKey() != TransformOption.NONE) {
                 key = transformKey(key);
             }
 
@@ -475,7 +637,10 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
                 LOG.debug("Skipping already included default key: '{}'", pair.getKey());
                 continue;
             }
-            processed.put(pair.getKey(), pair.getValue());
+            if (validKeyAndValue(pair.getKey(), pair.getValue())) {
+                String key = pair.getKey();
+                processed.put(key, pair.getValue());
+            }
         }
 
         return processed;
@@ -485,20 +650,28 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
         String[] arr = {key.stripTrailing(), value.toString().stripLeading()};
         return arr;
     }
-    
+
     private String transformKey(String key) {
-        if (keyValueProcessorConfig.getTransformKey().equals(lowercaseKey)) {
-            key = key.toLowerCase();
-        } else if (keyValueProcessorConfig.getTransformKey().equals(capitalizeKey)) {
-            key = key.substring(0, 1).toUpperCase() + key.substring(1);
-        } else if (keyValueProcessorConfig.getTransformKey().equals(uppercaseKey)) {
-            key = key.toUpperCase();
+        return keyValueProcessorConfig.getTransformKey().getTransformFunction().apply(key);
+    }
+
+    private boolean validKeyAndValue(String key, Object value) {
+        if (key == null || key.isEmpty()) {
+            return false;
         }
-        return key;
+
+        if (keyValueProcessorConfig.getDropKeysWithNoValue() && value == null) {
+            return false;
+        }
+        return true;
     }
 
     private void addKeyValueToMap(final Map<String, Object> parsedMap, final String key, Object value) {
         Object processedValue = value;
+
+        if (!validKeyAndValue(key, value)) {
+            return;
+        }
 
         if (value instanceof List) {
             List<?> valueAsList = (List<?>) value;
@@ -535,11 +708,4 @@ public class KeyValueProcessor extends AbstractProcessor<Record<Event>, Record<E
         }
     }
 
-    private void writeToRoot(final Event event, final Map<String, Object> parsedJson) {
-        for (Map.Entry<String, Object> entry : parsedJson.entrySet()) {
-            if (keyValueProcessorConfig.getOverwriteIfDestinationExists() || !event.containsKey(entry.getKey())) {
-                event.put(entry.getKey(), entry.getValue());
-            }
-        }
-    }
 }

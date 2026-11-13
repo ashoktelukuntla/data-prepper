@@ -1,65 +1,42 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import org.opensearch.dataprepper.model.configuration.PluginModel;
-import org.opensearch.dataprepper.model.configuration.PluginSetting;
-import org.opensearch.dataprepper.model.configuration.SinkModel;
-import org.opensearch.dataprepper.parser.model.PipelineConfiguration;
-
-import java.io.File;
-import java.io.IOException;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 public class TestDataProvider {
-    public static final String TEST_PIPELINE_NAME = "test-pipeline-1";
-    public static final String TEST_PLUGIN_NAME_1 = "test-plugin-1";
-    public static final String TEST_PLUGIN_NAME_2 = "test-plugin-2";
-    public static final Integer TEST_WORKERS = 5;
-    public static final Integer DEFAULT_WORKERS = 1;
-    public static final Integer DEFAULT_READ_BATCH_DELAY = 3_000;
-    public static final Integer TEST_DELAY = 3_000;
     public static final String VALID_MULTIPLE_PIPELINE_CONFIG_FILE = "src/test/resources/valid_multiple_pipeline_configuration.yml";
-    public static final String VALID_PIPELINE_CONFIG_FILE_WITH_EXTENSIONS = "src/test/resources/valid_pipeline_configuration_with_extensions.yml";
     public static final String VALID_SINGLE_PIPELINE_EMPTY_SOURCE_PLUGIN_FILE = "src/test/resources/single_pipeline_valid_empty_source_plugin_settings.yml";
     public static final String VALID_OFF_HEAP_FILE = "src/test/resources/single_pipeline_valid_off_heap_buffer.yml";
+    public static final String VALID_OFF_HEAP_FILE_WITH_ACKS = "src/test/resources/multiple_pipeline_valid_off_heap_buffer_with_acks.yml";
+    public static final String DISCONNECTED_VALID_OFF_HEAP_FILE_WITH_ACKS = "src/test/resources/multiple_disconnected_pipeline_valid_off_heap_buffer_with_acks.yml";
     public static final String CONNECTED_PIPELINE_ROOT_SOURCE_INCORRECT = "src/test/resources/connected_pipeline_incorrect_root_source.yml";
-    public static final String CONNECTED_PIPELINE_CHILD_PIPELINE_INCORRECT = "src/test/resources/connected_pipeline_incorrect_child_pipeline.yml";
+    public static final String CONNECTED_PIPELINE_BUFFER_INCORRECT = "src/test/resources/connected_pipeline_incorrect_buffer.yml";
+    public static final String CONNECTED_PIPELINE_PROCESSOR_INCORRECT = "src/test/resources/connected_pipeline_incorrect_processor.yml";
+    public static final String CONNECTED_PIPELINE_SINK_INCORRECT = "src/test/resources/connected_pipeline_incorrect_sink.yml";
+    public static final String CONNECTED_PIPELINE_CHILD_PIPELINE_INCORRECT_DUE_TO_SINK = "src/test/resources/connected_pipeline_incorrect_child_pipeline_due_to_invalid_sink.yml";
+    public static final String CONNECTED_PIPELINE_CHILD_PIPELINE_INCORRECT_DUE_TO_PROCESSOR = "src/test/resources/connected_pipeline_incorrect_child_pipeline_due_to_invalid_processor.yml";
     public static final String CYCLE_MULTIPLE_PIPELINE_CONFIG_FILE = "src/test/resources/cyclic_multiple_pipeline_configuration.yml";
     public static final String INCORRECT_SOURCE_MULTIPLE_PIPELINE_CONFIG_FILE = "src/test/resources/incorrect_source_multiple_pipeline_configuration.yml";
     public static final String MISSING_NAME_MULTIPLE_PIPELINE_CONFIG_FILE = "src/test/resources/missing_name_multiple_pipeline_configuration.yml";
+    public static final String MISSING_SOURCE_MULTIPLE_PIPELINE_CONFIG_FILE = "src/test/resources/missing_source_multiple_pipeline_configuration.yml";
     public static final String MISSING_PIPELINE_MULTIPLE_PIPELINE_CONFIG_FILE = "src/test/resources/missing_pipeline_multiple_pipeline_configuration.yml";
-    public static final String MULTI_FILE_PIPELINE_DIRECTOTRY = "src/test/resources/multi-pipelines";
-    public static final String MULTI_FILE_PIPELINE_WITH_DISTRIBUTED_PIPELINE_CONFIGURATIONS_DIRECTOTRY = "src/test/resources/multi-pipelines-distributed-pipeline-configurations";
-    public static final String MULTI_FILE_PIPELINE_WITH_SINGLE_PIPELINE_CONFIGURATIONS_DIRECTOTRY = "src/test/resources/multi-pipelines-single-pipeline-configurations";
-    public static final String SINGLE_FILE_PIPELINE_DIRECTOTRY = "src/test/resources/single-pipeline";
-    public static final String EMPTY_PIPELINE_DIRECTOTRY = "src/test/resources/no-pipelines";
     public static final String VALID_MULTIPLE_SINKS_CONFIG_FILE = "src/test/resources/valid_multiple_sinks.yml";
-    public static final String INCOMPATIBLE_VERSION_CONFIG_FILE = "src/test/resources/incompatible_version.yml";
+    public static final String VALID_MULTIPLE_SINKS_WITH_FAILURE_PIPELINE_CONFIG_FILE = "src/test/resources/valid_multiple_sinks_with_routes_with_failure_pipeline.yml";
     public static final String COMPATIBLE_VERSION_CONFIG_FILE = "src/test/resources/compatible_version.yml";
     public static final String VALID_MULTIPLE_PROCESSERS_CONFIG_FILE = "src/test/resources/valid_multiple_processors.yml";
-    public static final String NO_PIPELINES_EXECUTE_CONFIG_FILE = "src/test/resources/no_pipelines_to_execute.yml";
     public static final String VALID_DATA_PREPPER_CONFIG_FILE = "src/test/resources/valid_data_prepper_config.yml";
-    public static final String VALID_DATA_PREPPER_CONFIG_FILE_WITH_TLS = "src/test/resources/valid_data_prepper_config_with_tls.yml";
     public static final String VALID_DATA_PREPPER_CONFIG_FILE_WITH_BASIC_AUTHENTICATION = "src/test/resources/valid_data_prepper_config_with_basic_authentication.yml";
     public static final String VALID_DATA_PREPPER_CONFIG_FILE_WITH_CAMEL_CASE_OPTIONS = "src/test/resources/valid_data_prepper_config_with_camel_case_options.yml";
-    public static final String VALID_DATA_PREPPER_DEFAULT_LOG4J_CONFIG_FILE = "src/test/resources/valid_data_prepper_config_default_log4j.yml";
     public static final String VALID_DATA_PREPPER_SOME_DEFAULT_CONFIG_FILE = "src/test/resources/valid_data_prepper_some_default_config.yml";
     public static final String VALID_DATA_PREPPER_CLOUDWATCH_METRICS_CONFIG_FILE = "src/test/resources/valid_data_prepper_cloudwatch_metrics_config.yml";
     public static final String VALID_DATA_PREPPER_MULTIPLE_METRICS_CONFIG_FILE = "src/test/resources/valid_data_prepper_multiple_metrics_config.yml";
@@ -75,7 +52,6 @@ public class TestDataProvider {
     public static final String INVALID_DATA_PREPPER_CONFIG_FILE_WITH_NEGATIVE_PROCESSOR_SHUTDOWN_TIMEOUT = "src/test/resources/invalid_data_prepper_config_with_negative_processor_shutdown_timeout.yml";
     public static final String INVALID_DATA_PREPPER_CONFIG_FILE_WITH_NEGATIVE_SINK_SHUTDOWN_TIMEOUT = "src/test/resources/invalid_data_prepper_config_with_negative_sink_shutdown_timeout.yml";
     public static final String INVALID_PORT_DATA_PREPPER_CONFIG_FILE = "src/test/resources/invalid_port_data_prepper_config.yml";
-    public static final String INVALID_KEYSTORE_PASSWORD_DATA_PREPPER_CONFIG_FILE = "src/test/resources/invalid_data_prepper_config_with_bad_keystore_password.yml";
     public static final String VALID_PEER_FORWARDER_DATA_PREPPER_CONFIG_FILE = "src/test/resources/valid_data_prepper_config_wth_peer_forwarder_config.yml";
     public static final String VALID_PEER_FORWARDER_CONFIG_WITHOUT_SSL_FILE = "src/test/resources/valid_peer_forwarder_without_ssl_config.yml";
     public static final String VALID_PEER_FORWARDER_CONFIG_FILE = "src/test/resources/valid_peer_forwarder_config.yml";
@@ -101,63 +77,10 @@ public class TestDataProvider {
     public static final String VALID_PEER_FORWARDER_WITH_ACM_SSL_CONFIG_FILE = "src/test/resources/valid_peer_forwarder_config_with_acm_ssl.yml";
     public static final String VALID_DATA_PREPPER_CONFIG_WITH_METRIC_FILTER = "src/test/resources/valid_data_prepper_config_with_metric_filter.yml";
     public static final String INVALID_DATA_PREPPER_CONFIG_WITH_METRIC_FILTER = "src/test/resources/invalid_data_prepper_config_with_metric_filter.yml";
-
-
-
-
+    public static final String VALID_ZERO_BUFFER_SINGLE_THREAD_CONFIG_FILE = "src/test/resources/valid_zero_buffer_single_thread.yml";
+    public static final String INVALID_ZERO_BUFFER_MULTIPLE_THREADS_CONFIG_FILE = "src/test/resources/invalid_zero_buffer_multiple_threads.yml";
+    public static final String INVALID_ZERO_BUFFER_WITH_SINGLE_THREAD_PROCESSOR_CONFIG_FILE = "src/test/resources/invalid_zero_buffer_with_single_thread_processor.yml";
+    public static final String INVALID_ZERO_BUFFER_MULTIPLE_THREADS_NO_SINGLE_THREAD_PROCESSORS_CONFIG_FILE = "src/test/resources/invalid_zero_buffer_multiple_threads_no_single_thread_processors.yml";
     public static Set<String> VALID_MULTIPLE_PIPELINE_NAMES = new HashSet<>(Arrays.asList("test-pipeline-1",
             "test-pipeline-2", "test-pipeline-3"));
-    public static PluginSetting VALID_PLUGIN_SETTING_1 = new PluginSetting(TEST_PLUGIN_NAME_1, validSettingsForPlugin());
-    public static PluginSetting VALID_PLUGIN_SETTING_2 = new PluginSetting(TEST_PLUGIN_NAME_2, validSettingsForPlugin());
-
-    private static Map<String, Object> validSettingsForPlugin() {
-        final Map<String, Object> settingsMap = new HashMap<>();
-        settingsMap.put("someProperty", "someValue");
-        return settingsMap;
-    }
-
-    public static PluginModel validSingleConfiguration() {
-        return validPluginModel(TEST_PLUGIN_NAME_1);
-    }
-
-    private static PluginModel validPluginModel(final String pluginName) {
-        final PluginModel pluginModel = mock(PluginModel.class);
-        when(pluginModel.getPluginName()).thenReturn(pluginName);
-        when(pluginModel.getPluginSettings()).thenReturn(validSettingsForPlugin());
-        return pluginModel;
-    }
-
-    private static SinkModel validSinkModel(final String pluginName) {
-        final SinkModel sinkModel = mock(SinkModel.class);
-        when(sinkModel.getPluginName()).thenReturn(pluginName);
-        when(sinkModel.getPluginSettings()).thenReturn(validSettingsForPlugin());
-        when(sinkModel.getRoutes()).thenReturn(Collections.emptyList());
-        return sinkModel;
-    }
-
-    public static List<PluginModel> validMultipleConfiguration() {
-        return Arrays.asList(validPluginModel(TEST_PLUGIN_NAME_1), validPluginModel(TEST_PLUGIN_NAME_2));
-    }
-
-    public static List<SinkModel> validMultipleSinkConfiguration() {
-        return Arrays.asList(validSinkModel(TEST_PLUGIN_NAME_1), validSinkModel(TEST_PLUGIN_NAME_2));
-    }
-
-    public static List<PluginModel> validMultipleConfigurationOfSizeOne() {
-        return Collections.singletonList(validSingleConfiguration());
-    }
-
-    public static List<SinkModel> validMultipleSinkConfigurationOfSizeOne() {
-        return Collections.singletonList(validSinkModel(TEST_PLUGIN_NAME_1));
-    }
-
-    public static Map<String, PipelineConfiguration> readConfigFile(final String configFilePath) throws IOException {
-        final ObjectMapper objectMapper = new ObjectMapper(new YAMLFactory())
-                .enable(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY);
-        return objectMapper.readValue(
-                new File(configFilePath),
-                new TypeReference<Map<String, PipelineConfiguration>>() {
-                });
-    }
-
 }

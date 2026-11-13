@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.csv;
@@ -33,6 +37,7 @@ public class CsvProcessorConfigTest {
         assertThat(objectUnderTest.isDeleteHeader(), equalTo(DEFAULT_DELETE_HEADERS));
         assertThat(objectUnderTest.getColumnNamesSourceKey(), equalTo(null));
         assertThat(objectUnderTest.getColumnNames(), equalTo(null));
+        assertThat(objectUnderTest.isMultiLine(), equalTo(false));
     }
 
     @Nested
@@ -68,6 +73,14 @@ public class CsvProcessorConfigTest {
             reflectivelySetField(csvProcessorConfig, "quoteCharacter", "\"");
 
             assertThat(csvProcessorConfig.isValidQuoteCharacter(), equalTo(true));
+        }
+
+        @Test
+        void isMultiLine_should_return_true_if_multi_line_is_set()
+                throws NoSuchFieldException, IllegalAccessException {
+            reflectivelySetField(csvProcessorConfig, "multiLine", true);
+
+            assertThat(csvProcessorConfig.isMultiLine(), equalTo(true));
         }
     }
 

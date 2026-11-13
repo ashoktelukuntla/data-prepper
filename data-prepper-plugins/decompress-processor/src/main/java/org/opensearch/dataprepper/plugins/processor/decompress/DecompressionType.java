@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.decompress;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 import org.opensearch.dataprepper.model.codec.DecompressionEngine;
 import org.opensearch.dataprepper.plugins.codec.GZipDecompressionEngine;
 
@@ -35,6 +40,11 @@ public enum DecompressionType implements DecompressionEngineFactory {
     @JsonCreator
     static DecompressionType fromOptionValue(final String option) {
         return OPTIONS_MAP.get(option);
+    }
+
+    @JsonValue
+    public String getOptionValue() {
+        return option;
     }
 
     @Override

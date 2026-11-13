@@ -9,9 +9,16 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Size;
 import org.apache.commons.lang3.StringUtils;
+import org.hibernate.validator.constraints.time.DurationMax;
+import org.hibernate.validator.constraints.time.DurationMin;
 import org.opensearch.dataprepper.model.types.ByteCount;
 import org.opensearch.dataprepper.plugins.codec.CompressionOption;
+import org.opensearch.dataprepper.plugins.server.RetryInfoConfig;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
+import org.opensearch.dataprepper.plugins.otel.codec.OTelOutputFormat;
+
+import java.time.Duration;
+import java.util.Set;
 
 public class OTelMetricsSourceConfig {
     static final String REQUEST_TIMEOUT = "request_timeout";
@@ -21,6 +28,8 @@ public class OTelMetricsSourceConfig {
     static final String USE_ACM_CERT_FOR_SSL = "useAcmCertForSSL";
     static final String ACM_CERT_ISSUE_TIME_OUT_MILLIS = "acmCertIssueTimeOutMillis";
     static final String HEALTH_CHECK_SERVICE = "health_check_service";
+    static final String OUTPUT_FORMAT = "output_format";
+    static final String BUFFER_PARTITION_KEYS = "partition_keys";
     static final String PROTO_REFLECTION_SERVICE = "proto_reflection_service";
     static final String SSL_KEY_CERT_FILE = "sslKeyCertChainFile";
     static final String SSL_KEY_FILE = "sslKeyFile";
@@ -31,6 +40,7 @@ public class OTelMetricsSourceConfig {
     static final String MAX_CONNECTION_COUNT = "max_connection_count";
     static final String ENABLE_UNFRAMED_REQUESTS = "unframed_requests";
     static final String COMPRESSION = "compression";
+    static final String RETRY_INFO = "retry_info";
     static final int DEFAULT_REQUEST_TIMEOUT_MS = 10000;
     static final int DEFAULT_PORT = 21891;
     static final int DEFAULT_THREAD_COUNT = 200;
@@ -43,6 +53,8 @@ public class OTelMetricsSourceConfig {
     static final int DEFAULT_ACM_CERT_ISSUE_TIME_OUT_MILLIS = 120000;
     private static final String S3_PREFIX = "s3://";
     static final String UNAUTHENTICATED_HEALTH_CHECK = "unauthenticated_health_check";
+    private static final String NAME_KEY = "name";
+    private static final String SERVICE_NAME_KEY = "service_name";
 
     @JsonProperty(REQUEST_TIMEOUT)
     private int requestTimeoutInMillis = DEFAULT_REQUEST_TIMEOUT_MS;
@@ -65,6 +77,13 @@ public class OTelMetricsSourceConfig {
 
     @JsonProperty(SSL)
     private boolean ssl = DEFAULT_SSL;
+
+    @JsonProperty(OUTPUT_FORMAT)
+    private OTelOutputFormat outputFormat = OTelOutputFormat.OPENSEARCH;
+
+    @JsonProperty(BUFFER_PARTITION_KEYS)
+    @Size(min = 1, max = 2, message = "partition_keys must contain 1 or 2 elements")
+    private Set<String> bufferPartitionKeys = null;
 
     @JsonProperty(USE_ACM_CERT_FOR_SSL)
     private boolean useAcmCertForSSL = DEFAULT_USE_ACM_CERT_FOR_SSL;
@@ -106,6 +125,30 @@ public class OTelMetricsSourceConfig {
 
     @JsonProperty("max_request_length")
     private ByteCount maxRequestLength;
+
+    @JsonProperty(RETRY_INFO)
+    private RetryInfoConfig retryInfo;
+
+    @JsonProperty("max_connection_age")
+    @DurationMin(seconds = 1)
+    @DurationMax(hours = 24)
+    private Duration maxConnectionAge;
+
+    @JsonProperty("connection_drain_duration")
+    @DurationMin(millis = 0)
+    @DurationMax(hours = 1)
+    private Duration connectionDrainDuration;
+
+    @AssertTrue(message = "buffer_partition_keys only supports 'name' and 'service_name'. 'name' is mandatory")
+    boolean isBufferKeysValid() {
+        if (bufferPartitionKeys == null) {
+            return true;
+        }
+
+        return bufferPartitionKeys.contains(NAME_KEY) &&
+           (bufferPartitionKeys.size() == 1 || (bufferPartitionKeys.size() == 2
+                && bufferPartitionKeys.contains(SERVICE_NAME_KEY)));
+    }
 
     @AssertTrue(message = "path should start with /")
     boolean isPathValid() {
@@ -159,6 +202,10 @@ public class OTelMetricsSourceConfig {
         return healthCheck;
     }
 
+    public Set<String> getBufferPartitionKeys() {
+        return bufferPartitionKeys;
+    }
+
     public boolean enableHttpHealthCheck() {
         return enableUnframedRequests() && hasHealthCheck();
     }
@@ -173,6 +220,10 @@ public class OTelMetricsSourceConfig {
 
     public boolean isSsl() {
         return ssl;
+    }
+
+    public OTelOutputFormat getOutputFormat() {
+        return outputFormat;
     }
 
     public boolean useAcmCertForSSL() {
@@ -227,6 +278,22 @@ public class OTelMetricsSourceConfig {
 
     public ByteCount getMaxRequestLength() {
         return maxRequestLength;
+    }
+
+    public RetryInfoConfig getRetryInfo() {
+        return retryInfo;
+    }
+
+    public void setRetryInfo(RetryInfoConfig retryInfo) {
+        this.retryInfo = retryInfo;
+    }
+
+    public Duration getMaxConnectionAge() {
+        return maxConnectionAge;
+    }
+
+    public Duration getConnectionDrainDuration() {
+        return connectionDrainDuration;
     }
 }
 

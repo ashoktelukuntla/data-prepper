@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.metric;
@@ -9,13 +13,16 @@ import com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import org.opensearch.dataprepper.model.event.EventHandle;
 import org.opensearch.dataprepper.model.event.DefaultEventHandle;
+import org.opensearch.dataprepper.model.event.AggregateEventHandle;
 
 import java.time.Instant;
 import java.util.Date;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -25,20 +32,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class JacksonSumTest {
 
-    private static final Map<String, Object> TEST_ATTRIBUTES = ImmutableMap.of(
+    protected static final Map<String, Object> TEST_ATTRIBUTES = ImmutableMap.of(
             "key1", new Date().getTime(),
             "key2", UUID.randomUUID().toString());
-    private static final String TEST_SERVICE_NAME = "service";
-    private static final String TEST_NAME = "name";
-    private static final String TEST_DESCRIPTION = "description";
-    private static final String TEST_UNIT_NAME = "unit";
-    private static final String TEST_START_TIME = UUID.randomUUID().toString();
-    private static final String TEST_TIME = UUID.randomUUID().toString();
-    private static final String TEST_AGGREGATION_TEMPORALITY = "TESTTEMPORALITY";
-    private static final String TEST_EVENT_KIND = Metric.KIND.SUM.name();
-    private static final boolean TEST_IS_MONOTONIC = true;
-    private static final Double TEST_VALUE = 1D;
-    private static final String TEST_SCHEMA_URL = "schema";
+    protected static final String TEST_SERVICE_NAME = "service";
+    protected static final String TEST_NAME = "name";
+    protected static final String TEST_DESCRIPTION = "description";
+    protected static final String TEST_UNIT_NAME = "unit";
+    protected static final String TEST_START_TIME = UUID.randomUUID().toString();
+    protected static final String TEST_TIME = UUID.randomUUID().toString();
+    protected static final String TEST_AGGREGATION_TEMPORALITY = "TESTTEMPORALITY";
+    protected static final String TEST_EVENT_KIND = Metric.KIND.SUM.name();
+    protected static final boolean TEST_IS_MONOTONIC = true;
+    protected static final Double TEST_VALUE = 1D;
+    protected static final String TEST_SCHEMA_URL = "schema";
 
     private JacksonSum sum;
 
@@ -81,11 +88,28 @@ public class JacksonSumTest {
     }
 
     @Test
+    public void testGetDefaultEventHandle() {
+        EventHandle eventHandle = new DefaultEventHandle(Instant.now());
+        builder.withEventHandle(eventHandle);
+        sum = builder.build();
+        final EventHandle handle = sum.getEventHandle();
+        assertThat(handle, is(sameInstance(eventHandle)));
+    }
+
+    @Test
+    public void testGetAggregateEventHandle() {
+        EventHandle eventHandle = new AggregateEventHandle(Instant.now());
+        builder.withEventHandle(eventHandle);
+        sum = builder.build();
+        final EventHandle handle = sum.getEventHandle();
+        assertThat(handle, is(sameInstance(eventHandle)));
+    }
+
+    @Test
     public void testGetDescription() {
         final String description = sum.getDescription();
         assertThat(description, is(equalTo(TEST_DESCRIPTION)));
     }
-
 
     @Test
     public void testGetKind() {

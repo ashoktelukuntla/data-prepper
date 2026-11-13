@@ -1,11 +1,17 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.expression;
 
 import org.opensearch.dataprepper.model.event.Event;
+
+import java.util.List;
 
 /**
  * @since 1.3
@@ -25,15 +31,25 @@ public interface ExpressionEvaluator {
     Object evaluate(final String statement, final Event context);
 
     default Boolean evaluateConditional(final String statement, final Event context) {
-        final Object result = evaluate(statement, context);
-        if (result instanceof Boolean) {
-            return (Boolean) result;
-        } else {
-            throw new ClassCastException("Unexpected expression return type of " + result.getClass());
+        Object result;
+        try {
+            result = evaluate(statement, context);
+            if (result instanceof Boolean) {
+                return (Boolean) result;
+            }
+            throw new ClassCastException("Unexpected expression return value of " + result);
+        } catch (ExpressionParsingException e) {
+            throw e;
+        } catch (ExpressionEvaluationException e) {
+            return false;
         }
     }
 
     Boolean isValidExpressionStatement(final String statement);
 
     Boolean isValidFormatExpression(final String format);
+
+    List<String> extractDynamicKeysFromFormatExpression(final String format);
+
+    List<String> extractDynamicExpressionsFromFormatExpression(final String format);
 }

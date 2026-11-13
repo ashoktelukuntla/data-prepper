@@ -1,12 +1,13 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.acknowledgements;
-
-import org.opensearch.dataprepper.model.event.Event;
-import org.opensearch.dataprepper.model.event.EventHandle;
 
 import java.time.Duration;
 import java.util.function.Consumer;
@@ -31,30 +32,14 @@ public interface AcknowledgementSetManager {
     AcknowledgementSet create(final Consumer<Boolean> callback, final Duration timeout);
 
     /**
-     * Releases an event's reference
+     * Creates an acknowledgement set
      *
-     * @param eventHandle event handle
-     * @param success indicates negative or positive acknowledgement
+     * @param callback callback function to be invoked
+     * @param timeout expiry timeout
+     * @param invokeCallbackOnExpiry flag indicating if the callback function should be invoked on expiry
      *
-     * @since 2.2
+     * @return AcknowledgementSet returns a new acknowledgement set
+     * @since 2.15
      */
-    void releaseEventReference(final EventHandle eventHandle, boolean success);
-
-    /**
-     * Acquires an event's reference
-     *
-     * @param eventHandle event handle
-     *
-     * @since 2.2
-     */
-    void acquireEventReference(final EventHandle eventHandle);
-
-    /**
-     * Acquires an event's reference
-     *
-     * @param event event
-     *
-     * @since 2.2
-     */
-    void acquireEventReference(final Event event);
+    AcknowledgementSet create(final Consumer<Boolean> callback, final Duration timeout, final boolean invokeCallbackOnExpiry);
 }

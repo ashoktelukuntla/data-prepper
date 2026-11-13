@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.kafka.consumer;
@@ -12,6 +16,7 @@ import io.confluent.kafka.serializers.KafkaAvroDeserializerConfig;
 import io.confluent.kafka.serializers.KafkaJsonDeserializer;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.CooperativeStickyAssignor;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.errors.BrokerNotAvailableException;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -21,9 +26,10 @@ import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.breaker.CircuitBreaker;
 import org.opensearch.dataprepper.model.buffer.Buffer;
+import org.opensearch.dataprepper.model.codec.ByteDecoder;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.record.Record;
-import org.opensearch.dataprepper.model.codec.ByteDecoder;
+import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.plugins.kafka.common.KafkaDataConfig;
 import org.opensearch.dataprepper.plugins.kafka.common.KafkaDataConfigAdapter;
 import org.opensearch.dataprepper.plugins.kafka.common.PlaintextKafkaDataConfig;
@@ -31,6 +37,7 @@ import org.opensearch.dataprepper.plugins.kafka.common.aws.AwsContext;
 import org.opensearch.dataprepper.plugins.kafka.common.key.KeyFactory;
 import org.opensearch.dataprepper.plugins.kafka.common.serialization.SerializationFactory;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AuthConfig;
+
 import org.opensearch.dataprepper.plugins.kafka.configuration.TopicConsumerConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaConsumerConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.OAuthConfig;
@@ -38,6 +45,9 @@ import org.opensearch.dataprepper.plugins.kafka.configuration.PlainTextAuthConfi
 import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaRegistryType;
 import org.opensearch.dataprepper.plugins.kafka.configuration.TopicConfig;
+import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaIsolationLevelConfig;
+import org.opensearch.dataprepper.plugins.kafka.configuration.IsolationLevel;
+
 import org.opensearch.dataprepper.plugins.kafka.util.ClientDNSLookupType;
 import org.opensearch.dataprepper.plugins.kafka.util.KafkaSecurityConfigurer;
 import org.opensearch.dataprepper.plugins.kafka.util.KafkaTopicConsumerMetrics;
@@ -46,6 +56,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +65,8 @@ import java.util.Properties;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
+
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.SENSITIVE;
 
 public class KafkaCustomConsumerFactory {
     private static final Logger LOG = LoggerFactory.getLogger(KafkaCustomConsumerFactory.class);
@@ -74,10 +87,13 @@ public class KafkaCustomConsumerFactory {
                                                              final ByteDecoder byteDecoder,
                                                              final AtomicBoolean shutdownInProgress,
                                                              final boolean topicNameInMetrics,
-                                                             final CircuitBreaker circuitBreaker) {
+                                                             final CircuitBreaker circuitBreaker,
+                                                             final CompressionOption compressionConfig,
+                                                             final boolean invokeCallbackOnExpiry) {
         Properties authProperties = new Properties();
-        KafkaSecurityConfigurer.setAuthProperties(authProperties, kafkaConsumerConfig, LOG);
+        KafkaSecurityConfigurer.setAuthProperties(authProperties, kafkaConsumerConfig, awsCredentialsSupplier, LOG);
         KafkaTopicConsumerMetrics topicMetrics = new KafkaTopicConsumerMetrics(topic.getName(), pluginMetrics, topicNameInMetrics);
+
         Properties consumerProperties = getConsumerProperties(kafkaConsumerConfig, topic, authProperties);
         MessageFormat schema = MessageFormat.getByMessageFormatByName(schemaType);
 
@@ -95,7 +111,7 @@ public class KafkaCustomConsumerFactory {
                 Deserializer<Object> keyDeserializer = (Deserializer<Object>) serializationFactory.getDeserializer(PlaintextKafkaDataConfig.plaintextDataConfig(dataConfig));
                 Deserializer<Object> valueDeserializer = null;
                 if(schema == MessageFormat.PLAINTEXT) {
-                    valueDeserializer = KafkaSecurityConfigurer.getGlueSerializer(kafkaConsumerConfig);
+                    valueDeserializer = KafkaSecurityConfigurer.getGlueSerializer(kafkaConsumerConfig, awsContext);
                 }
                 if(valueDeserializer == null) {
                     valueDeserializer = (Deserializer<Object>) serializationFactory.getDeserializer(dataConfig);
@@ -103,7 +119,7 @@ public class KafkaCustomConsumerFactory {
                 final KafkaConsumer kafkaConsumer = new KafkaConsumer<>(consumerProperties, keyDeserializer, valueDeserializer);
 
                 consumers.add(new KafkaCustomConsumer(kafkaConsumer, shutdownInProgress, buffer, kafkaConsumerConfig, topic,
-                    schemaType, acknowledgementSetManager, byteDecoder, topicMetrics, pauseConsumePredicate));
+                    schemaType, acknowledgementSetManager, byteDecoder, topicMetrics, pauseConsumePredicate, compressionConfig, invokeCallbackOnExpiry));
 
             });
         } catch (Exception e) {
@@ -134,14 +150,19 @@ public class KafkaCustomConsumerFactory {
                     break;
             }
         }
-        setConsumerTopicProperties(properties, topicConfig);
+        setConsumerTopicProperties(properties, topicConfig, topicConfig.getGroupId());
         setSchemaRegistryProperties(sourceConfig, properties, topicConfig);
-        LOG.debug("Starting consumer with the properties : {}", properties);
+        LOG.debug(SENSITIVE, "Starting consumer with the properties : {}", properties);
         return properties;
     }
 
-    private void setConsumerTopicProperties(final Properties properties, final TopicConsumerConfig topicConfig) {
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, topicConfig.getGroupId());
+
+    public static void setConsumerTopicProperties(final Properties properties, final TopicConsumerConfig topicConfig,
+                                                  final String groupId) {
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        if (Objects.nonNull(topicConfig.getClientId())) {
+            properties.put(ConsumerConfig.CLIENT_ID_CONFIG, topicConfig.getClientId());
+        }
         properties.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, (int)topicConfig.getMaxPartitionFetchBytes());
         properties.put(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, ((Long)topicConfig.getRetryBackoff().toMillis()).intValue());
         properties.put(ConsumerConfig.RECONNECT_BACKOFF_MS_CONFIG, ((Long)topicConfig.getReconnectBackoff().toMillis()).intValue());
@@ -160,6 +181,20 @@ public class KafkaCustomConsumerFactory {
         properties.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, (int)topicConfig.getFetchMaxBytes());
         properties.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, topicConfig.getFetchMaxWait());
         properties.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, (int)topicConfig.getFetchMinBytes());
+        properties.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, CooperativeStickyAssignor.class.getName());
+        if (Objects.nonNull(topicConfig.getMetadataMaxAge())) {
+            properties.put(ConsumerConfig.METADATA_MAX_AGE_CONFIG, topicConfig.getMetadataMaxAge().toMillis());
+        }
+        if (topicConfig instanceof KafkaIsolationLevelConfig) {
+            IsolationLevel isolationLevel = ((KafkaIsolationLevelConfig) topicConfig).getIsolationLevel();
+            if (isolationLevel != null) {
+                properties.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, isolationLevel.getType());
+            }
+        }
+        final Duration connectionsMaxIdle = topicConfig.getConnectionsMaxIdle();
+        if (connectionsMaxIdle != null) {
+            properties.put(ConsumerConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG, connectionsMaxIdle.toMillis());
+        }
     }
 
     private void setSchemaRegistryProperties(final KafkaConsumerConfig kafkaConsumerConfig, final Properties properties, final TopicConfig topicConfig) {
@@ -218,9 +253,15 @@ public class KafkaCustomConsumerFactory {
         properties.put(KafkaAvroDeserializerConfig.AUTO_REGISTER_SCHEMAS, false);
         final CachedSchemaRegistryClient schemaRegistryClient = new CachedSchemaRegistryClient(properties.getProperty(KafkaAvroDeserializerConfig.SCHEMA_REGISTRY_URL_CONFIG),
             100, propertyMap);
+        final SchemaConfig schemaConfig = kafkaConsumerConfig.getSchemaConfig();
         try {
-            schemaType = schemaRegistryClient.getSchemaMetadata(topic.getName() + "-value",
-                kafkaConsumerConfig.getSchemaConfig().getVersion()).getSchemaType();
+            final String subject = topic.getName() + "-value";
+            if (schemaConfig.getVersion() != null) {
+                schemaType = schemaRegistryClient.getSchemaMetadata(subject,
+                        kafkaConsumerConfig.getSchemaConfig().getVersion()).getSchemaType();
+            } else {
+                schemaType = schemaRegistryClient.getLatestSchemaMetadata(subject).getSchemaType();
+            }
         } catch (IOException | RestClientException e) {
             LOG.error("Failed to connect to the schema registry...");
             throw new RuntimeException(e);

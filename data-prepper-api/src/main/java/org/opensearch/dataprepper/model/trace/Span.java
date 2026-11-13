@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.trace;
@@ -56,6 +60,12 @@ public interface Span extends Event {
      * @return the kind
      */
     String getKind();
+
+    /**
+     * Gets the span's flags
+     * @return the flags
+     */
+    Integer getFlags();
 
     /**
      * Gets ISO8601 representation of the start time.
@@ -153,4 +163,43 @@ public interface Span extends Event {
      * @since 1.3
      */
     void setTraceGroupFields(TraceGroupFields traceGroupFields);
+
+    /**
+     * Sets the service name for this span.
+     * @param serviceName service name
+     * @since 2.11
+     */
+    void setServiceName(final String serviceName);
+
+    /**
+     * Gets the schema url of this span event.
+     *
+     * @return the schema url
+     * @since 2.11
+     */
+    String getSchemaUrl();
+
+    /**
+     * Gets the scope of this span event.
+     *
+     * @return the scope
+     * @since 2.11
+     */
+    Map<String, Object> getScope();
+
+    /**
+     * Gets the resource of this span event.
+     *
+     * @return the resource
+     * @since 2.11
+     */
+    Map<String, Object> getResource();
+
+    /**
+     * Gets the status of this span event.
+     *
+     * @return the status
+     * @since 2.11
+     */
+    Map<String, Object> getStatus();
 }

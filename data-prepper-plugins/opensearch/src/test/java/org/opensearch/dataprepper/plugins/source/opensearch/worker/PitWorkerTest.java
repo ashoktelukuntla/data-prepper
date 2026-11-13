@@ -49,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -69,6 +70,7 @@ import static org.mockito.Mockito.when;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.PitWorker.EXTEND_KEEP_ALIVE_TIME;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.PitWorker.STARTING_KEEP_ALIVE;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.ACKNOWLEDGEMENT_SET_TIMEOUT;
+import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.OWNERSHIP_TIMEOUT;
 
 @ExtendWith(MockitoExtension.class)
 public class PitWorkerTest {
@@ -165,8 +167,8 @@ public class PitWorkerTest {
         when(searchConfiguration.getBatchSize()).thenReturn(2);
         when(openSearchSourceConfiguration.getSearchConfiguration()).thenReturn(searchConfiguration);
 
-        final SearchWithSearchAfterResults searchWithSearchAfterResults = mock(SearchWithSearchAfterResults.class);
-        when(searchWithSearchAfterResults.getNextSearchAfter()).thenReturn(Collections.singletonList(UUID.randomUUID().toString()));
+        final List<String> firstPageSearchAfter = Collections.singletonList(UUID.randomUUID().toString());
+
         final Event testEvent1 = mock(Event.class);
         final Event testEvent2 = mock(Event.class);
         final Event testEvent3 = mock(Event.class);
@@ -179,11 +181,27 @@ public class PitWorkerTest {
         when(objectMapper.writeValueAsBytes(testData1)).thenReturn(new byte[10]);
         when(objectMapper.writeValueAsBytes(testData2)).thenReturn(new byte[20]);
         when(objectMapper.writeValueAsBytes(testData3)).thenReturn(new byte[30]);
-        when(searchWithSearchAfterResults.getDocuments()).thenReturn(List.of(testEvent1, testEvent2)).thenReturn(List.of(testEvent1, testEvent2))
-                .thenReturn(List.of(testEvent3)).thenReturn(List.of(testEvent3));
 
+        // Use Answer to transition based on search request content: the first request has
+        // no searchAfter (initial page), while the second has a cursor. This condition-based
+        // approach avoids relying on internal call counts.
         final ArgumentCaptor<SearchPointInTimeRequest> searchPointInTimeRequestArgumentCaptor = ArgumentCaptor.forClass(SearchPointInTimeRequest.class);
-        when(searchAccessor.searchWithPit(searchPointInTimeRequestArgumentCaptor.capture())).thenReturn(searchWithSearchAfterResults);
+        when(searchAccessor.searchWithPit(searchPointInTimeRequestArgumentCaptor.capture())).thenAnswer(invocation -> {
+            final SearchPointInTimeRequest request = invocation.getArgument(0);
+            if (request.getSearchAfter() == null) {
+                // First page: has documents and a cursor to continue
+                final SearchWithSearchAfterResults results = mock(SearchWithSearchAfterResults.class);
+                when(results.getNextSearchAfter()).thenReturn(firstPageSearchAfter);
+                when(results.getDocuments()).thenReturn(List.of(testEvent1, testEvent2));
+                return results;
+            } else {
+                // Subsequent page: has documents but null cursor signals end-of-index
+                final SearchWithSearchAfterResults results = mock(SearchWithSearchAfterResults.class);
+                when(results.getNextSearchAfter()).thenReturn(null);
+                when(results.getDocuments()).thenReturn(List.of(testEvent3));
+                return results;
+            }
+        });
 
         doNothing().when(bufferAccumulator).add(any(Record.class));
         doNothing().when(bufferAccumulator).flush();
@@ -230,7 +248,7 @@ public class PitWorkerTest {
         assertThat(searchPointInTimeRequestList.get(1).getPitId(), equalTo(pitId));
         assertThat(searchPointInTimeRequestList.get(1).getKeepAlive(), equalTo(EXTEND_KEEP_ALIVE_TIME));
         assertThat(searchPointInTimeRequestList.get(1).getPaginationSize(), equalTo(2));
-        assertThat(searchPointInTimeRequestList.get(1).getSearchAfter(), equalTo(searchWithSearchAfterResults.getNextSearchAfter()));
+        assertThat(searchPointInTimeRequestList.get(1).getSearchAfter(), equalTo(firstPageSearchAfter));
 
 
         final DeletePointInTimeRequest deletePointInTimeRequest = deleteRequestArgumentCaptor.getValue();
@@ -259,7 +277,7 @@ public class PitWorkerTest {
         doAnswer(a -> {
            numEventsAdded.getAndSet(numEventsAdded.get() + 1);
            return null;
-        }).when(acknowledgementSet).add(any());
+        }).when(acknowledgementSet).add(any(Event.class));
 
         doAnswer(invocation -> {
             Consumer<Boolean> consumer = invocation.getArgument(0);
@@ -283,8 +301,8 @@ public class PitWorkerTest {
         when(searchConfiguration.getBatchSize()).thenReturn(2);
         when(openSearchSourceConfiguration.getSearchConfiguration()).thenReturn(searchConfiguration);
 
-        final SearchWithSearchAfterResults searchWithSearchAfterResults = mock(SearchWithSearchAfterResults.class);
-        when(searchWithSearchAfterResults.getNextSearchAfter()).thenReturn(Collections.singletonList(UUID.randomUUID().toString()));
+        final List<String> firstPageSearchAfter = Collections.singletonList(UUID.randomUUID().toString());
+
         final Event testEvent1 = mock(Event.class);
         final Event testEvent2 = mock(Event.class);
         final Event testEvent3 = mock(Event.class);
@@ -297,11 +315,22 @@ public class PitWorkerTest {
         when(objectMapper.writeValueAsBytes(testData1)).thenReturn(new byte[10]);
         when(objectMapper.writeValueAsBytes(testData2)).thenReturn(new byte[20]);
         when(objectMapper.writeValueAsBytes(testData3)).thenReturn(new byte[30]);
-        when(searchWithSearchAfterResults.getDocuments()).thenReturn(List.of(testEvent1, testEvent2)).thenReturn(List.of(testEvent1, testEvent2))
-                .thenReturn(List.of(testEvent3)).thenReturn(List.of(testEvent3));
 
         final ArgumentCaptor<SearchPointInTimeRequest> searchPointInTimeRequestArgumentCaptor = ArgumentCaptor.forClass(SearchPointInTimeRequest.class);
-        when(searchAccessor.searchWithPit(searchPointInTimeRequestArgumentCaptor.capture())).thenReturn(searchWithSearchAfterResults);
+        when(searchAccessor.searchWithPit(searchPointInTimeRequestArgumentCaptor.capture())).thenAnswer(invocation -> {
+            final SearchPointInTimeRequest request = invocation.getArgument(0);
+            if (request.getSearchAfter() == null) {
+                final SearchWithSearchAfterResults results = mock(SearchWithSearchAfterResults.class);
+                when(results.getNextSearchAfter()).thenReturn(firstPageSearchAfter);
+                when(results.getDocuments()).thenReturn(List.of(testEvent1, testEvent2));
+                return results;
+            } else {
+                final SearchWithSearchAfterResults results = mock(SearchWithSearchAfterResults.class);
+                when(results.getNextSearchAfter()).thenReturn(null);
+                when(results.getDocuments()).thenReturn(List.of(testEvent3));
+                return results;
+            }
+        });
 
         doNothing().when(bufferAccumulator).add(any(Record.class));
         doNothing().when(bufferAccumulator).flush();
@@ -316,7 +345,7 @@ public class PitWorkerTest {
         when(schedulingParameterConfiguration.getInterval()).thenReturn(Duration.ZERO);
         when(openSearchSourceConfiguration.getSchedulingParameterConfiguration()).thenReturn(schedulingParameterConfiguration);
 
-        doNothing().when(sourceCoordinator).updatePartitionForAcknowledgmentWait(partitionKey, ACKNOWLEDGEMENT_SET_TIMEOUT);
+        doNothing().when(sourceCoordinator).updatePartitionForAcknowledgmentWait(partitionKey, OWNERSHIP_TIMEOUT);
         doNothing().when(sourceCoordinator).closePartition(partitionKey,
                 Duration.ZERO, 1, true);
 
@@ -349,7 +378,7 @@ public class PitWorkerTest {
         assertThat(searchPointInTimeRequestList.get(1).getPitId(), equalTo(pitId));
         assertThat(searchPointInTimeRequestList.get(1).getKeepAlive(), equalTo(EXTEND_KEEP_ALIVE_TIME));
         assertThat(searchPointInTimeRequestList.get(1).getPaginationSize(), equalTo(2));
-        assertThat(searchPointInTimeRequestList.get(1).getSearchAfter(), equalTo(searchWithSearchAfterResults.getNextSearchAfter()));
+        assertThat(searchPointInTimeRequestList.get(1).getSearchAfter(), equalTo(firstPageSearchAfter));
 
 
         final DeletePointInTimeRequest deletePointInTimeRequest = deleteRequestArgumentCaptor.getValue();
@@ -390,7 +419,15 @@ public class PitWorkerTest {
         when(openSearchSourceConfiguration.getSearchConfiguration()).thenReturn(searchConfiguration);
 
         final SearchWithSearchAfterResults searchWithSearchAfterResults = mock(SearchWithSearchAfterResults.class);
-        when(searchWithSearchAfterResults.getNextSearchAfter()).thenReturn(Collections.singletonList(UUID.randomUUID().toString()));
+        final List<String> firstPageSearchAfter = Collections.singletonList(UUID.randomUUID().toString());
+        // getNextSearchAfter is called ~3 times while processing the first page and once at the
+        // start of the second page. Returning a non-null value for those first 3 calls drives the
+        // second search_after request to use the captured cursor; null afterwards terminates.
+        when(searchWithSearchAfterResults.getNextSearchAfter())
+                .thenReturn(firstPageSearchAfter)
+                .thenReturn(firstPageSearchAfter)
+                .thenReturn(firstPageSearchAfter)
+                .thenReturn(null);
         final Event testEvent1 = mock(Event.class);
         final Event testEvent2 = mock(Event.class);
         final Event testEvent3 = mock(Event.class);
@@ -454,6 +491,79 @@ public class PitWorkerTest {
     }
 
     @Test
+    void run_continues_past_short_page_and_terminates_when_nextSearchAfter_is_null() throws Exception {
+        mockTimerCallable();
+
+        final SourcePartition<OpenSearchIndexProgressState> sourcePartition = mock(SourcePartition.class);
+        final String partitionKey = UUID.randomUUID().toString();
+        when(sourcePartition.getPartitionKey()).thenReturn(partitionKey);
+        when(sourcePartition.getPartitionState()).thenReturn(Optional.empty());
+
+        final String pitId = UUID.randomUUID().toString();
+        final CreatePointInTimeResponse createPointInTimeResponse = mock(CreatePointInTimeResponse.class);
+        when(createPointInTimeResponse.getPitId()).thenReturn(pitId);
+        when(searchAccessor.createPit(any(CreatePointInTimeRequest.class))).thenReturn(createPointInTimeResponse);
+
+        final SearchConfiguration searchConfiguration = mock(SearchConfiguration.class);
+        when(searchConfiguration.getBatchSize()).thenReturn(2);
+        when(openSearchSourceConfiguration.getSearchConfiguration()).thenReturn(searchConfiguration);
+
+        final List<String> firstPageSearchAfter = Collections.singletonList(UUID.randomUUID().toString());
+
+        final Event testEvent1 = mock(Event.class);
+        final Event testEvent2 = mock(Event.class);
+        final JsonNode testData1 = mock(JsonNode.class);
+        final JsonNode testData2 = mock(JsonNode.class);
+        when(testEvent1.getJsonNode()).thenReturn(testData1);
+        when(testEvent2.getJsonNode()).thenReturn(testData2);
+        when(objectMapper.writeValueAsBytes(testData1)).thenReturn(new byte[10]);
+        when(objectMapper.writeValueAsBytes(testData2)).thenReturn(new byte[20]);
+
+        // First page returns a SHORT page (1 doc < batch_size=2) with a cursor — pagination must continue.
+        // Second page returns null nextSearchAfter to terminate.
+        when(searchAccessor.searchWithPit(any(SearchPointInTimeRequest.class))).thenAnswer(invocation -> {
+            final SearchPointInTimeRequest request = invocation.getArgument(0);
+            final SearchWithSearchAfterResults results = mock(SearchWithSearchAfterResults.class);
+            if (request.getSearchAfter() == null) {
+                when(results.getNextSearchAfter()).thenReturn(firstPageSearchAfter);
+                when(results.getDocuments()).thenReturn(List.of(testEvent1));
+                return results;
+            } else {
+                when(results.getNextSearchAfter()).thenReturn(null);
+                when(results.getDocuments()).thenReturn(List.of(testEvent2));
+                return results;
+            }
+        });
+
+        doNothing().when(bufferAccumulator).add(any(Record.class));
+        doNothing().when(bufferAccumulator).flush();
+        doNothing().when(searchAccessor).deletePit(any(DeletePointInTimeRequest.class));
+
+        when(sourceCoordinator.getNextPartition(openSearchIndexPartitionCreationSupplier))
+                .thenReturn(Optional.of(sourcePartition)).thenReturn(Optional.empty());
+
+        final SchedulingParameterConfiguration schedulingParameterConfiguration = mock(SchedulingParameterConfiguration.class);
+        when(schedulingParameterConfiguration.getIndexReadCount()).thenReturn(1);
+        when(schedulingParameterConfiguration.getInterval()).thenReturn(Duration.ZERO);
+        when(openSearchSourceConfiguration.getSchedulingParameterConfiguration()).thenReturn(schedulingParameterConfiguration);
+
+        doNothing().when(sourceCoordinator).closePartition(partitionKey, Duration.ZERO, 1, false);
+
+        final Future<?> future = executorService.submit(() -> createObjectUnderTest().run());
+        await().atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> verify(indicesProcessedCounter).increment());
+
+        executorService.shutdown();
+        future.cancel(true);
+        assertThat(executorService.awaitTermination(1, TimeUnit.SECONDS), equalTo(true));
+
+        // Key assertion: 2 search requests were made (past the short page).
+        // The old logic (size == batchSize) would have stopped after the short page.
+        verify(searchAccessor, times(2)).searchWithPit(any(SearchPointInTimeRequest.class));
+        verify(documentsProcessedCounter, times(2)).increment();
+    }
+
+    @Test
     void run_gives_up_partitions_and_waits_when_createPit_throws_SearchContextLimitException() throws Exception {
         mockTimerCallable();
 
@@ -476,7 +586,7 @@ public class PitWorkerTest {
         assertThat(executorService.awaitTermination(100, TimeUnit.MILLISECONDS), equalTo(true));
 
         verify(searchAccessor, never()).deletePit(any(DeletePointInTimeRequest.class));
-        verify(sourceCoordinator).giveUpPartitions();
+        verify(sourceCoordinator).giveUpPartition(sourcePartition.getPartitionKey());
         verify(sourceCoordinator, never()).closePartition(anyString(), any(Duration.class), anyInt(), anyBoolean());
 
         verifyNoInteractions(documentsProcessedCounter);

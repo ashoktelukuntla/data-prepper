@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.event;
@@ -29,6 +33,8 @@ class DefaultEventHandleTests {
         assertThat(eventHandle.getAcknowledgementSet(), equalTo(null));
         assertThat(eventHandle.getInternalOriginationTime(), equalTo(now));
         assertThat(eventHandle.getExternalOriginationTime(), equalTo(null));
+        eventHandle.acquireReference();
+        assertThat(eventHandle.hasAcknowledgementSet(), equalTo(false));
         eventHandle.release(true);
     }
 
@@ -41,7 +47,10 @@ class DefaultEventHandleTests {
         assertThat(eventHandle.getAcknowledgementSet(), equalTo(null));
         assertThat(eventHandle.getInternalOriginationTime(), equalTo(now));
         assertThat(eventHandle.getExternalOriginationTime(), equalTo(null));
-        eventHandle.setAcknowledgementSet(acknowledgementSet);
+        eventHandle.addAcknowledgementSet(acknowledgementSet);
+        assertThat(eventHandle.hasAcknowledgementSet(), equalTo(true));
+        eventHandle.acquireReference();
+        verify(acknowledgementSet).acquire(eventHandle);
         eventHandle.release(true);
         verify(acknowledgementSet).release(eventHandle, true);
     }
@@ -67,6 +76,17 @@ class DefaultEventHandleTests {
         eventHandle.release(true);
         assertThat(count, equalTo(1));
 
+    }
+  
+    @Test
+    void testAddEventHandle() {
+        Instant now = Instant.now();
+        DefaultEventHandle eventHandle = new DefaultEventHandle(now);
+        acknowledgementSet = mock(AcknowledgementSet.class);
+        eventHandle.addAcknowledgementSet(acknowledgementSet);
+        DefaultEventHandle eventHandle2 = new DefaultEventHandle(now);
+        eventHandle.addEventHandle(eventHandle2);
+        verify(acknowledgementSet).add(eventHandle2);
     }
 
 }

@@ -40,6 +40,7 @@ public class InMemorySourceCoordinationStore implements SourceCoordinationStore 
 
     /**
      * For Testing
+     * @param inMemoryPartitionAccessor inMemoryPartitionAccessor
      */
     public InMemorySourceCoordinationStore(final InMemoryPartitionAccessor inMemoryPartitionAccessor) {
         this.inMemoryPartitionAccessor = inMemoryPartitionAccessor;
@@ -61,6 +62,13 @@ public class InMemorySourceCoordinationStore implements SourceCoordinationStore 
     @Override
     public List<SourcePartitionStoreItem> querySourcePartitionItemsByStatus(final String sourceIdentifier, final SourcePartitionStatus sourcePartitionStatus, final String startPartitionPriority) {
         throw new UnsupportedOperationException("querySourcePartitionItemsByStatus is currently not supported in In Memory Store");
+    }
+
+    @Override
+    public List<SourcePartitionStoreItem> queryAllSourcePartitionItems(String sourceIdentifier) {
+        synchronized (this) {
+            return inMemoryPartitionAccessor.getAllItem(sourceIdentifier);
+        }
     }
 
     @Override
@@ -108,5 +116,15 @@ public class InMemorySourceCoordinationStore implements SourceCoordinationStore 
         synchronized (this) {
             inMemoryPartitionAccessor.updateItem((InMemorySourcePartitionStoreItem) updateItem);
         }
+    }
+
+    @Override
+    public void tryUpdateSourcePartitionItem(final SourcePartitionStoreItem updateItem, final Instant priorityForUnassignedPartitions) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void tryDeletePartitionItem(SourcePartitionStoreItem deleteItem) {
+        throw new UnsupportedOperationException("deleting partitions is not currently supported by the in memory source coordination store");
     }
 }

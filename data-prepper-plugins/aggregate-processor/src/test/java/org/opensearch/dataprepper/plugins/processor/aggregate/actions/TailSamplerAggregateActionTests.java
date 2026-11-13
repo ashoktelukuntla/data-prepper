@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
@@ -84,6 +88,19 @@ public class TailSamplerAggregateActionTests {
         assertThat(result, not(equalTo(null)));
         assertThat(result.size(), equalTo(totalEvents));
         assertThat(Duration.between(start, Instant.now()).toSeconds(), greaterThanOrEqualTo(testWaitPeriod.toSeconds()));
+    }
+
+    @Test
+    void testTailSamplerAggregationWithEmptyGroupStateReturnsNull() {
+        final Duration testWaitPeriod = Duration.ofSeconds(3);
+        final int testPercent = 100;
+        when(tailSamplerAggregateActionConfig.getPercent()).thenReturn(testPercent);
+        when(tailSamplerAggregateActionConfig.getWaitPeriod()).thenReturn(testWaitPeriod);
+        when(tailSamplerAggregateActionConfig.getCondition()).thenReturn("");
+        tailSamplerAggregateAction = createObjectUnderTest(tailSamplerAggregateActionConfig);
+        final AggregateActionInput aggregateActionInput = new AggregateActionTestUtils.TestAggregateActionInput(Map.of());
+        final AggregateActionOutput actionOutput = tailSamplerAggregateAction.concludeGroup(aggregateActionInput);
+        assertThat(actionOutput, equalTo(null));
     }
 
     @Test

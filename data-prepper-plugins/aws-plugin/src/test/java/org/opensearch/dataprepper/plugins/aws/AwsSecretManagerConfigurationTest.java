@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.aws;
@@ -22,12 +26,14 @@ import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
-import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClientBuilder;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueRequest;
 import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
 
 import java.io.IOException;
@@ -38,10 +44,11 @@ import java.util.Set;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -60,13 +67,22 @@ class AwsSecretManagerConfigurationTest {
     private GetSecretValueRequest.Builder getSecretValueRequestBuilder;
 
     @Mock
+    private PutSecretValueRequest.Builder putSecretValueRequestBuilder;
+
+    @Mock
     private GetSecretValueRequest getSecretValueRequest;
+
+    @Mock
+    private PutSecretValueRequest putSecretValueRequest;
 
     @Mock
     private SecretsManagerClientBuilder secretsManagerClientBuilder;
 
     @Mock
     private SecretsManagerClient secretsManagerClient;
+
+    @Mock
+    private AwsCredentialsSupplier awsCredentialsSupplier;
 
     @Captor
     private ArgumentCaptor<AwsCredentialsProvider> awsCredentialsProviderArgumentCaptor;
@@ -131,25 +147,25 @@ class AwsSecretManagerConfigurationTest {
         verify(getSecretValueRequestBuilder).secretId("test-secret");
     }
 
-    @Test
-    void testCreateSecretManagerClientWithDefaultCredential() throws IOException {
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "    ", "secretValue", "{\"keyToUpdate\", \"newValue\"}"})
+    void testPutSecretValueRequest_construct_put_request(String secretValueToStore) throws IOException {
+        when(putSecretValueRequestBuilder.secretId(anyString())).thenReturn(putSecretValueRequestBuilder);
+        when(putSecretValueRequestBuilder.secretString(anyString())).thenReturn(putSecretValueRequestBuilder);
+        when(putSecretValueRequestBuilder.build()).thenReturn(putSecretValueRequest);
         final InputStream inputStream = AwsSecretPluginConfigTest.class.getResourceAsStream(
                 "/test-aws-secret-manager-configuration-default.yaml");
         final AwsSecretManagerConfiguration awsSecretManagerConfiguration = objectMapper.readValue(
                 inputStream, AwsSecretManagerConfiguration.class);
-        assertThat(awsSecretManagerConfiguration.getAwsSecretId(), equalTo("test-secret"));
-        when(secretsManagerClientBuilder.region(any(Region.class))).thenReturn(secretsManagerClientBuilder);
-        when(secretsManagerClientBuilder.credentialsProvider(any(AwsCredentialsProvider.class)))
-                .thenReturn(secretsManagerClientBuilder);
-        when(secretsManagerClientBuilder.build()).thenReturn(secretsManagerClient);
-        try (final MockedStatic<SecretsManagerClient> secretsManagerClientMockedStatic = mockStatic(
-                SecretsManagerClient.class)) {
-            secretsManagerClientMockedStatic.when(SecretsManagerClient::builder).thenReturn(secretsManagerClientBuilder);
-            assertThat(awsSecretManagerConfiguration.createSecretManagerClient(), is(secretsManagerClient));
+        try (final MockedStatic<PutSecretValueRequest> putSecretValueRequestMockedStatic =
+                     mockStatic(PutSecretValueRequest.class)) {
+            putSecretValueRequestMockedStatic.when(PutSecretValueRequest::builder).thenReturn(
+                    putSecretValueRequestBuilder);
+            assertThat(awsSecretManagerConfiguration.putSecretValueRequest(secretValueToStore),
+                    is(putSecretValueRequest));
         }
-        verify(secretsManagerClientBuilder).credentialsProvider(awsCredentialsProviderArgumentCaptor.capture());
-        final AwsCredentialsProvider awsCredentialsProvider = awsCredentialsProviderArgumentCaptor.getValue();
-        assertThat(awsCredentialsProvider, instanceOf(DefaultCredentialsProvider.class));
+        verify(putSecretValueRequestBuilder).secretId("test-secret");
     }
 
     @Test
@@ -160,35 +176,30 @@ class AwsSecretManagerConfigurationTest {
                 inputStream, AwsSecretManagerConfiguration.class);
         assertThat(awsSecretManagerConfiguration.getAwsSecretId(), equalTo("test-secret"));
         when(secretsManagerClientBuilder.region(any(Region.class))).thenReturn(secretsManagerClientBuilder);
-        when(secretsManagerClientBuilder.credentialsProvider(any(AwsCredentialsProvider.class)))
+
+        final StsAssumeRoleCredentialsProvider stsAssumeRoleCredentialsProvider = mock(StsAssumeRoleCredentialsProvider.class);
+        final ArgumentCaptor<AwsCredentialsOptions> awsCredentialsOptionsArgumentCaptor = ArgumentCaptor.forClass(AwsCredentialsOptions.class);
+        when(awsCredentialsSupplier.getProvider(awsCredentialsOptionsArgumentCaptor.capture()))
+                .thenReturn(stsAssumeRoleCredentialsProvider);
+
+        when(secretsManagerClientBuilder.credentialsProvider(stsAssumeRoleCredentialsProvider))
                 .thenReturn(secretsManagerClientBuilder);
         when(secretsManagerClientBuilder.build()).thenReturn(secretsManagerClient);
         try (final MockedStatic<SecretsManagerClient> secretsManagerClientMockedStatic = mockStatic(
                 SecretsManagerClient.class)) {
             secretsManagerClientMockedStatic.when(SecretsManagerClient::builder).thenReturn(secretsManagerClientBuilder);
-            assertThat(awsSecretManagerConfiguration.createSecretManagerClient(), is(secretsManagerClient));
+            assertThat(awsSecretManagerConfiguration.createSecretManagerClient(awsCredentialsSupplier), is(secretsManagerClient));
         }
         verify(secretsManagerClientBuilder).credentialsProvider(awsCredentialsProviderArgumentCaptor.capture());
         final AwsCredentialsProvider awsCredentialsProvider = awsCredentialsProviderArgumentCaptor.getValue();
         assertThat(awsCredentialsProvider, instanceOf(StsAssumeRoleCredentialsProvider.class));
-    }
 
-    @ParameterizedTest
-    @ValueSource(strings = {
-            "/test-aws-secret-manager-configuration-invalid-sts-1.yaml",
-            "/test-aws-secret-manager-configuration-invalid-sts-2.yaml",
-            "/test-aws-secret-manager-configuration-invalid-sts-3.yaml"
-    })
-    void testCreateSecretManagerClientWithInvalidStsRoleArn(final String testFileName) throws IOException {
-        final InputStream inputStream = AwsSecretPluginConfigTest.class.getResourceAsStream(testFileName);
-        final AwsSecretManagerConfiguration awsSecretManagerConfiguration = objectMapper.readValue(
-                inputStream, AwsSecretManagerConfiguration.class);
-        try (final MockedStatic<SecretsManagerClient> secretsManagerClientMockedStatic = mockStatic(
-                SecretsManagerClient.class)) {
-            secretsManagerClientMockedStatic.when(SecretsManagerClient::builder).thenReturn(secretsManagerClientBuilder);
-            assertThrows(IllegalArgumentException.class,
-                    () -> awsSecretManagerConfiguration.createSecretManagerClient());
-        }
+        final AwsCredentialsOptions awsCredentialsOptions = awsCredentialsOptionsArgumentCaptor.getValue();
+        assertThat(awsCredentialsOptions, notNullValue());
+        assertThat(awsCredentialsOptions.getRegion(), equalTo(Region.US_EAST_1));
+        assertThat(awsCredentialsOptions.getStsHeaderOverrides(), notNullValue());
+        assertThat(awsCredentialsOptions.getStsHeaderOverrides().get("test_key"), equalTo("test_value"));
+        assertThat(awsCredentialsOptions.getStsRoleArn(), equalTo("arn:aws:iam::123456789012:role/test-role"));
     }
 
     @Test

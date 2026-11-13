@@ -27,6 +27,8 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class OTelMetricsGrpcService extends MetricsServiceGrpc.MetricsServiceImplBase {
@@ -49,21 +51,34 @@ public class OTelMetricsGrpcService extends MetricsServiceGrpc.MetricsServiceImp
     private final Counter recordsDroppedCounter;
     private final DistributionSummary payloadSizeSummary;
     private final Timer requestProcessDuration;
-
+    private final Set<String> bufferPartitionKeys;
 
     public OTelMetricsGrpcService(int bufferWriteTimeoutInMillis,
                                   final OTelProtoCodec.OTelProtoDecoder oTelProtoDecoder,
                                   Buffer<Record<? extends Metric>> buffer,
-                                  final PluginMetrics pluginMetrics) {
+                                  final Set<String> bufferPartitionKeys,
+                                  final PluginMetrics pluginMetrics,
+                                  final String metricsPrefix) {
         this.bufferWriteTimeoutInMillis = bufferWriteTimeoutInMillis;
         this.buffer = buffer;
 
-        requestsReceivedCounter = pluginMetrics.counter(REQUESTS_RECEIVED);
-        successRequestsCounter = pluginMetrics.counter(SUCCESS_REQUESTS);
-        recordsCreatedCounter = pluginMetrics.counter(RECORDS_CREATED);
-        recordsDroppedCounter = pluginMetrics.counter(RECORDS_DROPPED);
-        payloadSizeSummary = pluginMetrics.summary(PAYLOAD_SIZE);
-        requestProcessDuration = pluginMetrics.timer(REQUEST_PROCESS_DURATION);
+        this.bufferPartitionKeys = bufferPartitionKeys;
+        if (metricsPrefix != null) {
+            requestsReceivedCounter = pluginMetrics.counter(REQUESTS_RECEIVED, metricsPrefix);
+            successRequestsCounter = pluginMetrics.counter(SUCCESS_REQUESTS, metricsPrefix);
+            recordsCreatedCounter = pluginMetrics.counter(RECORDS_CREATED, metricsPrefix);
+            recordsDroppedCounter = pluginMetrics.counter(RECORDS_DROPPED, metricsPrefix);
+            payloadSizeSummary = pluginMetrics.summary(PAYLOAD_SIZE, metricsPrefix);
+            requestProcessDuration = pluginMetrics.timer(REQUEST_PROCESS_DURATION, metricsPrefix);
+        } else {
+            requestsReceivedCounter = pluginMetrics.counter(REQUESTS_RECEIVED);
+            successRequestsCounter = pluginMetrics.counter(SUCCESS_REQUESTS);
+            recordsCreatedCounter = pluginMetrics.counter(RECORDS_CREATED);
+            recordsDroppedCounter = pluginMetrics.counter(RECORDS_DROPPED);
+            payloadSizeSummary = pluginMetrics.summary(PAYLOAD_SIZE);
+            requestProcessDuration = pluginMetrics.timer(REQUEST_PROCESS_DURATION);
+        }
+
         this.oTelProtoDecoder = oTelProtoDecoder;
     }
 
@@ -86,7 +101,15 @@ public class OTelMetricsGrpcService extends MetricsServiceGrpc.MetricsServiceImp
     private void processRequest(final ExportMetricsServiceRequest request, final StreamObserver<ExportMetricsServiceResponse> responseObserver) {
         try {
             if (buffer.isByteBuffer()) {
-                buffer.writeBytes(request.toByteArray(), null, bufferWriteTimeoutInMillis);
+                if (bufferPartitionKeys != null && !bufferPartitionKeys.isEmpty()) {
+                    Map<String, ExportMetricsServiceRequest> requestsMap =
+                        oTelProtoDecoder.splitExportMetricsServiceRequestByKeys(request, bufferPartitionKeys);
+                    for (Map.Entry<String, ExportMetricsServiceRequest> entry: requestsMap.entrySet()) {
+                        buffer.writeBytes(entry.getValue().toByteArray(), entry.getKey(), bufferWriteTimeoutInMillis);
+                    }
+                } else {
+                    buffer.writeBytes(request.toByteArray(), null, bufferWriteTimeoutInMillis);
+                }
             } else {
                 Collection<Record<? extends Metric>> metrics;
 
@@ -102,7 +125,7 @@ public class OTelMetricsGrpcService extends MetricsServiceGrpc.MetricsServiceImp
                 return;
             }
 
-            LOG.error("Failed to write the request of size {} due to:", request.toString().length(), e);
+            LOG.error("Failed to write the request of size {} bytes due to:", request.getSerializedSize(), e);
             throw new BufferWriteException(e.getMessage(), e);
         }
 

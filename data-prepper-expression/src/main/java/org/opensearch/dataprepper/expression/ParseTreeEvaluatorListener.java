@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.expression;
@@ -14,6 +18,10 @@ import org.opensearch.dataprepper.expression.antlr.DataPrepperExpressionBaseList
 import org.opensearch.dataprepper.expression.antlr.DataPrepperExpressionListener;
 import org.opensearch.dataprepper.expression.antlr.DataPrepperExpressionParser;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.Stack;
 
 /**
@@ -35,6 +43,17 @@ class ParseTreeEvaluatorListener extends DataPrepperExpressionBaseListener {
     private final Stack<Integer> operatorSymbolStack;
     private final Stack<Object> operandStack;
     private final Event event;
+    private boolean listStart;
+    private Set<Object> setMembers;
+
+    /**
+     * Track function context for composable function support
+     */
+    private final Stack<FunctionEvalContext> functionContextStack = new Stack<>();
+    /**
+     * Track whether we are directly inside a functionArg that contains only a jsonPointer
+     */
+    private int functionArgDepth = 0;
 
     public ParseTreeEvaluatorListener(final OperatorProvider operatorProvider,
                                       final ParseTreeCoercionService coercionService,
@@ -42,6 +61,7 @@ class ParseTreeEvaluatorListener extends DataPrepperExpressionBaseListener {
         this.coercionService = coercionService;
         this.operatorProvider = operatorProvider;
         this.event = event;
+        this.listStart = false;
         operatorSymbolStack = new Stack<>();
         operandStack = new Stack<>();
     }
@@ -54,20 +74,118 @@ class ParseTreeEvaluatorListener extends DataPrepperExpressionBaseListener {
         return operandStack.peek();
     }
 
+    private void validateSetMembers(Set<Object> setMembers) {
+        int numbers = 0;
+        int strings = 0;
+        int booleans = 0;
+        for (Object member: setMembers) {
+            if (member instanceof Number) {
+                numbers++;
+            } else if (member instanceof String) {
+                strings++;
+            } else if (member instanceof Boolean) {
+                booleans++;
+            }
+        }
+        if (numbers != setMembers.size() && strings != setMembers.size() && booleans != setMembers.size()) {
+            throw new RuntimeException("All set members should be of same type");
+        }
+    }
+
+    private boolean isInsideFunction() {
+        return !functionContextStack.isEmpty();
+    }
+
+    @Override
+    public void enterFunction(DataPrepperExpressionParser.FunctionContext ctx) {
+        final String functionName = ctx.Identifier().getText();
+        functionContextStack.push(new FunctionEvalContext(functionName, operandStack.size()));
+    }
+
+    @Override
+    public void exitFunction(DataPrepperExpressionParser.FunctionContext ctx) {
+        final FunctionEvalContext funcCtx = functionContextStack.pop();
+
+        // Collect all arguments that were pushed onto the operand stack during function arg evaluation
+        final List<Object> args = new ArrayList<>();
+        while (operandStack.size() > funcCtx.stackSizeAtEntry) {
+            args.add(0, operandStack.pop());
+        }
+
+        final Object result = coercionService.evaluateFunction(funcCtx.functionName, args, event);
+        operandStack.push(result);
+    }
+
+    @Override
+    public void enterFunctionArg(DataPrepperExpressionParser.FunctionArgContext ctx) {
+        functionArgDepth++;
+    }
+
+    @Override
+    public void exitFunctionArg(DataPrepperExpressionParser.FunctionArgContext ctx) {
+        functionArgDepth--;
+    }
+
     @Override
     public void visitTerminal(TerminalNode node) {
         final int nodeType = node.getSymbol().getType();
         if (nodeType == DataPrepperExpressionParser.EOF) {
             return;
         }
+
+        // Skip Identifier, LPAREN, RPAREN, and COMMA tokens inside function rules
+        // These are structural tokens handled by enter/exitFunction
+        if (nodeType == DataPrepperExpressionParser.Identifier) {
+            return;
+        }
+
+        if (isInsideFunction()) {
+            // Inside a function context, COMMA is structural - skip it.
+            // LPAREN/RPAREN are NOT skipped so they act as a barrier on the
+            // operator stack, preventing outer operators from being evaluated
+            // inside function argument sub-expressions.
+            if (nodeType == DataPrepperExpressionParser.COMMA) {
+                return;
+            }
+
+            // Inside a function arg, bare JsonPointer (e.g. /field) should be converted to EventKey.
+            // EscapedJsonPointer (e.g. "/key1") is a quoted value — treat it as a string literal,
+            // not an EventKey. This ensures getMetadata("/key1") receives a String argument.
+            if (functionArgDepth > 0) {
+                if (nodeType == DataPrepperExpressionParser.JsonPointer) {
+                    operandStack.push(coercionService.createEventKey(node.getText()));
+                    return;
+                }
+                if (nodeType == DataPrepperExpressionParser.EscapedJsonPointer) {
+                    final String nodeStringValue = node.getText();
+                    // Strip surrounding quotes and push as String
+                    operandStack.push(nodeStringValue.substring(1, nodeStringValue.length() - 1));
+                    return;
+                }
+            }
+        }
+
         if (operatorProvider.containsOperator(nodeType) || nodeType == DataPrepperExpressionParser.LPAREN) {
             operatorSymbolStack.push(nodeType);
+        } else if (nodeType == DataPrepperExpressionParser.LBRACE) {
+            listStart = true;
+            setMembers = new HashSet<>();
+        } else if (nodeType == DataPrepperExpressionParser.RBRACE) {
+            listStart = false;
+            validateSetMembers(setMembers);
+            operandStack.push(setMembers);
         } else if (nodeType == DataPrepperExpressionParser.RPAREN) {
             // pop LPAREN at operatorSymbolStack top
             operatorSymbolStack.pop();
         } else {
             final Object arg = coercionService.coercePrimaryTerminalNode(node, event);
-            operandStack.push(arg);
+            if (listStart) {
+                if (!(arg instanceof Integer) || (((int)arg) != DataPrepperExpressionParser.COMMA)) {
+                    setMembers.add(arg);
+                }
+            } else {
+                operandStack.push(arg);
+            }
         }
     }
 
@@ -87,8 +205,12 @@ class ParseTreeEvaluatorListener extends DataPrepperExpressionBaseListener {
                     try {
                         performSingleOperation(op, ctx);
                     } catch (final Exception e) {
-                        throw new ExpressionEvaluationException("Unable to evaluate the part of input statement: "
+                        if (e instanceof IllegalArgumentException && op.isBooleanOperator()) {
+                            operandStack.push(false);
+                        } else {
+                            throw new ExpressionEvaluationException("Unable to evaluate the part of input statement: "
                                 + getPartialStatementFromContext(ctx), e);
+                        }
                     }
                 }
             }
@@ -110,5 +232,15 @@ class ParseTreeEvaluatorListener extends DataPrepperExpressionBaseListener {
         final Token stopToken = ctx.getStop();
         final String fullStatement = startToken.getInputStream().toString();
         return fullStatement.substring(startToken.getStartIndex(), stopToken.getStopIndex() + 1);
+    }
+
+    private static final class FunctionEvalContext {
+        final String functionName;
+        final int stackSizeAtEntry;
+
+        FunctionEvalContext(final String functionName, final int stackSizeAtEntry) {
+            this.functionName = functionName;
+            this.stackSizeAtEntry = stackSizeAtEntry;
+        }
     }
 }

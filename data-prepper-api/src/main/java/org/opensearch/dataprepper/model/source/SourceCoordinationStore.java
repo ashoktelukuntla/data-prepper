@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.source;
@@ -9,6 +13,7 @@ import org.opensearch.dataprepper.model.source.coordinator.SourcePartitionStatus
 import org.opensearch.dataprepper.model.source.coordinator.SourcePartitionStoreItem;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -34,6 +39,8 @@ public interface SourceCoordinationStore {
      * @return A list of {@link SourcePartitionStoreItem}
      */
     List<SourcePartitionStoreItem> querySourcePartitionItemsByStatus(final String sourceIdentifier, final SourcePartitionStatus sourcePartitionStatus, final String startPartitionPriority);
+
+    List<SourcePartitionStoreItem> queryAllSourcePartitionItems(final String sourceIdentifier);
 
     boolean tryCreatePartitionItem(final String sourceIdentifier,
                                    final String partitionKey,
@@ -62,4 +69,8 @@ public interface SourceCoordinationStore {
      * @throws org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException when the partition was not updated successfully
      */
     void tryUpdateSourcePartitionItem(final SourcePartitionStoreItem updateItem);
+
+    void tryUpdateSourcePartitionItem(final SourcePartitionStoreItem updateItem, final Instant priorityForUnassignedPartitions);
+
+    void tryDeletePartitionItem(final SourcePartitionStoreItem deleteItem);
 }

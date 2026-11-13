@@ -1,13 +1,19 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.metric;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.opensearch.dataprepper.model.event.EventType;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.event.EventHandle;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -23,6 +29,8 @@ import java.util.Map;
 public abstract class JacksonMetric extends JacksonEvent implements Metric {
 
     protected static final String NAME_KEY = "name";
+    protected static final String SCOPE_KEY = "instrumentationScope";
+    protected static final String RESOURCE_KEY = "resource";
     protected static final String DESCRIPTION_KEY = "description";
     protected static final String START_TIME_KEY = "startTime";
     protected static final String TIME_KEY = "time";
@@ -33,6 +41,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
     protected static final String SCHEMA_URL_KEY = "schemaUrl";
     protected static final String EXEMPLARS_KEY = "exemplars";
     protected static final String FLAGS_KEY = "flags";
+    protected static final String METADATA_KEY = "metadata";
     private boolean flattenAttributes;
 
     protected JacksonMetric(Builder builder, boolean flattenAttributes) {
@@ -46,6 +55,10 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
 
     boolean getFlattenAttributes() {
         return flattenAttributes;
+    }
+
+    protected void checkAndSetDefaultValues() {
+        putIfAbsent(ATTRIBUTES_KEY, Map.class, new HashMap<>());
     }
 
     @Override
@@ -94,8 +107,23 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
     }
 
     @Override
+    public Map<String, Object> getMetricMetadata() {
+        return this.get(METADATA_KEY, Map.class);
+    }
+
+    @Override
     public String getStartTime() {
         return this.get(START_TIME_KEY, String.class);
+    }
+
+    @Override
+    public Map<String, Object> getScope() {
+        return this.get(SCOPE_KEY, Map.class);
+    }
+
+    @Override
+    public Map<String, Object> getResource() {
+        return this.get(RESOURCE_KEY, Map.class);
     }
 
     @Override
@@ -130,10 +158,18 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
      */
     public abstract static class Builder<T extends JacksonEvent.Builder<T>> extends JacksonEvent.Builder<T> {
 
-        protected final Map<String, Object> data;
+        private final Map<String, Object> mdata;
 
         public Builder() {
-            data = new HashMap<>();
+            if (data == null) {
+                data = new HashMap<String, Object>();
+            }
+            mdata = (HashMap<String, Object>)data;
+            eventHandle = null;
+        }
+
+        public void put(String key, Object value) {
+                mdata.put(key, value);
         }
 
         /**
@@ -143,7 +179,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withEventKind(final String kind) {
-            data.put(KIND_KEY, kind);
+            put(KIND_KEY, kind);
             return getThis();
         }
 
@@ -154,8 +190,13 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withUnit(final String unit) {
-            data.put(UNIT_KEY, unit);
+            put(UNIT_KEY, unit);
             return getThis();
+        }
+
+        public T withEventHandle(final EventHandle eventHandle) {
+                this.eventHandle = eventHandle;
+                return getThis();
         }
 
         /**
@@ -165,7 +206,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withAttributes(final Map<String, Object> attributes) {
-            data.put(ATTRIBUTES_KEY, attributes);
+            put(ATTRIBUTES_KEY, attributes);
             return getThis();
         }
 
@@ -176,7 +217,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withName(final String name) {
-            data.put(NAME_KEY, name);
+            put(NAME_KEY, name);
             return getThis();
         }
 
@@ -187,7 +228,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withDescription(final String description) {
-            data.put(DESCRIPTION_KEY, description);
+            put(DESCRIPTION_KEY, description);
             return getThis();
         }
 
@@ -198,7 +239,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withStartTime(final String startTime) {
-            data.put(START_TIME_KEY, startTime);
+            put(START_TIME_KEY, startTime);
             return getThis();
         }
 
@@ -209,7 +250,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withTime(final String time) {
-            data.put(TIME_KEY, time);
+            put(TIME_KEY, time);
             return getThis();
         }
 
@@ -220,7 +261,43 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withServiceName(final String serviceName) {
-            data.put(SERVICE_NAME_KEY, serviceName);
+            put(SERVICE_NAME_KEY, serviceName);
+            return getThis();
+        }
+
+        /**
+         * Sets the scope of the metric event
+         *
+         * @param scope scope to be set
+         * @return the builder
+         * @since 2.11
+         */
+        public T withScope(final Map<String, Object> scope) {
+            put(SCOPE_KEY, scope);
+            return getThis();
+        }
+
+        /**
+         * Sets the metadata of the metric event
+         *
+         * @param metadata metadata to be set
+         * @return the builder
+         * @since 2.11
+         */
+        public T withMetricMetadata(final Map<String, Object> metadata) {
+            put(METADATA_KEY, metadata);
+            return getThis();
+        }
+
+        /**
+         * Sets the resource of the metric event
+         *
+         * @param resource resource to be set
+         * @return the builder
+         * @since 2.11
+         */
+        public T withResource(final Map<String, Object> resource) {
+            put(RESOURCE_KEY, resource);
             return getThis();
         }
 
@@ -231,7 +308,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withSchemaUrl(final String schemaUrl) {
-            data.put(SCHEMA_URL_KEY, schemaUrl);
+            put(SCHEMA_URL_KEY, schemaUrl);
             return getThis();
         }
 
@@ -255,7 +332,7 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withExemplars(final List<Exemplar> exemplars) {
-            data.put(EXEMPLARS_KEY, exemplars);
+            put(EXEMPLARS_KEY, exemplars);
             return getThis();
         }
 
@@ -266,8 +343,14 @@ public abstract class JacksonMetric extends JacksonEvent implements Metric {
          * @since 1.4
          */
         public T withFlags(final Integer flags) {
-            data.put(FLAGS_KEY, flags);
+            put(FLAGS_KEY, flags);
             return getThis();
+        }
+
+        protected void populateEvent(final String kind) {
+            this.withData(data);
+            this.withEventKind(kind);
+            this.withEventType(EventType.METRIC.toString());
         }
     }
 }

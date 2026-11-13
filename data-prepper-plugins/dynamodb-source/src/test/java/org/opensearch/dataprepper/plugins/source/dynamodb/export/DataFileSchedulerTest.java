@@ -47,6 +47,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.verify;
 import static org.opensearch.dataprepper.plugins.source.dynamodb.export.DataFileScheduler.ACTIVE_EXPORT_S3_OBJECT_CONSUMERS_GAUGE;
 import static org.opensearch.dataprepper.plugins.source.dynamodb.export.DataFileScheduler.EXPORT_S3_OBJECTS_PROCESSED_COUNT;
@@ -216,6 +217,54 @@ class DataFileSchedulerTest {
     }
 
     @Test
+    void run_DataFileLoader_with_loaded_files_greater_than_total_creates_stream_partition() throws InterruptedException {
+        given(coordinator.acquireAvailablePartition(DataFilePartition.PARTITION_TYPE)).willReturn(Optional.of(dataFilePartition)).willReturn(Optional.empty());
+        given(dynamoDBSourceConfig.isAcknowledgmentsEnabled()).willReturn(true);
+
+        LoadStatus loadStatus = new LoadStatus(1, 2, 100, 0);
+        lenient().when(coordinator.getPartition(exportArn)).thenReturn(Optional.of(exportInfoGlobalState));
+        lenient().when(exportInfoGlobalState.getProgressState()).thenReturn(Optional.of(loadStatus.toMap()));
+
+        final Duration dataFileAcknowledgmentTimeout = Duration.ofSeconds(30);
+        given(dynamoDBSourceConfig.getDataFileAcknowledgmentTimeout()).willReturn(dataFileAcknowledgmentTimeout);
+
+        final AcknowledgementSet acknowledgementSet = mock(AcknowledgementSet.class);
+        doAnswer(invocation -> {
+            Consumer<Boolean> consumer = invocation.getArgument(0);
+            consumer.accept(true);
+            return acknowledgementSet;
+        }).when(acknowledgementSetManager).create(any(Consumer.class), eq(dataFileAcknowledgmentTimeout));
+
+        given(loaderFactory.createDataFileLoader(any(DataFilePartition.class), any(TableInfo.class), eq(acknowledgementSet), eq(dataFileAcknowledgmentTimeout))).willReturn(() -> LOG.info("Hello"));
+
+        scheduler = new DataFileScheduler(coordinator, loaderFactory, pluginMetrics, acknowledgementSetManager, dynamoDBSourceConfig);
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        final Future<?> future = executorService.submit(() -> scheduler.run());
+        Thread.sleep(100);
+        executorService.shutdown();
+        future.cancel(true);
+        assertThat(executorService.awaitTermination(1000, TimeUnit.MILLISECONDS), equalTo(true));
+
+        // Should acquire data file partition
+        verify(coordinator).acquireAvailablePartition(DataFilePartition.PARTITION_TYPE);
+        // Should create a loader
+        verify(loaderFactory).createDataFileLoader(any(DataFilePartition.class), any(TableInfo.class), eq(acknowledgementSet), eq(dataFileAcknowledgmentTimeout));
+        // Need to call getPartition for 3 times (3 global states, 2 TableInfo)
+        verify(coordinator, times(3)).getPartition(anyString());
+        // Should update global state with load status
+        verify(coordinator).saveProgressStateForPartition(any(GlobalState.class), eq(null));
+        // Should create a partition to inform streaming can start.
+        verify(coordinator).createPartition(any(GlobalState.class));
+        // Should mask the partition as completed.
+        verify(coordinator).completePartition(any(DataFilePartition.class));
+        // Should update metrics.
+        verify(exportFileSuccess).increment();
+
+        executorService.shutdownNow();
+    }
+
+    @Test
     void run_catches_exception_and_retries_when_exception_is_thrown_during_processing() throws InterruptedException {
         given(coordinator.acquireAvailablePartition(DataFilePartition.PARTITION_TYPE)).willThrow(RuntimeException.class);
 
@@ -230,5 +279,40 @@ class DataFileSchedulerTest {
         assertThat(executorService.awaitTermination(1000, TimeUnit.MILLISECONDS), equalTo(true));
     }
 
+    @Test
+    void run_with_acknowledgments_decrements_numOfWorkers_even_when_giveUpPartition_throws() throws InterruptedException {
+        given(coordinator.acquireAvailablePartition(DataFilePartition.PARTITION_TYPE))
+                .willReturn(Optional.of(dataFilePartition))
+                .willReturn(Optional.of(dataFilePartition))
+                .willReturn(Optional.empty());
+        given(dynamoDBSourceConfig.isAcknowledgmentsEnabled()).willReturn(true);
 
+        final Duration dataFileAcknowledgmentTimeout = Duration.ofSeconds(30);
+        given(dynamoDBSourceConfig.getDataFileAcknowledgmentTimeout()).willReturn(dataFileAcknowledgmentTimeout);
+
+        // Loader throws exception to trigger giveUpPartition path
+        given(loaderFactory.createDataFileLoader(any(DataFilePartition.class), any(TableInfo.class), any(AcknowledgementSet.class), any(Duration.class)))
+                .willReturn(() -> { throw new RuntimeException("Connection reset"); });
+
+        // giveUpPartition throws - simulating the silent failure
+        lenient().doThrow(new RuntimeException("DDB conditional check failed"))
+                .when(coordinator).giveUpPartition(any(EnhancedSourcePartition.class));
+
+        // Mock acknowledgement set
+        final AcknowledgementSet ackSet = mock(AcknowledgementSet.class);
+        given(acknowledgementSetManager.create(any(Consumer.class), any(Duration.class))).willReturn(ackSet);
+
+        scheduler = new DataFileScheduler(coordinator, loaderFactory, pluginMetrics, acknowledgementSetManager, dynamoDBSourceConfig);
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        final Future<?> future = executorService.submit(() -> scheduler.run());
+        Thread.sleep(3000);
+        executorService.shutdown();
+        future.cancel(true);
+        assertThat(executorService.awaitTermination(2000, TimeUnit.MILLISECONDS), equalTo(true));
+
+        // Despite giveUpPartition throwing, the scheduler should still acquire more partitions
+        // (proving numOfWorkers was decremented and didn't get stuck at 1)
+        verify(coordinator, atLeast(2)).acquireAvailablePartition(DataFilePartition.PARTITION_TYPE);
+    }
 }

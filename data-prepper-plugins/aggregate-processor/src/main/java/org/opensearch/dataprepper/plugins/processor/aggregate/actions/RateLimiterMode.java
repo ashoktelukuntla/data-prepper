@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 
 import java.util.Arrays;
 import java.util.Map;
@@ -35,6 +40,11 @@ public enum RateLimiterMode {
     @JsonCreator
     static RateLimiterMode fromOptionValue(final String option) {
         return ACTIONS_MAP.get(option.toLowerCase());
+    }
+
+    @JsonValue
+    public String getOptionValue() {
+        return name;
     }
 
 }

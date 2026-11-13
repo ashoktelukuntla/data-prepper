@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.aws;
@@ -36,10 +40,61 @@ class CredentialsProviderFactory {
     static final long STS_CLIENT_BASE_BACKOFF_MILLIS = 1000L;
     static final long STS_CLIENT_MAX_BACKOFF_MILLIS = 60000L;
 
+    private final AwsStsConfiguration defaultStsConfiguration;
+    private final AwsPluginConfig awsPluginConfig;
+
+    public CredentialsProviderFactory(final AwsStsConfiguration defaultStsConfiguration) {
+        this(defaultStsConfiguration, null);
+    }
+
+    public CredentialsProviderFactory(final AwsStsConfiguration defaultStsConfiguration, final AwsPluginConfig awsPluginConfig) {
+        Objects.requireNonNull(defaultStsConfiguration);
+        this.defaultStsConfiguration = defaultStsConfiguration;
+        this.awsPluginConfig = awsPluginConfig;
+    }
+
+    AwsCredentialsOptions resolveNamedConfiguration(final String configurationName) {
+        if (awsPluginConfig == null) {
+            throw new IllegalArgumentException("Named configuration '" + configurationName +
+                    "' referenced but no aws extensions configured");
+        }
+        final AwsStsConfiguration namedConfig = awsPluginConfig.getConfiguration(configurationName);
+        if (namedConfig == null) {
+            throw new IllegalArgumentException("Named configuration '" + configurationName +
+                    "' not found in extensions.aws.configurations");
+        }
+        if (namedConfig.isUseAwsSdkDefault()) {
+            return AwsCredentialsOptions.defaultOptionsWithDefaultCredentialsProvider();
+        }
+        final AwsCredentialsOptions.Builder builder = AwsCredentialsOptions.builder();
+        if (namedConfig.getAwsRegion() != null) {
+            builder.withRegion(namedConfig.getAwsRegion());
+        }
+        if (namedConfig.getAwsStsRoleArn() != null) {
+            builder.withStsRoleArn(namedConfig.getAwsStsRoleArn());
+        }
+        if (namedConfig.getStsHeaderOverrides() != null) {
+            builder.withStsHeaderOverrides(namedConfig.getStsHeaderOverrides());
+        }
+        return builder.build();
+    }
+
+    Region getDefaultRegion() {
+        return defaultStsConfiguration.getAwsRegion();
+    }
+
+    String getDefaultStsRoleArn() {
+        return defaultStsConfiguration.getAwsStsRoleArn();
+    }
+
     AwsCredentialsProvider providerFromOptions(final AwsCredentialsOptions credentialsOptions) {
         Objects.requireNonNull(credentialsOptions);
 
-        if(credentialsOptions.getStsRoleArn() != null) {
+        if (credentialsOptions.isUseDefaultCredentialsProvider()) {
+            return DefaultCredentialsProvider.create();
+        }
+
+        if(credentialsOptions.getStsRoleArn() != null || defaultStsConfiguration.getAwsStsRoleArn() != null) {
             return createStsCredentials(credentialsOptions);
         }
 
@@ -47,14 +102,24 @@ class CredentialsProviderFactory {
     }
 
     private AwsCredentialsProvider createStsCredentials(final AwsCredentialsOptions credentialsOptions) {
-
-        final String stsRoleArn = credentialsOptions.getStsRoleArn();
+        final boolean useDefaultStsRoleArn;
+        final String stsRoleArn;
+        if(credentialsOptions.getStsRoleArn() != null) {
+            stsRoleArn = credentialsOptions.getStsRoleArn();
+            useDefaultStsRoleArn = false;
+        }
+        else {
+            stsRoleArn = defaultStsConfiguration.getAwsStsRoleArn();
+            useDefaultStsRoleArn = true;
+        }
 
         validateStsRoleArn(stsRoleArn);
 
         LOG.debug("Creating new AwsCredentialsProvider with role {}.", stsRoleArn);
 
-        final StsClient stsClient = createStsClient(credentialsOptions.getRegion());
+        final Region region = defaultStsConfiguration.getAwsRegion() != null ? defaultStsConfiguration.getAwsRegion() : credentialsOptions.getRegion();
+
+        final StsClient stsClient = createStsClient(region);
 
         AssumeRoleRequest.Builder assumeRoleRequestBuilder = AssumeRoleRequest.builder()
                 .roleSessionName("Data-Prepper-" + UUID.randomUUID())
@@ -64,17 +129,22 @@ class CredentialsProviderFactory {
             assumeRoleRequestBuilder = assumeRoleRequestBuilder.externalId(credentialsOptions.getStsExternalId());
         }
 
-        final Map<String, String> awsStsHeaderOverrides = credentialsOptions.getStsHeaderOverrides();
+        final Map<String, String> awsStsHeaderOverrides;
+        if(useDefaultStsRoleArn) {
+            awsStsHeaderOverrides = defaultStsConfiguration.getStsHeaderOverrides();
+        } else {
+            awsStsHeaderOverrides = credentialsOptions.getStsHeaderOverrides();
+        }
 
         if(awsStsHeaderOverrides != null && !awsStsHeaderOverrides.isEmpty()) {
             assumeRoleRequestBuilder = assumeRoleRequestBuilder
                     .overrideConfiguration(configuration -> awsStsHeaderOverrides.forEach(configuration::putHeader));
         }
 
-        return StsAssumeRoleCredentialsProvider.builder()
+        return new BackoffCredentialsProvider(StsAssumeRoleCredentialsProvider.builder()
                 .stsClient(stsClient)
                 .refreshRequest(assumeRoleRequestBuilder.build())
-                .build();
+                .build());
     }
 
     private void validateStsRoleArn(final String stsRoleArn) {
@@ -96,7 +166,7 @@ class CredentialsProviderFactory {
         }
     }
 
-    private StsClient createStsClient(final Region region) {
+    protected StsClient createStsClient(final Region region) {
         final BackoffStrategy backoffStrategy = EqualJitterBackoffStrategy.builder()
                 .baseDelay(Duration.ofMillis(STS_CLIENT_BASE_BACKOFF_MILLIS))
                 .maxBackoffTime(Duration.ofMillis(STS_CLIENT_MAX_BACKOFF_MILLIS))

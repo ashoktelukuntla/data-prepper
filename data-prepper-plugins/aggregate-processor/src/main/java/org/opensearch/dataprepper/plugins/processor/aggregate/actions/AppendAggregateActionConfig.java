@@ -1,17 +1,27 @@
 /*
  * Copyright OpenSearch Contributors
- * SPDX-Limense-Identifier: Apache-2.0
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
 
 import java.util.List;
 
+import com.fasterxml.jackson.annotation.JsonClassDescription;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 
+@JsonPropertyOrder
+@JsonClassDescription("Appends multiple events into a single event.")
 public class AppendAggregateActionConfig {
 
     @JsonProperty("keys_to_append")
+    @JsonPropertyDescription("A list of keys to append to for the aggregated result.")
     List<String> keysToAppend;
 
     public List<String> getKeysToAppend() {

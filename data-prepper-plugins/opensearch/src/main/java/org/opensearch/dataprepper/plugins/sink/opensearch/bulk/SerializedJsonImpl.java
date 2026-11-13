@@ -6,17 +6,22 @@
 package org.opensearch.dataprepper.plugins.sink.opensearch.bulk;
 
 import java.io.Serializable;
+import java.util.Map;
 import java.util.Optional;
 
 class SerializedJsonImpl implements SerializedJson, Serializable {
     private byte[] document;
     private String documentId = null;
     private String routingField = null;
+    private String pipelineField = null;
+    private Map<String, Object> resolvedScriptParameters = null;
 
-    public SerializedJsonImpl(final byte[] document, String docId, String routingField) {
+    public SerializedJsonImpl(final byte[] document, String docId, String routingField, String pipelineField, Map<String, Object> resolvedScriptParameters) {
         this.document = document;
         this.documentId = docId;
         this.routingField = routingField;
+        this.pipelineField = pipelineField;
+        this.resolvedScriptParameters = resolvedScriptParameters;
     }
 
     public SerializedJsonImpl(final byte[] document) {
@@ -41,5 +46,13 @@ class SerializedJsonImpl implements SerializedJson, Serializable {
     @Override
     public Optional<String> getRoutingField() {
         return Optional.ofNullable(routingField);
+    }
+
+    @Override
+    public Optional<String> getPipelineField() { return Optional.ofNullable(pipelineField); }
+
+    @Override
+    public Optional<Map<String, Object>> getResolvedScriptParameters() {
+        return Optional.ofNullable(resolvedScriptParameters);
     }
 }

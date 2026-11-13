@@ -1,31 +1,47 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.sink.s3.accumulator;
 
 import org.opensearch.dataprepper.model.codec.OutputCodec;
-import org.opensearch.dataprepper.plugins.sink.s3.compression.CompressionEngine;
-import software.amazon.awssdk.services.s3.S3Client;
+import org.opensearch.dataprepper.model.codec.CompressionEngine;
+import org.opensearch.dataprepper.plugins.sink.s3.configuration.ServerSideEncryptionConfig;
+import org.opensearch.dataprepper.plugins.sink.s3.ownership.BucketOwnerProvider;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 
 import java.util.Objects;
+import java.util.Map;
 import java.util.function.Supplier;
+import java.util.function.Function;
 
 public class CompressionBufferFactory implements BufferFactory {
     private final BufferFactory innerBufferFactory;
     private final CompressionEngine compressionEngine;
     private final boolean compressionInternal;
 
-    public CompressionBufferFactory(final BufferFactory innerBufferFactory, final CompressionEngine compressionEngine, final OutputCodec codec) {
+    public CompressionBufferFactory(final BufferFactory innerBufferFactory,
+                                    final CompressionEngine compressionEngine,
+                                    final OutputCodec codec) {
         this.innerBufferFactory = Objects.requireNonNull(innerBufferFactory);
         this.compressionEngine = Objects.requireNonNull(compressionEngine);
         compressionInternal = Objects.requireNonNull(codec).isCompressionInternal();
     }
 
     @Override
-    public Buffer getBuffer(S3Client s3Client, Supplier<String> bucketSupplier, Supplier<String> keySupplier) {
-        final Buffer internalBuffer = innerBufferFactory.getBuffer(s3Client, bucketSupplier, keySupplier);
+    public Buffer getBuffer(final S3AsyncClient s3Client,
+                            final Supplier<String> bucketSupplier,
+                            final Supplier<String> keySupplier,
+                            final String defaultBucket,
+                            final Function<Integer, Map<String, String>> metadataSupplier,
+                            final BucketOwnerProvider bucketOwnerProvider,
+                            final ServerSideEncryptionConfig serverSideEncryptionConfig) {
+        final Buffer internalBuffer = innerBufferFactory.getBuffer(s3Client, bucketSupplier, keySupplier, defaultBucket, metadataSupplier, bucketOwnerProvider, serverSideEncryptionConfig);
         if(compressionInternal)
             return internalBuffer;
 

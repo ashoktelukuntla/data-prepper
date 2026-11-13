@@ -23,11 +23,14 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.PluginConfigObservable;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AwsConfig;
@@ -40,6 +43,7 @@ import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaRegistryType;
 import org.opensearch.dataprepper.plugins.kafka.configuration.TopicConfig;
 import org.opensearch.dataprepper.plugins.kafka.extension.KafkaClusterConfigSupplier;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 
 import java.io.File;
 import java.io.IOException;
@@ -102,6 +106,15 @@ public class MskGlueRegistryMultiTypeIT {
     @Mock
     private KafkaClusterConfigSupplier kafkaClusterConfigSupplier;
 
+    @Mock
+    private PluginConfigObservable pluginConfigObservable;
+
+    @Mock
+    private AwsCredentialsSupplier awsCredentialsSupplier;
+
+    @Mock
+    private AwsCredentialsOptions awsCredentialsOptions;
+
     private KafkaSource kafkaSource;
     private SourceTopicConfig jsonTopic;
     private SourceTopicConfig avroTopic;
@@ -127,7 +140,9 @@ public class MskGlueRegistryMultiTypeIT {
 
 
     public KafkaSource createObjectUnderTest() {
-        return new KafkaSource(sourceConfig, pluginMetrics, acknowledgementSetManager, pipelineDescription, kafkaClusterConfigSupplier);
+        return new KafkaSource(
+                sourceConfig, pluginMetrics, acknowledgementSetManager, pipelineDescription,
+                kafkaClusterConfigSupplier, pluginConfigObservable, awsCredentialsSupplier);
     }
 
     @BeforeEach
@@ -144,6 +159,8 @@ public class MskGlueRegistryMultiTypeIT {
         receivedRecords = new ArrayList<>();
         acknowledgementSetManager = mock(AcknowledgementSetManager.class);
         pipelineDescription = mock(PipelineDescription.class);
+        awsCredentialsOptions = mock(AwsCredentialsOptions.class);
+        awsCredentialsSupplier = mock(AwsCredentialsSupplier.class);
         when(sourceConfig.getAcknowledgementsEnabled()).thenReturn(false);
         when(sourceConfig.getSchemaConfig()).thenReturn(schemaConfig);
         when(schemaConfig.getType()).thenReturn(SchemaRegistryType.AWS_GLUE);
@@ -192,6 +209,8 @@ public class MskGlueRegistryMultiTypeIT {
         encryptionConfig = mock(EncryptionConfig.class);
         when(sourceConfig.getEncryptionConfig()).thenReturn(encryptionConfig);
         System.setProperty("software.amazon.awssdk.http.service.impl", "software.amazon.awssdk.http.urlconnection.UrlConnectionSdkHttpService");
+        when(awsConfig.toCredentialsOptions()).thenReturn(awsCredentialsOptions);
+        when(awsCredentialsSupplier.getProvider(awsCredentialsOptions)).thenReturn(DefaultCredentialsProvider.create());
     }
 
     @Test
@@ -395,6 +414,7 @@ public class MskGlueRegistryMultiTypeIT {
         properties.put(AWSSchemaRegistryConstants.AWS_REGION, awsConfig.getRegion());
         properties.put(AWSSchemaRegistryConstants.REGISTRY_NAME, testRegistryName);
         properties.put(AWSSchemaRegistryConstants.SCHEMA_NAME, testAvroSchemaName);
+        properties.put(AWSSchemaRegistryConstants.SCHEMA_AUTO_REGISTRATION_SETTING, true);
 
         Schema testSchema = null;
         Schema.Parser parser = new Schema.Parser();

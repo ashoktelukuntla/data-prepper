@@ -1,18 +1,25 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.source;
 
 import org.opensearch.dataprepper.model.buffer.Buffer;
+import org.opensearch.dataprepper.model.plugin.PluginComponentType;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
 import org.opensearch.dataprepper.model.codec.HasByteDecoder;
 
 /**
  * Data Prepper source interface. Source acts as receiver of the events that flow
  * through the transformation pipeline.
  */
+@PluginComponentType("source")
 public interface Source<T extends Record<?>> extends HasByteDecoder {
 
     /**
@@ -35,6 +42,15 @@ public interface Source<T extends Record<?>> extends HasByteDecoder {
      */
     default boolean areAcknowledgementsEnabled() {
         return false;
+    }
+
+    /**
+     * Sets default failure pipeline of a source
+
+     * @param failurePipeline failure pipeline
+     * @since 2.12
+     */
+    default void setFailurePipeline(final HeadlessPipeline failurePipeline) {
     }
 
 }

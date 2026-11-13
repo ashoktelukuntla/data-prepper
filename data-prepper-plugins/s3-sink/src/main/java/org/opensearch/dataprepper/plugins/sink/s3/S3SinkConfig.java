@@ -1,21 +1,31 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.sink.s3;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import org.opensearch.dataprepper.aws.validator.AwsAccountId;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.BufferTypeOptions;
 import org.opensearch.dataprepper.plugins.sink.s3.compression.CompressionOption;
+import org.opensearch.dataprepper.plugins.sink.s3.configuration.AggregateThresholdOptions;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.AwsAuthenticationOptions;
+import org.opensearch.dataprepper.plugins.sink.s3.configuration.ClientOptions;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.ObjectKeyOptions;
+import org.opensearch.dataprepper.plugins.sink.s3.configuration.ServerSideEncryptionConfig;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.ThresholdOptions;
+
+import java.util.Map;
 
 /**
  * s3 sink configuration class contains properties, used to read yaml configuration.
@@ -32,19 +42,54 @@ public class S3SinkConfig {
     private AwsAuthenticationOptions awsAuthenticationOptions;
 
     @JsonProperty("bucket")
-    @NotEmpty
     @Size(min = 3, max = 500, message = "bucket length should be at least 3 characters")
     private String bucketName;
 
+    @JsonProperty("bucket_selector")
+    private PluginModel bucketSelector;
+
+    @JsonProperty("predefined_object_metadata")
+    private PredefinedObjectMetadata predefinedObjectMetadata;
+
+    @JsonProperty("object_metadata")
+    private ObjectMetadataConfig objectMetadataConfig;
+
+    @AssertTrue(message = "Only one of object_metadata and predefined_object_metadata can be used.")
+    boolean isValidMetadataConfig() {
+        // One of them or both should be null
+        return (objectMetadataConfig == null || predefinedObjectMetadata == null);
+    }
+
+    @AssertTrue(message = "You may not use both bucket and bucket_selector together in one S3 sink.")
+    private boolean isValidBucketConfig() {
+        return (bucketName != null && bucketSelector == null) ||
+               (bucketName == null && bucketSelector != null);
+    }
+
+    /**
+     * The default bucket to send to if using a dynamic bucket name and failures occur
+     * for any reason when sending to a dynamic bucket
+     */
+    @JsonProperty("default_bucket")
+    @Size(min = 3, max = 500, message = "default_bucket length should be at least 3 characters")
+    private String defaultBucket;
+
+
     @JsonProperty("object_key")
-    private ObjectKeyOptions objectKeyOptions;
+    @Valid
+    private ObjectKeyOptions objectKeyOptions = new ObjectKeyOptions();
 
     @JsonProperty("compression")
     private CompressionOption compression = CompressionOption.NONE;
 
     @JsonProperty("threshold")
     @NotNull
+    @Valid
     private ThresholdOptions thresholdOptions;
+
+    @JsonProperty("aggregate_threshold")
+    @Valid
+    private AggregateThresholdOptions aggregateThresholdOptions;
 
     @JsonProperty("codec")
     @NotNull
@@ -58,6 +103,20 @@ public class S3SinkConfig {
     @JsonProperty("max_retries")
     private int maxUploadRetries = DEFAULT_UPLOAD_RETRIES;
 
+    @JsonProperty("bucket_owners")
+    private Map<String, @AwsAccountId String> bucketOwners;
+
+    @JsonProperty("default_bucket_owner")
+    @AwsAccountId
+    private String defaultBucketOwner;
+
+    @JsonProperty("client")
+    private ClientOptions clientOptions;
+
+    @JsonProperty("server_side_encryption")
+    @Valid
+    private ServerSideEncryptionConfig serverSideEncryptionConfig;
+
     /**
      * Aws Authentication configuration Options.
      * @return aws authentication options.
@@ -67,12 +126,18 @@ public class S3SinkConfig {
     }
 
     /**
-     * Threshold configuration Options.
+     * Threshold configuration Options at the individual S3 group level
      * @return threshold option object.
      */
     public ThresholdOptions getThresholdOptions() {
         return thresholdOptions;
     }
+
+    /**
+     * Threshold configuration for the aggregation of all S3 groups
+     * @return returns aggregate threshold options
+     */
+    public AggregateThresholdOptions getAggregateThresholdOptions() { return aggregateThresholdOptions; }
 
     /**
      * Read s3 bucket name configuration.
@@ -94,6 +159,18 @@ public class S3SinkConfig {
             objectKeyOptions = new ObjectKeyOptions();
         }
         return objectKeyOptions;
+    }
+
+    public Object getObjectMetadataConfig() {
+        return objectMetadataConfig != null ? objectMetadataConfig : predefinedObjectMetadata;
+    }
+
+    /**
+     * Bucket selector configuration options.
+     * @return bucketSelector plugin model.
+     */
+    public PluginModel getBucketSelector() {
+        return bucketSelector;
     }
 
     /**
@@ -130,5 +207,23 @@ public class S3SinkConfig {
 
     public CompressionOption getCompression() {
         return compression;
+    }
+
+    public String getDefaultBucket() { return defaultBucket; }
+
+    public Map<String, String> getBucketOwners() {
+        return bucketOwners;
+    }
+
+    public String getDefaultBucketOwner() {
+        return defaultBucketOwner;
+    }
+
+    public ClientOptions getClientOptions() {
+        return clientOptions;
+    }
+
+    public ServerSideEncryptionConfig getServerSideEncryptionConfig() {
+        return serverSideEncryptionConfig;
     }
 }

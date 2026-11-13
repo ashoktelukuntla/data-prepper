@@ -13,6 +13,7 @@ import com.linecorp.armeria.client.ClientFactory;
 import com.linecorp.armeria.client.Clients;
 import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
+import com.linecorp.armeria.common.ClosedSessionException;
 import com.linecorp.armeria.common.HttpData;
 import com.linecorp.armeria.common.HttpHeaderNames;
 import com.linecorp.armeria.common.HttpMethod;
@@ -20,7 +21,6 @@ import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.MediaType;
 import com.linecorp.armeria.common.RequestHeaders;
 import com.linecorp.armeria.common.SessionProtocol;
-import com.linecorp.armeria.common.grpc.GrpcStatusFunction;
 import com.linecorp.armeria.server.Server;
 import com.linecorp.armeria.server.ServerBuilder;
 import com.linecorp.armeria.server.grpc.GrpcService;
@@ -30,18 +30,20 @@ import io.grpc.BindableService;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.micrometer.core.instrument.Measurement;
+import io.micrometer.core.instrument.Statistic;
 import io.netty.util.AsciiString;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse;
 import io.opentelemetry.proto.collector.metrics.v1.MetricsServiceGrpc;
+import io.opentelemetry.proto.common.v1.InstrumentationScope;
 import io.opentelemetry.proto.metrics.v1.NumberDataPoint;
 
-import io.opentelemetry.proto.common.v1.InstrumentationLibrary;
 import io.opentelemetry.proto.metrics.v1.Gauge;
-import io.opentelemetry.proto.metrics.v1.InstrumentationLibraryMetrics;
 import io.opentelemetry.proto.common.v1.AnyValue;
 import io.opentelemetry.proto.common.v1.KeyValue;
 import io.opentelemetry.proto.metrics.v1.ResourceMetrics;
+import io.opentelemetry.proto.metrics.v1.ScopeMetrics;
 import io.opentelemetry.proto.resource.v1.Resource;
 import org.apache.commons.io.IOUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -59,8 +61,11 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.GrpcRequestExceptionHandler;
 import org.opensearch.dataprepper.armeria.authentication.GrpcAuthenticationProvider;
 import org.opensearch.dataprepper.armeria.authentication.HttpBasicAuthenticationConfig;
+import org.opensearch.dataprepper.metrics.MetricNames;
+import org.opensearch.dataprepper.metrics.MetricsTestUtil;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
@@ -74,7 +79,7 @@ import org.opensearch.dataprepper.plugins.buffer.blockingbuffer.BlockingBuffer;
 import org.opensearch.dataprepper.plugins.certificate.CertificateProvider;
 import org.opensearch.dataprepper.plugins.certificate.model.Certificate;
 import org.opensearch.dataprepper.plugins.codec.CompressionOption;
-import org.opensearch.dataprepper.plugins.health.HealthGrpcService;
+import org.opensearch.dataprepper.plugins.server.HealthGrpcService;
 import org.opensearch.dataprepper.plugins.otel.codec.OTelMetricDecoder;
 import org.opensearch.dataprepper.plugins.source.otelmetrics.certificate.CertificateProviderFactory;
 
@@ -90,7 +95,9 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.StringJoiner;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
@@ -98,6 +105,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
 
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
@@ -192,8 +200,10 @@ class OTelMetricsSourceTest {
         lenient().when(grpcServiceBuilder.addService(any(BindableService.class))).thenReturn(grpcServiceBuilder);
         lenient().when(grpcServiceBuilder.useClientTimeoutHeader(anyBoolean())).thenReturn(grpcServiceBuilder);
         lenient().when(grpcServiceBuilder.useBlockingTaskExecutor(anyBoolean())).thenReturn(grpcServiceBuilder);
-        lenient().when(grpcServiceBuilder.exceptionMapping(any(GrpcStatusFunction.class))).thenReturn(grpcServiceBuilder);
+        lenient().when(grpcServiceBuilder.exceptionHandler(any(
+                GrpcRequestExceptionHandler.class))).thenReturn(grpcServiceBuilder);
         lenient().when(grpcServiceBuilder.build()).thenReturn(grpcService);
+        MetricsTestUtil.initMetrics();
         pluginMetrics = PluginMetrics.fromNames("otel_metrics", "pipeline");
 
         when(oTelMetricsSourceConfig.getPort()).thenReturn(DEFAULT_PORT);
@@ -403,6 +413,116 @@ class OTelMetricsSourceTest {
                 .whenComplete((response, throwable) -> assertSecureResponseWithStatusCode(response, HttpStatus.UNAUTHORIZED, throwable))
                 .join();
     }
+
+    @Test
+    void testHttpRequestWithInvalidCredentials_with_unsuccessful_response() throws InvalidProtocolBufferException {
+        when(httpBasicAuthenticationConfig.getUsername()).thenReturn(USERNAME);
+        when(httpBasicAuthenticationConfig.getPassword()).thenReturn(PASSWORD);
+        final GrpcAuthenticationProvider grpcAuthenticationProvider = new GrpcBasicAuthenticationProvider(httpBasicAuthenticationConfig);
+
+        when(pluginFactory.loadPlugin(eq(GrpcAuthenticationProvider.class), any(PluginSetting.class)))
+                .thenReturn(grpcAuthenticationProvider);
+        when(oTelMetricsSourceConfig.getAuthentication()).thenReturn(new PluginModel("http_basic",
+                Map.of(
+                        "username", USERNAME,
+                        "password", PASSWORD
+                )));
+        when(oTelMetricsSourceConfig.enableUnframedRequests()).thenReturn(true);
+        when(oTelMetricsSourceConfig.getPath()).thenReturn(TEST_PATH);
+
+        configureObjectUnderTest();
+        SOURCE.start(buffer);
+
+        final String invalidUsername = "wrong_user";
+        final String invalidPassword = "wrong_password";
+        final String invalidCredentials = Base64.getEncoder()
+                .encodeToString(String.format("%s:%s", invalidUsername, invalidPassword).getBytes(StandardCharsets.UTF_8));
+
+        final String transformedPath = "/" + TEST_PIPELINE_NAME + "/v1/metrics";
+
+        WebClient.of().prepare()
+                .post("http://127.0.0.1:21891" + transformedPath)
+                .content(MediaType.JSON_UTF_8, JsonFormat.printer().print(createExportMetricsRequest()).getBytes())
+                .header("Authorization", "Basic " + invalidCredentials)
+                .execute()
+                .aggregate()
+                .whenComplete((response, throwable) -> assertSecureResponseWithStatusCode(response, HttpStatus.UNAUTHORIZED, throwable))
+                .join();
+    }
+
+    @Test
+    void testGrpcRequestWithInvalidCredentials_with_unsuccessful_response() throws Exception {
+        when(httpBasicAuthenticationConfig.getUsername()).thenReturn(USERNAME);
+        when(httpBasicAuthenticationConfig.getPassword()).thenReturn(PASSWORD);
+        final GrpcAuthenticationProvider grpcAuthenticationProvider = new GrpcBasicAuthenticationProvider(httpBasicAuthenticationConfig);
+
+        when(pluginFactory.loadPlugin(eq(GrpcAuthenticationProvider.class), any(PluginSetting.class)))
+                .thenReturn(grpcAuthenticationProvider);
+        when(oTelMetricsSourceConfig.getAuthentication()).thenReturn(new PluginModel("http_basic",
+                Map.of(
+                        "username", USERNAME,
+                        "password", PASSWORD
+                )));
+        configureObjectUnderTest();
+        SOURCE.start(buffer);
+
+        final String invalidUsername = "wrong_user";
+        final String invalidPassword = "wrong_password";
+        final String invalidCredentials = Base64.getEncoder()
+                .encodeToString(String.format("%s:%s", invalidUsername, invalidPassword).getBytes(StandardCharsets.UTF_8));
+
+        final MetricsServiceGrpc.MetricsServiceBlockingStub client = Clients.builder(GRPC_ENDPOINT)
+                .addHeader("Authorization", "Basic " + invalidCredentials)
+                .build(MetricsServiceGrpc.MetricsServiceBlockingStub.class);
+
+        final StatusRuntimeException actualException = assertThrows(StatusRuntimeException.class, () -> client.export(createExportMetricsRequest()));
+
+        assertThat(actualException.getStatus(), notNullValue());
+        assertThat(actualException.getStatus().getCode(), equalTo(Status.Code.UNAUTHENTICATED));
+    }
+
+    @Test
+    void testHttpWithoutSslFailsWhenSslIsEnabled() throws InvalidProtocolBufferException {
+        when(oTelMetricsSourceConfig.isSsl()).thenReturn(true);
+        when(oTelMetricsSourceConfig.getSslKeyCertChainFile()).thenReturn("data/certificate/test_cert.crt");
+        when(oTelMetricsSourceConfig.getSslKeyFile()).thenReturn("data/certificate/test_decrypted_key.key");
+        configureObjectUnderTest();
+        SOURCE.start(buffer);
+
+        WebClient client = WebClient.builder("http://127.0.0.1:21891")
+                .build();
+
+        CompletionException exception = assertThrows(CompletionException.class, () -> client.execute(RequestHeaders.builder()
+                        .scheme(SessionProtocol.HTTP)
+                        .authority("127.0.0.1:21891")
+                        .method(HttpMethod.POST)
+                        .path("/opentelemetry.proto.collector.metrics.v1.MetricsService/Export")
+                        .contentType(MediaType.JSON_UTF_8)
+                        .build(),
+                HttpData.copyOf(JsonFormat.printer().print(createExportMetricsRequest()).getBytes()))
+                .aggregate()
+                .join());
+
+        assertThat(exception.getCause(), instanceOf(ClosedSessionException.class));
+    }
+
+    @Test
+    void testGrpcFailsIfSslIsEnabledAndNoTls() {
+        when(oTelMetricsSourceConfig.isSsl()).thenReturn(true);
+        when(oTelMetricsSourceConfig.getSslKeyCertChainFile()).thenReturn("data/certificate/test_cert.crt");
+        when(oTelMetricsSourceConfig.getSslKeyFile()).thenReturn("data/certificate/test_decrypted_key.key");
+        configureObjectUnderTest();
+        SOURCE.start(buffer);
+
+        MetricsServiceGrpc.MetricsServiceBlockingStub client = Clients.builder(GRPC_ENDPOINT)
+                .build(MetricsServiceGrpc.MetricsServiceBlockingStub.class);
+
+        StatusRuntimeException actualException = assertThrows(StatusRuntimeException.class, () -> client.export(createExportMetricsRequest()));
+
+        assertThat(actualException.getStatus(), notNullValue());
+        assertThat(actualException.getStatus().getCode(), equalTo(Status.Code.UNKNOWN));
+    }
+
 
     @Test
     void testServerStartCertFileSuccess() throws IOException {
@@ -1005,6 +1125,42 @@ class OTelMetricsSourceTest {
                 .join();
     }
 
+    @Test
+    void testServerConnectionsMetric() throws InvalidProtocolBufferException {
+        // Prepare
+        when(oTelMetricsSourceConfig.enableUnframedRequests()).thenReturn(true);
+        SOURCE.start(buffer);
+
+        final String metricNamePrefix = new StringJoiner(MetricNames.DELIMITER)
+                .add("pipeline").add("otel_metrics").toString();
+        List<Measurement> serverConnectionsMeasurements = MetricsTestUtil.getMeasurementList(
+                new StringJoiner(MetricNames.DELIMITER).add(metricNamePrefix)
+                        .add(OTelMetricsSource.SERVER_CONNECTIONS).toString());
+
+        // Verify connections metric value is 0
+        Measurement serverConnectionsMeasurement = MetricsTestUtil.getMeasurementFromList(serverConnectionsMeasurements, Statistic.VALUE);
+        assertEquals(0, serverConnectionsMeasurement.getValue());
+
+        final RequestHeaders testRequestHeaders = RequestHeaders.builder()
+                .scheme(SessionProtocol.HTTP)
+                .authority("127.0.0.1:21891")
+                .method(HttpMethod.POST)
+                .path("/opentelemetry.proto.collector.metrics.v1.MetricsService/Export")
+                .contentType(MediaType.JSON_UTF_8)
+                .build();
+        final HttpData testHttpData = HttpData.copyOf(JsonFormat.printer().print(METRICS_REQUEST).getBytes());
+
+        // Send request
+        WebClient.of().execute(testRequestHeaders, testHttpData)
+                .aggregate()
+                .whenComplete((response, throwable) -> assertSecureResponseWithStatusCode(response, HttpStatus.OK, throwable))
+                .join();
+
+        // Verify connections metric value is 1
+        serverConnectionsMeasurement = MetricsTestUtil.getMeasurementFromList(serverConnectionsMeasurements, Statistic.VALUE);
+        assertEquals(1.0, serverConnectionsMeasurement.getValue());
+    }
+
     static class BufferExceptionToStatusArgumentsProvider implements ArgumentsProvider {
         @Override
         public Stream<? extends Arguments> provideArguments(final ExtensionContext context) {
@@ -1029,9 +1185,9 @@ class OTelMetricsSourceTest {
                 .setUnit("seconds")
                 .setName("name")
                 .setDescription("description");
-        InstrumentationLibraryMetrics isntLib = InstrumentationLibraryMetrics.newBuilder()
+        ScopeMetrics scopeMetrics = ScopeMetrics.newBuilder()
                 .addMetrics(metric)
-                .setInstrumentationLibrary(InstrumentationLibrary.newBuilder()
+                .setScope(InstrumentationScope.newBuilder()
                         .setName("ilname")
                         .setVersion("ilversion")
                         .build())
@@ -1040,7 +1196,7 @@ class OTelMetricsSourceTest {
 
         final ResourceMetrics resourceMetrics = ResourceMetrics.newBuilder()
                 .setResource(resource)
-                .addInstrumentationLibraryMetrics(isntLib)
+                .addScopeMetrics(scopeMetrics)
                 .build();
 
         return ExportMetricsServiceRequest.newBuilder()

@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.csv;
@@ -56,6 +60,7 @@ class CsvProcessorTest {
         lenient().when(processorConfig.getQuoteCharacter()).thenReturn(defaultConfig.getQuoteCharacter());
         lenient().when(processorConfig.getColumnNamesSourceKey()).thenReturn(defaultConfig.getColumnNamesSourceKey());
         lenient().when(processorConfig.getColumnNames()).thenReturn(defaultConfig.getColumnNames());
+        lenient().when(processorConfig.isDeleteSource()).thenReturn(false);
 
         lenient().when(pluginMetrics.counter(CsvProcessor.CSV_INVALID_EVENTS)).thenReturn(csvInvalidEventsCounter);
 
@@ -64,6 +69,24 @@ class CsvProcessorTest {
 
     private CsvProcessor createObjectUnderTest() {
         return new CsvProcessor(pluginMetrics, processorConfig, expressionEvaluator);
+    }
+
+    @Test
+    void delete_source_true_deletes_the_source() {
+        when(processorConfig.isDeleteSource()).thenReturn(true);
+
+        when(processorConfig.getSource()).thenReturn("different_source");
+
+        final Map<String, Object> eventData = new HashMap<>();
+        eventData.put("different_source","1,2,3");
+        final Record<Event> eventUnderTest = buildRecordWithEvent(eventData);
+
+        final List<Record<Event>> editedEvents = (List<Record<Event>>) csvProcessor.doExecute(Collections.singletonList(eventUnderTest));
+        final Event parsedEvent = getSingleEvent(editedEvents);
+        assertThat(parsedEvent.containsKey("different_source"), equalTo(false));
+        assertThatKeyEquals(parsedEvent, "column1", "1");
+        assertThatKeyEquals(parsedEvent, "column2", "2");
+        assertThatKeyEquals(parsedEvent, "column3", "3");
     }
 
     @Test
@@ -98,6 +121,7 @@ class CsvProcessorTest {
     @Test
     void test_when_delimiterIsTab_then_parsedCorrectly() {
         when(processorConfig.getDelimiter()).thenReturn("\t");
+        csvProcessor = createObjectUnderTest();
 
         Record<Event> eventUnderTest = createMessageEvent("1\t2\t3");
         final List<Record<Event>> editedEvents = (List<Record<Event>>) csvProcessor.doExecute(Collections.singletonList(eventUnderTest));
@@ -105,6 +129,35 @@ class CsvProcessorTest {
         assertThatKeyEquals(parsedEvent, "column1", "1");
         assertThatKeyEquals(parsedEvent, "column2", "2");
         assertThatKeyEquals(parsedEvent, "column3", "3");
+    }
+
+    @Test
+    void test_when_multLine_then_parsedCorrectly() {
+        when(processorConfig.isMultiLine()).thenReturn(true);
+        when(processorConfig.getDelimiter()).thenReturn(",");
+        csvProcessor = createObjectUnderTest();
+
+        Record<Event> eventUnderTest = createMessageEvent("key1,key2,key3\n1,2,3");
+        final List<Record<Event>> editedEvents = (List<Record<Event>>) csvProcessor.doExecute(Collections.singletonList(eventUnderTest));
+        final Event parsedEvent = getSingleEvent(editedEvents);
+        assertThatKeyEquals(parsedEvent, "key1", "1");
+        assertThatKeyEquals(parsedEvent, "key2", "2");
+        assertThatKeyEquals(parsedEvent, "key3", "3");
+    }
+
+    @Test
+    void test_when_multLine_invalid_keys_then_parsedCorrectly() {
+        when(processorConfig.isMultiLine()).thenReturn(true);
+        when(processorConfig.getDelimiter()).thenReturn(",");
+        when(processorConfig.getNormalizeKeys()).thenReturn(true);
+        csvProcessor = createObjectUnderTest();
+
+        Record<Event> eventUnderTest = createMessageEvent("key%1,key&2,key^3\n1,2,3");
+        final List<Record<Event>> editedEvents = (List<Record<Event>>) csvProcessor.doExecute(Collections.singletonList(eventUnderTest));
+        final Event parsedEvent = getSingleEvent(editedEvents);
+        assertThatKeyEquals(parsedEvent, "key_1", "1");
+        assertThatKeyEquals(parsedEvent, "key_2", "2");
+        assertThatKeyEquals(parsedEvent, "key_3", "3");
     }
 
     @Test
@@ -125,6 +178,26 @@ class CsvProcessorTest {
         assertThatKeyEquals(parsedEvent, "col1", "1");
         assertThatKeyEquals(parsedEvent, "col2", "2");
         assertThatKeyEquals(parsedEvent, "col3", "3");
+    }
+
+    @Test
+    void test_when_ColumnNames_with_invalid_keys_parsedCorrectly() {
+        when(processorConfig.getColumnNamesSourceKey()).thenReturn("header");
+        when(processorConfig.getNormalizeKeys()).thenReturn(true);
+        csvProcessor = createObjectUnderTest();
+
+        final Map<String, Object> eventData = new HashMap<>();
+        eventData.put("message","1,2,3");
+        eventData.put("header","col%1,col&2,col^3");
+        Record<Event> eventUnderTest = buildRecordWithEvent(eventData);
+        final List<Record<Event>> editedEvents = (List<Record<Event>>) csvProcessor.doExecute(Collections.singletonList(eventUnderTest));
+        final Event parsedEvent = getSingleEvent(editedEvents);
+
+        assertThat(parsedEvent.containsKey("message"), equalTo(true));
+
+        assertThatKeyEquals(parsedEvent, "col_1", "1");
+        assertThatKeyEquals(parsedEvent, "col_2", "2");
+        assertThatKeyEquals(parsedEvent, "col_3", "3");
     }
 
     @Test
@@ -274,6 +347,7 @@ class CsvProcessorTest {
     @Test
     void test_when_differentQuoteCharacter_then_parsesCorrectly() {
         when(processorConfig.getQuoteCharacter()).thenReturn("\'");
+        csvProcessor = createObjectUnderTest();
 
         final Record<Event> eventUnderTest = createMessageEvent("'1','2','3'");
         final List<Record<Event>> editedEvents = (List<Record<Event>>) csvProcessor.doExecute(Collections.singletonList(eventUnderTest));

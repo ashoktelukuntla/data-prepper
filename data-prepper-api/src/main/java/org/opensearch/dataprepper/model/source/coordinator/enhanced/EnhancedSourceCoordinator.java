@@ -1,9 +1,15 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.source.coordinator.enhanced;
+
+import org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -53,6 +59,14 @@ public interface EnhancedSourceCoordinator {
     List<EnhancedSourcePartition> queryCompletedPartitions(final String partitionType, final Instant fromCompletionTime);
 
     /**
+     * This method is used to query all partitions of give partitionType from the coordination store.
+     *
+     * @param partitionType      Type of partition
+     * @return A list of all partitionType partitions
+     */
+    List<EnhancedSourcePartition> queryAllPartitions(String partitionType);
+
+    /**
      * This method is used to update progress state for a partition in the coordination store.
      * It will also extend the timeout for ownership.
      *
@@ -62,6 +76,16 @@ public interface EnhancedSourceCoordinator {
      * @throws org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException when the partition was not updated successfully
      */
     <T> void saveProgressStateForPartition(EnhancedSourcePartition<T> partition, Duration ownershipTimeoutRenewal);
+
+    /**
+     * This method extends the ownership lease of a partition. It never writes the progress state.
+     * Callers must not call it concurrently with other updates to the same partition.
+     *
+     * @param partition The partition whose ownership should be renewed.
+     * @throws PartitionUpdateException when the partition was not updated successfully
+     * @since 2.17
+     */
+    void renewPartitionOwnership(EnhancedSourcePartition<?> partition);
 
     /**
      * This method is used to release the lease of a partition in the coordination store.
@@ -112,5 +136,7 @@ public interface EnhancedSourceCoordinator {
      * This method is to perform initialization for the coordinator
      */
     void initialize();
+
+    String getPartitionPrefix();
 
 }

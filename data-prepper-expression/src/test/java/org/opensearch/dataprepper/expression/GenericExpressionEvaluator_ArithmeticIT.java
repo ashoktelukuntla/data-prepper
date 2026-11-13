@@ -5,24 +5,23 @@
 
 package org.opensearch.dataprepper.expression;
 
-import org.junit.jupiter.api.BeforeEach;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
-import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
-import java.util.Random;
 
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -33,19 +32,8 @@ import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.hamcrest.CoreMatchers.not;
-import org.apache.commons.lang3.RandomStringUtils;
 
-class GenericExpressionEvaluator_ArithmeticIT {
-
-    private AnnotationConfigApplicationContext applicationContext;
-
-    @BeforeEach
-    void beforeEach() {
-        applicationContext = new AnnotationConfigApplicationContext();
-        applicationContext.scan("org.opensearch.dataprepper.expression");
-        applicationContext.refresh();
-    }
+class GenericExpressionEvaluator_ArithmeticIT extends BaseExpressionEvaluatorIT {
 
     @Test
     void testArithmeticExpressionEvaluatorBeanAvailable() {
@@ -106,6 +94,13 @@ class GenericExpressionEvaluator_ArithmeticIT {
             assertThat(evaluationResult, equalTo(expected));
             assertThat(evaluationResult, instanceOf(expectedClass));
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource("exceptionExpressionSyntaxArguments")
+    void testArithmeticExpressionEvaluatorInvalidSyntax(final String expression, final Event event) {
+        final GenericExpressionEvaluator evaluator = applicationContext.getBean(GenericExpressionEvaluator.class);
+        assertThrows(ExpressionParsingException.class, () -> evaluator.evaluate(expression, event));
     }
 
     @ParameterizedTest
@@ -220,20 +215,30 @@ class GenericExpressionEvaluator_ArithmeticIT {
         );
     }
 
+    private static Stream<Arguments> exceptionExpressionSyntaxArguments() {
+        Random random = new Random();
+        int testStringLength = random.nextInt(10);
+        String testString = RandomStringUtils.randomAlphabetic(testStringLength);
+        return Stream.of(
+                Arguments.of("/status - ", event("{\"status\": 200, \"message\":\"msg\"}")),
+                Arguments.of("/status / ", event("{\"status\": 200, \"message\":\"msg\"}")),
+                Arguments.of(" * /status ", event("{\"status\": 200, \"message\":\"msg\"}"))
+        );
+    }
+
     private static Stream<Arguments> exceptionExpressionArguments() {
         Random random = new Random();
         int testStringLength = random.nextInt(10);
         String testString = RandomStringUtils.randomAlphabetic(testStringLength);
         return Stream.of(
+                Arguments.of("/status + /message", event("{\"status\": 200, \"nomessage\":\"msg\"}")),
+                Arguments.of("/status - /message", event("{\"status\": 200, \"nomessage\":\"msg\"}")),
                 // Can't mix Numbers and Strings when using operators
                 Arguments.of("/status + /message", event("{\"status\": 200, \"message\":\"msg\"}")),
                 Arguments.of("/status / /message", event("{\"status\": 200, \"message\":\"msg\"}")),
                 Arguments.of("/message * /status", event("{\"status\": 200, \"message\":\"msg\"}")),
                 Arguments.of("/message + /status", event("{\"status\": 200, \"message\":\"msg\"}")),
                 Arguments.of("/status - /message", event("{\"status\": 200, \"message\":\"msg\"}")),
-                Arguments.of("/status - ", event("{\"status\": 200, \"message\":\"msg\"}")),
-                Arguments.of("/status / ", event("{\"status\": 200, \"message\":\"msg\"}")),
-                Arguments.of(" * /status ", event("{\"status\": 200, \"message\":\"msg\"}")),
                 Arguments.of("/message - /status", event("{\"status\": 200, \"message\":\"msg\"}")),
                 Arguments.of("-/message ", event("{\"status\": 200, \"message\":\"msg\"}"))
         );

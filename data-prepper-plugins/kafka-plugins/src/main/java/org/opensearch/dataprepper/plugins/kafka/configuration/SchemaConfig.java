@@ -5,6 +5,7 @@
 
 package org.opensearch.dataprepper.plugins.kafka.configuration;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.AssertTrue;
@@ -28,13 +29,18 @@ public class SchemaConfig {
   @JsonProperty("registry_url")
   private String registryURL;
 
-  @JsonProperty("version")
-  private int version;
+  @JsonProperty("override_endpoint")
+  private Boolean overrideEndpoint = false;
 
-  @JsonProperty("schema_registry_api_key")
+  @JsonProperty("version")
+  private Integer version;
+
+  @JsonAlias("schema_registry_api_key")
+  @JsonProperty("api_key")
   private String schemaRegistryApiKey;
 
-  @JsonProperty("schema_registry_api_secret")
+  @JsonAlias("schema_registry_api_secret")
+  @JsonProperty("api_secret")
   private String schemaRegistryApiSecret;
 
   @JsonProperty("session_timeout_ms")
@@ -92,6 +98,10 @@ public class SchemaConfig {
     return sessionTimeoutms;
   }
 
+  public boolean getOverrideEndpoint() {
+    return overrideEndpoint;
+  }
+
   public String getBasicAuthCredentialsSource() {
     return basicAuthCredentialsSource;
   }
@@ -100,7 +110,7 @@ public class SchemaConfig {
     return registryURL;
   }
 
-  public int getVersion() {
+  public Integer getVersion() {
     return version;
   }
 

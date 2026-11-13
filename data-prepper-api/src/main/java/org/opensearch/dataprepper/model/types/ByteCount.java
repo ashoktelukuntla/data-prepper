@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.types;
@@ -20,7 +24,7 @@ import java.util.stream.Collectors;
  *
  * @since 2.1
  */
-public class ByteCount {
+public class ByteCount implements Comparable<ByteCount> {
     private static final Pattern BYTE_PATTERN = Pattern.compile("^(?<value>\\d+\\.?\\d*)(?<unit>[a-z]+)?\\z");
     private static final ByteCount ZERO_BYTES = new ByteCount(0);
     private final long bytes;
@@ -79,11 +83,13 @@ public class ByteCount {
         final String unitString = matcher.group("unit");
 
         if(unitString == null) {
-            throw new ByteCountInvalidInputException("Byte counts must have a unit.");
+            throw new ByteCountInvalidInputException("Byte counts must have a unit. Valid byte units include: " +
+                    Arrays.stream(Unit.values()).map(unitValue -> unitValue.unitString).collect(Collectors.toList()));
         }
 
         final Unit unit = Unit.fromString(unitString)
-                .orElseThrow(() -> new ByteCountInvalidInputException("Invalid byte unit: '" + unitString + "'"));
+                .orElseThrow(() -> new ByteCountInvalidInputException("Invalid byte unit: '" + unitString + "'. Valid byte units include: "
+                        + Arrays.stream(Unit.values()).map(unitValue -> unitValue.unitString).collect(Collectors.toList())));
 
         final BigDecimal valueBigDecimal = new BigDecimal(valueString);
 
@@ -164,5 +170,10 @@ public class ByteCount {
     @Override
     public String toString() {
         return bytes + Unit.BYTE.unitString;
+    }
+
+    @Override
+    public int compareTo(final ByteCount otherByteCount) {
+        return Long.compare(this.bytes, otherByteCount.bytes);
     }
 }

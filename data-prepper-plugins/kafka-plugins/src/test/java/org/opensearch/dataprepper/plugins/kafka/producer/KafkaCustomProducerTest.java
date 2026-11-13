@@ -8,6 +8,7 @@ package org.opensearch.dataprepper.plugins.kafka.producer;
 import com.github.fge.jsonschema.core.exceptions.ProcessingException;
 import io.confluent.kafka.schemaregistry.client.SchemaMetadata;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.clients.producer.Callback;
@@ -28,8 +29,8 @@ import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerConfig;
-import org.opensearch.dataprepper.plugins.kafka.configuration.TopicProducerConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaConfig;
+import org.opensearch.dataprepper.plugins.kafka.configuration.TopicProducerConfig;
 import org.opensearch.dataprepper.plugins.kafka.service.SchemaService;
 import org.opensearch.dataprepper.plugins.kafka.sink.DLQSink;
 import org.opensearch.dataprepper.plugins.kafka.util.KafkaTopicProducerMetrics;
@@ -38,17 +39,23 @@ import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.UUID;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import java.util.concurrent.Future;
 
 
 @ExtendWith(MockitoExtension.class)
@@ -97,6 +104,10 @@ public class KafkaCustomProducerTest {
 
     @Test
     public void produceRawDataTest() throws Exception {
+
+        final Timer produceDataPreparationTimer = mock(Timer.class);
+        when(kafkaTopicProducerMetrics.getProduceDataPreparationTimer()).thenReturn(produceDataPreparationTimer);
+
         when(kafkaSinkConfig.getSerdeFormat()).thenReturn("plaintext");
         KafkaProducer kafkaProducer = mock(KafkaProducer.class);
         producer = new KafkaCustomProducer(kafkaProducer, kafkaSinkConfig, dlqSink, mock(ExpressionEvaluator.class),
@@ -112,13 +123,15 @@ public class KafkaCustomProducerTest {
         final ArgumentCaptor<ProducerRecord> recordArgumentCaptor = ArgumentCaptor.forClass(ProducerRecord.class);
         verify(kafkaProducer).send(recordArgumentCaptor.capture(), any(Callback.class));
         assertEquals(recordArgumentCaptor.getValue().topic(), kafkaSinkConfig.getTopic().getName());
-        assertEquals(recordArgumentCaptor.getValue().value(), byteData);
+        assertArrayEquals((byte[]) recordArgumentCaptor.getValue().value(), byteData);
         assertEquals(recordArgumentCaptor.getValue().key(), key);
+        verify(produceDataPreparationTimer).record(anyLong(), eq(TimeUnit.MILLISECONDS));
         verifyNoInteractions(numberOfRecordSendErrors);
     }
 
     @Test
     public void produceRawData_sendError() throws Exception {
+        when(kafkaTopicProducerMetrics.getProduceDataPreparationTimer()).thenReturn(mock(Timer.class));
         when(kafkaSinkConfig.getSerdeFormat()).thenReturn("plaintext");
         KafkaProducer kafkaProducer = mock(KafkaProducer.class);
         producer = new KafkaCustomProducer(kafkaProducer, kafkaSinkConfig, dlqSink, mock(ExpressionEvaluator.class),
@@ -133,7 +146,7 @@ public class KafkaCustomProducerTest {
         final ArgumentCaptor<ProducerRecord> recordArgumentCaptor = ArgumentCaptor.forClass(ProducerRecord.class);
         verify(kafkaProducer).send(recordArgumentCaptor.capture(), any(Callback.class));
         assertEquals(recordArgumentCaptor.getValue().topic(), kafkaSinkConfig.getTopic().getName());
-        assertEquals(recordArgumentCaptor.getValue().value(), byteData);
+        assertArrayEquals((byte[]) recordArgumentCaptor.getValue().value(), byteData);
         assertEquals(recordArgumentCaptor.getValue().key(), key);
         verify(numberOfRawDataSendErrors).increment();
     }

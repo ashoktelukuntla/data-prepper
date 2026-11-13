@@ -22,7 +22,7 @@ import java.util.Optional;
 public class StreamCheckpointer {
     private static final Logger LOG = LoggerFactory.getLogger(StreamCheckpointer.class);
 
-    static final Duration CHECKPOINT_OWNERSHIP_TIMEOUT_INCREASE = Duration.ofMinutes(5);
+    static final Duration CHECKPOINT_OWNERSHIP_TIMEOUT_INCREASE = Duration.ofMinutes(10);
 
     private final EnhancedSourceCoordinator coordinator;
 
@@ -62,7 +62,7 @@ public class StreamCheckpointer {
         return globalPartition.isPresent();
     }
 
-    public void updateShardForAcknowledgmentWait(final Duration acknowledgmentSetTimeout) {
-        coordinator.saveProgressStateForPartition(streamPartition, acknowledgmentSetTimeout);
+    public void completePartition() {
+        coordinator.completePartition(streamPartition);
     }
 }

@@ -6,10 +6,13 @@
 package org.opensearch.dataprepper.plugins.processor.mutateevent;
 
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -22,8 +25,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-
-import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
 
 @DataPrepperPlugin(name = "list_to_map", pluginType = Processor.class, pluginConfigurationType = ListToMapProcessorConfig.class)
 public class ListToMapProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
@@ -38,6 +39,13 @@ public class ListToMapProcessor extends AbstractProcessor<Record<Event>, Record<
         super(pluginMetrics);
         this.config = config;
         this.expressionEvaluator = expressionEvaluator;
+
+        if (config.getListToMapWhen() != null
+                && !expressionEvaluator.isValidExpressionStatement(config.getListToMapWhen())) {
+            throw new InvalidPluginConfigurationException(
+                    String.format("list_to_map_when %s is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax",
+                            config.getListToMapWhen()));
+        }
     }
 
     @Override
@@ -70,7 +78,13 @@ public class ListToMapProcessor extends AbstractProcessor<Record<Event>, Record<
                     recordEvent.getMetadata().addTags(config.getTagsOnFailure());
                     continue;
                 } catch (final Exception e) {
-                    LOG.error(EVENT, "Error converting source list to map on record [{}]", recordEvent, e);
+                    LOG.atError()
+                            .addMarker(EVENT)
+                            .addMarker(NOISY)
+                            .setMessage("Error converting source list to map on record [{}]")
+                            .addArgument(recordEvent)
+                            .setCause(e)
+                            .log();
                     recordEvent.getMetadata().addTags(config.getTagsOnFailure());
                     continue;
                 }
@@ -78,11 +92,23 @@ public class ListToMapProcessor extends AbstractProcessor<Record<Event>, Record<
                 try {
                     updateEvent(recordEvent, targetMap);
                 } catch (final Exception e) {
-                    LOG.error(EVENT, "Error updating record [{}] after converting source list to map", recordEvent, e);
+                    LOG.atError()
+                            .addMarker(EVENT)
+                            .addMarker(NOISY)
+                            .setMessage("Error updating record [{}] after converting source list to map")
+                            .addArgument(recordEvent)
+                            .setCause(e)
+                            .log();
                     recordEvent.getMetadata().addTags(config.getTagsOnFailure());
                 }
             } catch (final Exception e) {
-                LOG.error(EVENT, "There was an exception while processing Event [{}]", recordEvent, e);
+                LOG.atError()
+                        .addMarker(EVENT)
+                        .addMarker(NOISY)
+                        .setMessage("There was an exception while processing Event [{}]")
+                        .addArgument(recordEvent)
+                        .setCause(e)
+                        .log();
                 recordEvent.getMetadata().addTags(config.getTagsOnFailure());
             }
         }

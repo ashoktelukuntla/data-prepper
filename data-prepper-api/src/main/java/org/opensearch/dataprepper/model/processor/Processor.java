@@ -1,10 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.processor;
 
+import org.opensearch.dataprepper.model.plugin.PluginComponentType;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
 import org.opensearch.dataprepper.model.record.Record;
 
 import java.util.Collection;
@@ -14,6 +20,7 @@ import java.util.Collection;
  * Processor interface. These are intermediary processing units using which users can filter,
  * transform and enrich the records into desired format before publishing to the sink.
  */
+@PluginComponentType("processor")
 public interface Processor<InputRecord extends Record<?>, OutputRecord extends Record<?>> {
 
     /**
@@ -34,6 +41,16 @@ public interface Processor<InputRecord extends Record<?>, OutputRecord extends R
     void prepareForShutdown();
 
     /**
+     * @since 2.11
+     * Indicates if the processor holds the events or not
+     * Holding events indicates that the events are not ready to be released.
+     * @return returns if events are held by the processor or not
+     */
+    default boolean holdsEvents() {
+        return false;
+    }
+
+    /**
      * @since 1.2
      * Returns true if the Processor's internal state is safe to be shutdown.
      *
@@ -46,4 +63,14 @@ public interface Processor<InputRecord extends Record<?>, OutputRecord extends R
      * Final shutdown call to clean up any resources that need to be closed.
      */
     void shutdown();
+
+    /**
+     * Sets default failure pipeline of a source
+
+     * @param failurePipeline failure pipeline
+     * @since 2.12
+     */
+    default void setFailurePipeline(final HeadlessPipeline failurePipeline) {
+    }
+
 }

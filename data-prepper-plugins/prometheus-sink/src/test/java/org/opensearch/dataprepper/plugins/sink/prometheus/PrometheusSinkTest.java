@@ -1,25 +1,40 @@
 package org.opensearch.dataprepper.plugins.sink.prometheus;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mock;
+import static org.mockito.ArgumentMatchers.any;
+
+import org.opensearch.dataprepper.plugins.sink.prometheus.service.PrometheusSinkService;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
 import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.event.Event;
-import org.opensearch.dataprepper.model.plugin.PluginFactory;
+import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.model.sink.Sink;
 import org.opensearch.dataprepper.model.sink.SinkContext;
-import org.opensearch.dataprepper.plugins.sink.prometheus.configuration.AuthTypeOptions;
+import org.opensearch.dataprepper.plugins.sink.prometheus.configuration.AuthenticationOptions;
 import org.opensearch.dataprepper.plugins.sink.prometheus.configuration.AwsAuthenticationOptions;
-import org.opensearch.dataprepper.plugins.sink.prometheus.configuration.HTTPMethodOptions;
+import org.opensearch.dataprepper.plugins.sink.prometheus.configuration.BasicAuthCredentials;
 import org.opensearch.dataprepper.plugins.sink.prometheus.configuration.PrometheusSinkConfiguration;
-import org.opensearch.dataprepper.plugins.sink.prometheus.handler.HttpAuthOptions;
+import org.opensearch.dataprepper.plugins.sink.prometheus.configuration.PrometheusSinkThresholdConfig;
+import org.opensearch.dataprepper.aws.api.AwsConfig;
+import org.opensearch.dataprepper.test.plugins.DataPrepperPluginTest;
+import org.opensearch.dataprepper.test.plugins.junit.BaseDataPrepperPluginStandardTestSuite;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Optional;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -27,54 +42,76 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class PrometheusSinkTest {
+@DataPrepperPluginTest(pluginName = "prometheus", pluginType = Sink.class)
+public class PrometheusSinkTest extends BaseDataPrepperPluginStandardTestSuite {
 
-     PrometheusSink prometheusSink;
+    PrometheusSink prometheusSink;
 
     private PluginSetting pluginSetting;
-    private PluginFactory pluginFactory;
-
     private PrometheusSinkConfiguration prometheusSinkConfiguration;
 
     private PipelineDescription pipelineDescription;
 
+    @Mock
+    private AwsConfig awsConfig;
+
+    @Mock
     private AwsCredentialsSupplier awsCredentialsSupplier;
+    @Mock
+    private AwsCredentialsProvider awsCredentialsProvider;
+    @Mock
+    private PrometheusSinkService prometheusSinkService;
+
+    @Mock
+    private Counter counter;
+
+    @Mock
+    private DistributionSummary summary;
 
     private SinkContext sinkContext;
+    private PluginMetrics pluginMetrics;
 
     private AwsAuthenticationOptions awsAuthenticationOptions;
-
-    private HttpAuthOptions httpAuthOptions;
 
     @BeforeEach
     void setUp() {
         pluginSetting = mock(PluginSetting.class);
-        pluginFactory = mock(PluginFactory.class);
+        pluginMetrics = mock(PluginMetrics.class);
+        prometheusSinkService = mock(PrometheusSinkService.class);
         prometheusSinkConfiguration = mock(PrometheusSinkConfiguration.class);
         pipelineDescription = mock(PipelineDescription.class);
-        awsCredentialsSupplier = mock(AwsCredentialsSupplier.class);
         sinkContext = mock(SinkContext.class);
-        httpAuthOptions = mock(HttpAuthOptions.class);
         awsAuthenticationOptions = mock(AwsAuthenticationOptions.class);
         when(pluginSetting.getPipelineName()).thenReturn("log-pipeline");
         PluginModel codecConfiguration = new PluginModel("http", new HashMap<>());
-        when(httpAuthOptions.getUrl()).thenReturn("http://localhost:8080");
-        when(prometheusSinkConfiguration.getHttpMethod()).thenReturn(HTTPMethodOptions.POST);
-        when(prometheusSinkConfiguration.getAuthType()).thenReturn(AuthTypeOptions.UNAUTHENTICATED);
+        awsCredentialsProvider = mock(AwsCredentialsProvider.class);
+        awsCredentialsSupplier = mock(AwsCredentialsSupplier.class);
+        when(awsCredentialsSupplier.getProvider(any(AwsCredentialsOptions.class))).thenReturn(awsCredentialsProvider);
+        when(awsCredentialsSupplier.getDefaultRegion()).thenReturn(Optional.of(Region.of("us-west-2")));
+        counter = mock(Counter.class);
+        summary = mock(DistributionSummary.class);
+        when(pluginMetrics.summary(any(String.class))).thenReturn(summary);
+        when(pluginMetrics.counter(any())).thenReturn(counter);
+        awsConfig = mock(AwsConfig.class);
+        when(awsConfig.getAwsRegion()).thenReturn(Region.of("us-west-2"));
+        when(prometheusSinkConfiguration.getAwsConfig()).thenReturn(awsConfig);
+        PrometheusSinkThresholdConfig thresholdConfig = mock(PrometheusSinkThresholdConfig.class);
+        when(thresholdConfig.getFlushInterval()).thenReturn(10000L);
+        when(thresholdConfig.getMaxEvents()).thenReturn(100);
+        when(thresholdConfig.getMaxRequestSizeBytes()).thenReturn(10000L);
+
+        when(prometheusSinkConfiguration.getThresholdConfig()).thenReturn(thresholdConfig);
+        when(prometheusSinkConfiguration.getEncoding()).thenReturn(prometheusSinkConfiguration.DEFAULT_ENCODING);
+        when(prometheusSinkConfiguration.getConnectionTimeout()).thenReturn(Duration.ofSeconds(2));
+        when(prometheusSinkConfiguration.getUrl()).thenReturn("http://localhost:8080");
         Map<String, Object> dlqSetting = new HashMap<>();
         dlqSetting.put("bucket", "dlq.test");
         dlqSetting.put("key_path_prefix", "\\dlq");
         PluginModel dlq = new PluginModel("s3",dlqSetting);
-        when(prometheusSinkConfiguration.getAwsAuthenticationOptions()).thenReturn(awsAuthenticationOptions);
-        when(prometheusSinkConfiguration.getDlqStsRoleARN()).thenReturn("arn:aws:iam::1234567890:role/app-test");
-        when(prometheusSinkConfiguration.getDlqStsRegion()).thenReturn("ap-south-1");
-        when(prometheusSinkConfiguration.getDlq()).thenReturn(dlq);
-        when(prometheusSinkConfiguration.getDlqFile()).thenReturn("\\dlq");
     }
 
     private PrometheusSink createObjectUnderTest() {
-        return new PrometheusSink(pluginSetting, prometheusSinkConfiguration, pluginFactory, pipelineDescription,
-                awsCredentialsSupplier);
+        return new PrometheusSink(pluginSetting, pluginMetrics, pipelineDescription,  prometheusSinkConfiguration, awsCredentialsSupplier);
     }
     @Test
     void test_http_sink_plugin_isReady_positive() {
@@ -98,5 +135,31 @@ public class PrometheusSinkTest {
         prometheusSink.doInitialize();
         Collection<Record<Event>> records = new ArrayList<>();
         prometheusSink.doOutput(records);
+    }
+
+    @Test
+    void test_http_sink_plugin_initializes_with_basic_auth() {
+        when(prometheusSinkConfiguration.getAwsConfig()).thenReturn(null);
+        when(prometheusSinkConfiguration.getUrl()).thenReturn("http://localhost:9090/api/v1/write");
+        final AuthenticationOptions authOptions = mock(AuthenticationOptions.class);
+        final BasicAuthCredentials basicCreds = mock(BasicAuthCredentials.class);
+        when(basicCreds.getUsername()).thenReturn("user");
+        when(basicCreds.getPassword()).thenReturn("pass");
+        when(authOptions.getHttpBasic()).thenReturn(basicCreds);
+        when(prometheusSinkConfiguration.getAuthentication()).thenReturn(authOptions);
+        prometheusSink = createObjectUnderTest();
+        Assertions.assertNotNull(prometheusSink);
+        prometheusSink.doInitialize();
+        assertTrue(prometheusSink.isReady(), "prometheus sink should initialize with basic auth config");
+    }
+
+    @Test
+    void test_http_sink_plugin_initializes_without_aws_config() {
+        when(prometheusSinkConfiguration.getAwsConfig()).thenReturn(null);
+        when(prometheusSinkConfiguration.getUrl()).thenReturn("http://localhost:9090/api/v1/write");
+        prometheusSink = createObjectUnderTest();
+        Assertions.assertNotNull(prometheusSink);
+        prometheusSink.doInitialize();
+        assertTrue(prometheusSink.isReady(), "prometheus sink should initialize without AWS config");
     }
 }

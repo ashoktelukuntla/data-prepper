@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 plugins {
@@ -147,14 +151,16 @@ CopySpec archiveToTar() {
     return copySpec {
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         into('lib') {
-            from project(':data-prepper-main').jar.archivePath
+            from project(':data-prepper-main').jar.archiveFile.get().asFile
             from configurations.runtimeClasspath
             //from allDependencyJarsFromMain(project(path: ':data-prepper-main', configuration: 'allDependencyJars')).runtimeClasspath
             //from project(':data-prepper-main').configurations.allDependencyJars
             fileMode 0755
         }
         into('examples') {
-            from("${rootDir}/examples")
+            from("${rootDir}/examples") {
+                exclude 'trace-analytics-sample-app'
+            }
             dirMode 0750
             fileMode 0755
         }
@@ -187,4 +193,28 @@ task buildTar {
 
 task buildArchives {
     dependsOn buildTar
+}
+
+ext {
+    getCurrentArchitecture = {
+        def osArch = System.getProperty("os.arch")
+        return osArch == "aarch64" || osArch == "arm64" ? "arm64" : "x64"
+    }
+    
+    getCurrentPlatformDistTask = { platform ->
+        def arch = getCurrentArchitecture()
+        return ":release:archives:${platform}:${platform}${arch}DistTar"
+    }
+    
+    getCurrentPlatformDistFile = { platform ->
+        def arch = getCurrentArchitecture()
+        def taskName = "${platform}${arch}DistTar"
+        return project(":release:archives:${platform}").tasks.getByName(taskName).archiveFile.get().asFile
+    }
+    
+    getCurrentPlatformDistFileName = { platform ->
+        def arch = getCurrentArchitecture()
+        def taskName = "${platform}${arch}DistTar"
+        return project(":release:archives:${platform}").tasks.getByName(taskName).archiveFileName.get()
+    }
 }

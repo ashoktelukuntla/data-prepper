@@ -1,9 +1,18 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate;
+
+import org.opensearch.dataprepper.model.event.AggregateEventHandle;
+import org.opensearch.dataprepper.model.event.InternalEventHandle;
+import org.opensearch.dataprepper.model.event.EventHandle;
+import org.opensearch.dataprepper.model.event.Event;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -19,6 +28,7 @@ class AggregateGroup implements AggregateActionInput {
     private final Lock handleEventForGroupLock;
     private final Map<Object, Object> identificationKeys;
     private Function<Duration, Boolean> customShouldConclude;
+    private EventHandle groupEventHandle;
 
     AggregateGroup(final Map<Object, Object> identificationKeys) {
         this.groupState = new DefaultGroupState();
@@ -26,6 +36,18 @@ class AggregateGroup implements AggregateActionInput {
         this.groupStart = Instant.now();
         this.concludeGroupLock = new ReentrantLock();
         this.handleEventForGroupLock = new ReentrantLock();
+        this.groupEventHandle = new AggregateEventHandle(Instant.now());
+    }
+
+    @Override
+    public EventHandle getEventHandle() {
+        return groupEventHandle;
+    }
+
+    public void attachToEventAcknowledgementSet(final Event event) {
+        final EventHandle handle = event.getEventHandle();
+        final InternalEventHandle internalEventHandle = (InternalEventHandle) (handle);
+        internalEventHandle.addEventHandle(groupEventHandle);
     }
 
     public GroupState getGroupState() {
@@ -63,5 +85,6 @@ class AggregateGroup implements AggregateActionInput {
     void resetGroup() {
         groupStart = Instant.now();
         groupState.clear();
+        this.groupEventHandle = new AggregateEventHandle(groupStart);
     }
 }

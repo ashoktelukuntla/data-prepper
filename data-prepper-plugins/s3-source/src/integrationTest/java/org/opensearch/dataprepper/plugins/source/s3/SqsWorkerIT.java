@@ -18,15 +18,18 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.opensearch.dataprepper.acknowledgements.DefaultAcknowledgementSetManager;
+import org.opensearch.dataprepper.core.acknowledgements.DefaultAcknowledgementSetManager;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.plugins.s3.common.source.S3ObjectReference;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.NotificationSourceOption;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.OnErrorOption;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3DataSelection;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.SqsOptions;
+import org.opensearch.dataprepper.plugins.source.sqs.common.SqsBackoff;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -93,8 +96,7 @@ class SqsWorkerIT {
                 .region(Region.of(System.getProperty("tests.s3source.region")))
                 .build();
 
-        backoff = Backoff.exponential(SqsService.INITIAL_DELAY, SqsService.MAXIMUM_DELAY).withJitter(SqsService.JITTER_RATE)
-                .withMaxAttempts(Integer.MAX_VALUE);
+        backoff = SqsBackoff.createExponentialBackoff();
 
         s3SourceConfig = mock(S3SourceConfig.class);
         s3Service = mock(S3Service.class);
@@ -140,7 +142,7 @@ class SqsWorkerIT {
         final int sqsMessagesProcessed = objectUnderTest.processSqsMessages();
 
         final ArgumentCaptor<S3ObjectReference> s3ObjectReferenceArgumentCaptor = ArgumentCaptor.forClass(S3ObjectReference.class);
-        verify(s3Service, atLeastOnce()).addS3Object(s3ObjectReferenceArgumentCaptor.capture(), eq(null));
+        verify(s3Service, atLeastOnce()).addS3Object(s3ObjectReferenceArgumentCaptor.capture(), eq(S3DataSelection.DATA_AND_METADATA), eq(null));
 
         assertThat(s3ObjectReferenceArgumentCaptor.getValue().getBucketName(), equalTo(bucket));
         assertThat(s3ObjectReferenceArgumentCaptor.getValue().getKey(), startsWith("s3 source/sqs/"));
@@ -183,7 +185,7 @@ class SqsWorkerIT {
             event = (Event)JacksonEvent.fromMessage(val.getArgument(0).toString());
             ackSet.add(event);
             return null;
-        }).when(s3Service).addS3Object(any(S3ObjectReference.class), any(AcknowledgementSet.class));
+        }).when(s3Service).addS3Object(any(S3ObjectReference.class), eq(S3DataSelection.DATA_AND_METADATA), any(AcknowledgementSet.class));
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
         acknowledgementSetManager = new  DefaultAcknowledgementSetManager(executor);
         final SqsWorker objectUnderTest = createObjectUnderTest();
@@ -256,7 +258,7 @@ class SqsWorkerIT {
             } catch (Exception e){}
 
             return null;
-        }).when(s3Service).addS3Object(any(S3ObjectReference.class), any(AcknowledgementSet.class));
+        }).when(s3Service).addS3Object(any(S3ObjectReference.class), eq(S3DataSelection.DATA_AND_METADATA), any(AcknowledgementSet.class));
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
         acknowledgementSetManager = new  DefaultAcknowledgementSetManager(executor);
         final SqsWorker objectUnderTest = createObjectUnderTest();
@@ -333,7 +335,7 @@ class SqsWorkerIT {
                 Thread.sleep(2000);
             } catch (Exception e) {}
             return null;
-        }).when(s3Service).addS3Object(any(S3ObjectReference.class), any(AcknowledgementSet.class));
+        }).when(s3Service).addS3Object(any(S3ObjectReference.class), eq(S3DataSelection.DATA_AND_METADATA), any(AcknowledgementSet.class));
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
         when(sqsOptions.getVisibilityTimeout()).thenReturn(Duration.ofSeconds(6));
         when(sqsOptions.getVisibilityDuplicateProtectionTimeout()).thenReturn(Duration.ofSeconds(60));
@@ -408,7 +410,7 @@ class SqsWorkerIT {
                 Thread.sleep(2000);
             } catch (Exception e) {}
             return null;
-        }).when(s3Service).addS3Object(any(S3ObjectReference.class), any(AcknowledgementSet.class));
+        }).when(s3Service).addS3Object(any(S3ObjectReference.class), eq(S3DataSelection.DATA_AND_METADATA), any(AcknowledgementSet.class));
         ScheduledExecutorService executor = Executors.newScheduledThreadPool(2);
         when(sqsOptions.getVisibilityTimeout()).thenReturn(Duration.ofSeconds(6));
         when(sqsOptions.getVisibilityDuplicateProtectionTimeout()).thenReturn(Duration.ofSeconds(60));
@@ -439,7 +441,7 @@ class SqsWorkerIT {
         final int sqsMessagesProcessed = objectUnderTest.processSqsMessages();
 
         final ArgumentCaptor<S3ObjectReference> s3ObjectReferenceArgumentCaptor = ArgumentCaptor.forClass(S3ObjectReference.class);
-        verify(s3Service, atLeastOnce()).addS3Object(s3ObjectReferenceArgumentCaptor.capture(), eq(null));
+        verify(s3Service, atLeastOnce()).addS3Object(s3ObjectReferenceArgumentCaptor.capture(), eq(S3DataSelection.DATA_AND_METADATA), eq(null));
 
         assertThat(s3ObjectReferenceArgumentCaptor.getValue().getBucketName(), equalTo(bucket));
         assertThat(s3ObjectReferenceArgumentCaptor.getValue().getKey(), startsWith("s3 source/sqs/"));

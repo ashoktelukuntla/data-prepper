@@ -7,11 +7,17 @@ package org.opensearch.dataprepper.plugins.source.oteltrace;
 
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Size;
+import org.hibernate.validator.constraints.time.DurationMax;
+import org.hibernate.validator.constraints.time.DurationMin;
 import org.opensearch.dataprepper.model.types.ByteCount;
 import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
+import org.opensearch.dataprepper.plugins.otel.codec.OTelOutputFormat;
+import org.opensearch.dataprepper.plugins.server.RetryInfoConfig;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.commons.lang3.StringUtils;
+
+import java.time.Duration;
 
 public class OTelTraceSourceConfig {
     static final String REQUEST_TIMEOUT = "request_timeout";
@@ -32,6 +38,7 @@ public class OTelTraceSourceConfig {
     static final String ENABLE_UNFRAMED_REQUESTS = "unframed_requests";
     static final String UNAUTHENTICATED_HEALTH_CHECK = "unauthenticated_health_check";
     static final String COMPRESSION = "compression";
+    static final String RETRY_INFO = "retry_info";
     static final int DEFAULT_REQUEST_TIMEOUT_MS = 10000;
     static final int DEFAULT_PORT = 21890;
     static final int DEFAULT_THREAD_COUNT = 200;
@@ -72,6 +79,9 @@ public class OTelTraceSourceConfig {
     @JsonProperty(ACM_CERT_ISSUE_TIME_OUT_MILLIS)
     private long acmCertIssueTimeOutMillis = DEFAULT_ACM_CERT_ISSUE_TIME_OUT_MILLIS;
 
+    @JsonProperty("output_format")
+    private OTelOutputFormat outputFormat = OTelOutputFormat.OPENSEARCH;
+
     @JsonProperty(SSL_KEY_CERT_FILE)
     private String sslKeyCertChainFile;
 
@@ -106,6 +116,19 @@ public class OTelTraceSourceConfig {
 
     @JsonProperty("max_request_length")
     private ByteCount maxRequestLength;
+
+    @JsonProperty(RETRY_INFO)
+    private RetryInfoConfig retryInfo;
+
+    @JsonProperty("max_connection_age")
+    @DurationMin(seconds = 1)
+    @DurationMax(hours = 24)
+    private Duration maxConnectionAge;
+
+    @JsonProperty("connection_drain_duration")
+    @DurationMin(millis = 0)
+    @DurationMax(hours = 1)
+    private Duration connectionDrainDuration;
 
     @AssertTrue(message = "path should start with /")
     boolean isPathValid() {
@@ -175,6 +198,10 @@ public class OTelTraceSourceConfig {
         return ssl;
     }
 
+    public OTelOutputFormat getOutputFormat() {
+        return outputFormat;
+    }
+
     public boolean useAcmCertForSSL() {
         return useAcmCertForSSL;
     }
@@ -227,5 +254,17 @@ public class OTelTraceSourceConfig {
 
     public ByteCount getMaxRequestLength() {
         return maxRequestLength;
+    }
+
+    public RetryInfoConfig getRetryInfo() {
+        return retryInfo;
+    }
+
+    public Duration getMaxConnectionAge() {
+        return maxConnectionAge;
+    }
+
+    public Duration getConnectionDrainDuration() {
+        return connectionDrainDuration;
     }
 }

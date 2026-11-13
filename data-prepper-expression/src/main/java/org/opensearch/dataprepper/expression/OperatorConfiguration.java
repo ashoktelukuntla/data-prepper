@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.expression;
 
 import org.opensearch.dataprepper.expression.antlr.DataPrepperExpressionParser;
+import org.opensearch.dataprepper.model.event.DataType;
 import org.springframework.context.annotation.Bean;
 
 import javax.inject.Named;
@@ -22,6 +27,7 @@ class OperatorConfiguration {
     public final BiPredicate<Object, Object> regexEquals = (x, y) -> ((String) x).matches((String) y);
     public final BiPredicate<Object, Object> equals = Objects::equals;
     public final BiPredicate<Object, Object> inSet = (x, y) -> ((Set<?>) y).contains(x);
+    public final BiPredicate<Object, Object> typeOf = (x, y) -> DataType.isSameType(x, (String)y);
 
     @Bean
     public NumericCompareOperator greaterThanOperator() {
@@ -272,8 +278,8 @@ class OperatorConfiguration {
     }
 
     @Bean
-    public AddBinaryOperator concatOperator() {
-        return new AddBinaryOperator(DataPrepperExpressionParser.PLUS, null); 
+    public GenericTypeOfOperator typeOfOperator() {
+        return new GenericTypeOfOperator(DataPrepperExpressionParser.TYPEOF, typeOf);
     }
 
     @Bean
@@ -410,7 +416,7 @@ class OperatorConfiguration {
                 operandsToOperationMap = new HashMap<>();
         final Map<Class<? extends Number>, BiFunction<Object, Object, Number>> intOperations =
                 Map.of(
-                        Integer.class, (lhs, rhs) -> ((double)(int)lhs) /((double)(int)rhs),
+                        Integer.class, (lhs, rhs) -> ((double)(int)lhs) / ((double)(int)rhs),
                         Float.class, (lhs, rhs) -> (float)(int)lhs / (Float) rhs,
                         Long.class, (lhs, rhs) -> (double)(int)lhs / (Long) rhs,
                         Double.class, (lhs, rhs) -> (double)(int)lhs / (Double) rhs
@@ -442,6 +448,20 @@ class OperatorConfiguration {
         operandsToOperationMap.put(Long.class, longOperations);
         operandsToOperationMap.put(Double.class, doubleOperations);
 
-        return new ArithmeticBinaryOperator(DataPrepperExpressionParser.DIVIDE, operandsToOperationMap);
+        return new ArithmeticBinaryOperator(DataPrepperExpressionParser.FORWARDSLASH, operandsToOperationMap);
+    }
+
+    @Bean
+    public ArithmeticBinaryOperator modOperator() {
+        final Map<Class<? extends Number>, Map<Class<? extends Number>, BiFunction<Object, Object, Number>>>
+                operandsToOperationMap = new HashMap<>();
+        final Map<Class<? extends Number>, BiFunction<Object, Object, Number>> intOperations =
+                Map.of(
+                        Integer.class, (lhs, rhs) -> ((int)lhs) % ((int)rhs)
+                );
+
+        operandsToOperationMap.put(Integer.class, intOperations);
+
+        return new ArithmeticBinaryOperator(DataPrepperExpressionParser.MOD, operandsToOperationMap);
     }
 }

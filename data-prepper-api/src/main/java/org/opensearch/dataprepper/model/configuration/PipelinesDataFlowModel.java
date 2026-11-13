@@ -1,10 +1,15 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.configuration;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonAnyGetter;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -26,11 +31,13 @@ import java.util.Objects;
  * @since 1.2
  */
 public class PipelinesDataFlowModel {
+    public static final String EXTENSION_PLUGIN_TYPE = "extension";
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private DataPrepperVersion version;
 
-    @JsonProperty("pipeline_configurations")
+    @JsonAlias("pipeline_configurations")
+    @JsonProperty(EXTENSION_PLUGIN_TYPE)
     @JsonInclude(JsonInclude.Include.NON_NULL)
     @JsonSetter(nulls = Nulls.SKIP)
     private PipelineExtensions pipelineExtensions;

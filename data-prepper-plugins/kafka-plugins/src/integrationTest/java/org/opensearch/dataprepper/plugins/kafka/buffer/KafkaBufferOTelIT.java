@@ -28,6 +28,7 @@ import org.opensearch.dataprepper.model.metric.JacksonSum;
 import org.opensearch.dataprepper.model.metric.JacksonHistogram;
 import org.opensearch.dataprepper.model.log.OpenTelemetryLog;
 import org.opensearch.dataprepper.model.trace.Span;
+import org.opensearch.dataprepper.plugins.encryption.EncryptionSupplier;
 import org.opensearch.dataprepper.plugins.kafka.configuration.EncryptionConfig;
 import org.opensearch.dataprepper.model.buffer.DelegatingBuffer;
 import org.opensearch.dataprepper.model.buffer.Buffer;
@@ -45,8 +46,6 @@ import io.opentelemetry.proto.logs.v1.ScopeLogs;
 import io.opentelemetry.proto.resource.v1.Resource;
 import io.opentelemetry.proto.trace.v1.ScopeSpans;
 import io.opentelemetry.proto.trace.v1.ResourceSpans;
-import io.opentelemetry.proto.trace.v1.InstrumentationLibrarySpans;
-import io.opentelemetry.proto.common.v1.InstrumentationLibrary;
 import io.opentelemetry.proto.common.v1.InstrumentationScope;
 import io.opentelemetry.proto.metrics.v1.Gauge;
 import io.opentelemetry.proto.metrics.v1.Sum;
@@ -71,6 +70,7 @@ import java.util.UUID;
 import org.opensearch.dataprepper.plugins.otel.codec.OTelMetricDecoder;
 import org.opensearch.dataprepper.plugins.otel.codec.OTelTraceDecoder;
 import org.opensearch.dataprepper.plugins.otel.codec.OTelLogsDecoder;
+import org.opensearch.dataprepper.plugins.otel.codec.OTelOutputFormat;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -94,6 +94,8 @@ public class KafkaBufferOTelIT {
     private AcknowledgementSetManager acknowledgementSetManager;
     @Mock
     private BufferTopicConfig topicConfig;
+    @Mock
+    private EncryptionSupplier encryptionSupplier;
 
     private DelegatingBuffer buffer;
 
@@ -295,7 +297,7 @@ public class KafkaBufferOTelIT {
 
     @Test
     void test_otel_metrics_with_kafka_buffer() throws Exception {
-        KafkaBuffer kafkaBuffer = new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, new OTelMetricDecoder(), null, null);
+        KafkaBuffer kafkaBuffer = new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, new OTelMetricDecoder(OTelOutputFormat.OPENSEARCH), null, null, encryptionSupplier);
         buffer = new KafkaDelegatingBuffer(kafkaBuffer);
         final ExportMetricsServiceRequest request = createExportMetricsServiceRequest();
         buffer.writeBytes(request.toByteArray(), null, 10_000);
@@ -367,7 +369,7 @@ public class KafkaBufferOTelIT {
 
     @Test
     void test_otel_logs_with_kafka_buffer() throws Exception {
-        KafkaBuffer kafkaBuffer = new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, new OTelLogsDecoder(), null, null);
+        KafkaBuffer kafkaBuffer = new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, new OTelLogsDecoder(OTelOutputFormat.OPENSEARCH), null, null, encryptionSupplier);
         buffer = new KafkaDelegatingBuffer(kafkaBuffer);
         final ExportLogsServiceRequest request = createExportLogsRequest();
         buffer.writeBytes(request.toByteArray(), null, 10_000);
@@ -407,24 +409,9 @@ public class KafkaBufferOTelIT {
                             .build())
                 .build();
 
-        final InstrumentationLibrarySpans ilSpans = InstrumentationLibrarySpans.newBuilder()
-                .setInstrumentationLibrary(InstrumentationLibrary.newBuilder()
-                        .setName(ilName)
-                        .setVersion(ilVersion)
-                        .build())
-                .addSpans(io.opentelemetry.proto.trace.v1.Span.newBuilder()
-                            .setTraceId(ByteString.copyFrom(TraceId2.getBytes()))
-                            .setSpanId(ByteString.copyFrom(SpanId2.getBytes()))
-                            .setKind(io.opentelemetry.proto.trace.v1.Span.SpanKind.SPAN_KIND_INTERNAL)
-                            .setName(ilSpanName)
-                            .setStartTimeUnixNano(currentUnixTimeNano)
-                            .setEndTimeUnixNano(currentUnixTimeNano+TIME_DELTA*1000_000_000)
-                            .build())
-                .build();
         ResourceSpans resourceSpans = ResourceSpans.newBuilder()
                 .setResource(resource)
                 .addScopeSpans(scopeSpans)
-                .addInstrumentationLibrarySpans(ilSpans)
                 .build();
 
         return ExportTraceServiceRequest.newBuilder()
@@ -453,7 +440,7 @@ public class KafkaBufferOTelIT {
 
     @Test
     void test_otel_traces_with_kafka_buffer() throws Exception {
-        KafkaBuffer kafkaBuffer = new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, new OTelTraceDecoder(), null, null);
+        KafkaBuffer kafkaBuffer = new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, new OTelTraceDecoder(OTelOutputFormat.OPENSEARCH), null, null, encryptionSupplier);
         buffer = new KafkaDelegatingBuffer(kafkaBuffer);
         final ExportTraceServiceRequest request = createExportTraceRequest();
         buffer.writeBytes(request.toByteArray(), null, 10_000);

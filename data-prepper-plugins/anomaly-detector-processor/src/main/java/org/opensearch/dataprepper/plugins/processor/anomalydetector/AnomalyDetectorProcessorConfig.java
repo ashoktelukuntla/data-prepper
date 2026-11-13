@@ -1,11 +1,21 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.anomalydetector;
 
+import com.fasterxml.jackson.annotation.JsonClassDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import org.opensearch.dataprepper.model.annotations.ExampleValues;
+import org.opensearch.dataprepper.model.annotations.ExampleValues.Example;
+import org.opensearch.dataprepper.model.annotations.UsesDataPrepperPlugin;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -13,22 +23,34 @@ import jakarta.validation.constraints.NotNull;
 import java.util.Collections;
 import java.util.List;
 
+@JsonPropertyOrder
+@JsonClassDescription("The anomaly detector processor takes structured data and runs anomaly detection algorithms " +
+        "on fields that you can configure in that data.")
 public class AnomalyDetectorProcessorConfig {
-    @JsonProperty("mode")
-    @NotNull
-    private PluginModel detectorMode;
-
+    @JsonPropertyDescription("A non-ordered List<String> that is used as input to the ML algorithm to detect anomalies in the values of the keys in the list. At least one key is required.")
     @JsonProperty("keys")
     @NotEmpty
     private List<String> keys;
 
+    @JsonPropertyDescription("The ML algorithm (or model) used to detect anomalies. You must provide a mode. See random_cut_forest mode.")
+    @JsonProperty("mode")
+    @NotNull
+    @UsesDataPrepperPlugin(pluginType = AnomalyDetectorMode.class)
+    private PluginModel detectorMode;
+
+    @JsonPropertyDescription("If provided, anomalies will be detected within each unique instance of these keys. For example, if you provide the IP field, anomalies will be detected separately for each unique IP address.")
     @JsonProperty("identification_keys")
+    @ExampleValues({
+            @Example(value = "ip_address", description = "Anomalies will be detected separately for each unique IP address from the existing ip_address key of the Event.")
+    })
     private List<String> identificationKeys = Collections.emptyList();
 
+    @JsonPropertyDescription("RCF will try to automatically learn and reduce the number of anomalies detected. For example, if latency is consistently between 50 and 100, and then suddenly jumps to around 1000, only the first one or two data points after the transition will be detected (unless there are other spikes/anomalies). Similarly, for repeated spikes to the same level, RCF will likely eliminate many of the spikes after a few initial ones. This is because the default setting is to minimize the number of alerts detected. Setting the verbose setting to true will cause RCF to consistently detect these repeated cases, which may be useful for detecting anomalous behavior that lasts an extended period of time. Default is false.")
     @JsonProperty("verbose")
     private Boolean verbose = false;
 
-    @JsonProperty("cardinality_limit")
+    @JsonPropertyDescription("If using the identification_keys settings, a new ML model will be created for every degree of cardinality. This can cause a large amount of memory usage, so it is helpful to set a limit on the number of models. Default limit is 5000.")
+    @JsonProperty(value = "cardinality_limit", defaultValue = "5000")
     private int cardinalityLimit = 5000;
 
     public PluginModel getDetectorMode() { 

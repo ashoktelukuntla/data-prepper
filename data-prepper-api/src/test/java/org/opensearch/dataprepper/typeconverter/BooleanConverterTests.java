@@ -1,11 +1,18 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.typeconverter;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.Collections;
 import java.util.Map;
@@ -14,12 +21,23 @@ import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.math.BigDecimal;
+import java.util.stream.Stream;
+
 public class BooleanConverterTests {
+
+    @Test
+    void testStringToBooleanConversionWithArguments() {
+        BooleanConverter converter = new BooleanConverter();
+        final String stringConstant = "12345678912.12345";
+        assertThat(converter.convert(stringConstant, () -> 0), equalTo(false));
+    }
+
     @Test
     void testStringToBooleanConversion() {
         BooleanConverter converter = new BooleanConverter();
         final String stringConstant = "12345678912.12345";
-        assertThat(converter.convert(stringConstant), equalTo(Boolean.parseBoolean(stringConstant)));
+        assertThat(converter.convert(stringConstant), equalTo(false));
     }
     @Test
     void testIntegerToBooleanConversion() {
@@ -40,7 +58,7 @@ public class BooleanConverterTests {
     @Test
     void testLongToBooleanConversion() {
         BooleanConverter converter = new BooleanConverter();
-        final Long longTrueConstant = (long)1234578912;
+        final Long longTrueConstant = 1234578912345L;
         assertThat(converter.convert(longTrueConstant), equalTo(true));
         final Long longFalseConstant = (long)0;
         assertThat(converter.convert(longFalseConstant), equalTo(false));
@@ -77,6 +95,28 @@ public class BooleanConverterTests {
         final Boolean boolFalseConstant = false;
         assertThat(converter.convert(boolFalseConstant), equalTo(false));
     }
+    @ParameterizedTest
+    @MethodSource("BigDecimalValueProvider")
+    void testBigDecimalToBooleanConversion(BigDecimal input, boolean expected_boolean) {
+        BooleanConverter converter = new BooleanConverter();
+        assertThat(converter.convert(input), equalTo(expected_boolean));
+    }
+    private static Stream<Arguments> BigDecimalValueProvider() {
+        return Stream.of(
+            Arguments.of(new BigDecimal ("0"), false),
+            Arguments.of(new BigDecimal ("0.0"), false),
+            Arguments.of(new BigDecimal ("0.00000000000000000000000"), false),
+            Arguments.of(BigDecimal.ZERO, false),
+            Arguments.of(new BigDecimal ("1"), true),
+            Arguments.of(new BigDecimal ("1703908514.045833"), true),
+            Arguments.of(new BigDecimal ("1.00000000000000000000000"), true),
+            Arguments.of(new BigDecimal ("-12345678912.12345"), true),
+            Arguments.of(BigDecimal.ONE, true),
+            Arguments.of(BigDecimal.valueOf(Double.MAX_VALUE), true),
+            Arguments.of(BigDecimal.valueOf(Double.MIN_VALUE), true)
+        );
+    }
+
     @Test
     void testInvalidBooleanConversion() {
         BooleanConverter converter = new BooleanConverter();

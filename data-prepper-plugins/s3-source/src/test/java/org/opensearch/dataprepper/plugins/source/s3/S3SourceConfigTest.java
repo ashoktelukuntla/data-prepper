@@ -10,15 +10,26 @@ import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.NotificationSourceOption;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.OnErrorOption;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.FolderPartitioningOptions;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3ScanBucketOption;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3ScanBucketOptions;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3ScanKeyPathOption;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3ScanScanOptions;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.S3SelectOptions;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3DataSelection;
 import org.opensearch.dataprepper.test.helper.ReflectivelySetField;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.opensearch.dataprepper.plugins.source.s3.S3SourceConfig.DEFAULT_BUFFER_TIMEOUT;
 import static org.opensearch.dataprepper.plugins.source.s3.S3SourceConfig.DEFAULT_NUMBER_OF_RECORDS_TO_ACCUMULATE;
 
@@ -59,6 +70,9 @@ class S3SourceConfigTest {
         final S3SourceConfig s3SourceConfig = new S3SourceConfig();
         ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"acknowledgments", true);
         assertTrue(s3SourceConfig.getAcknowledgements());
+
+        assertThat(s3SourceConfig.isPrefixPartitionModeValid(), equalTo(true));
+        assertThat(s3SourceConfig.isAcknowledgmentsEnabledWithDeleteS3ObjectsOnRead(), equalTo(true));
     }
 
     @Test
@@ -84,5 +98,97 @@ class S3SourceConfigTest {
     void isCodecProvidedWhenNeeded_returns_false_when_s3SelectOptions_is_null_and_codec_is_null(){
         final S3SourceConfig s3SourceConfig = new S3SourceConfig();
         assertFalse(s3SourceConfig.isCodecProvidedWhenNeeded());
+    }
+
+    @Test
+    void isPartitionModeValid_returns_false_when_using_prefix_mode_without_acknowledgments_enabled() throws NoSuchFieldException, IllegalAccessException {
+        final S3SourceConfig s3SourceConfig = new S3SourceConfig();;
+        final S3ScanScanOptions s3ScanScanOptions = new S3ScanScanOptions();
+        assertThat(s3ScanScanOptions.getPartitioningOptions(), equalTo(null));
+        final FolderPartitioningOptions folderPartitioningOptions = new FolderPartitioningOptions();
+        ReflectivelySetField.setField(S3ScanScanOptions.class, s3ScanScanOptions, "folderPartitioningOptions", folderPartitioningOptions);
+
+        ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"deleteS3ObjectsOnRead", true);
+        ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"s3ScanScanOptions", s3ScanScanOptions);
+
+        assertFalse(s3SourceConfig.isPrefixPartitionModeValid());
+    }
+
+    @Test
+    void delete_objects_on_read_requires_acknowledgments_to_be_enabled() throws NoSuchFieldException, IllegalAccessException {
+        final S3SourceConfig s3SourceConfig = new S3SourceConfig();
+        ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"acknowledgments", false);
+        ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"deleteS3ObjectsOnRead", true);
+
+        assertFalse(s3SourceConfig.isAcknowledgmentsEnabledWithDeleteS3ObjectsOnRead());
+    }
+
+    @Test
+    void s3Select_is_not_supported_with_deleteS3ObjectsOnRead() throws NoSuchFieldException, IllegalAccessException {
+        final S3SourceConfig s3SourceConfig = new S3SourceConfig();
+        final S3SelectOptions s3SelectOptions = mock(S3SelectOptions.class);
+        ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"acknowledgments", true);
+        ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"deleteS3ObjectsOnRead", true);
+        ReflectivelySetField.setField(S3SourceConfig.class,s3SourceConfig,"s3SelectOptions", s3SelectOptions);
+
+        assertFalse(s3SourceConfig.isS3SelectNotUsingDeleteS3ObjectsOnRead());
+    }
+
+    @Test
+    void getDataSelection_returns_default_value() {
+        final S3SourceConfig s3SourceConfig = new S3SourceConfig();
+        assertThat(s3SourceConfig.getDataSelection(), equalTo(S3DataSelection.DATA_AND_METADATA));
+    }
+
+    @Test
+    void getDataSelection_returns_configured_value() throws NoSuchFieldException, IllegalAccessException {
+        final S3SourceConfig s3SourceConfig = new S3SourceConfig();
+        ReflectivelySetField.setField(S3SourceConfig.class, s3SourceConfig, "dataSelection", S3DataSelection.METADATA_ONLY);
+        assertThat(s3SourceConfig.getDataSelection(), equalTo(S3DataSelection.METADATA_ONLY));
+    }
+
+    @Test
+    void getFilters_returns_empty_map_by_default() {
+        assertThat(new S3SourceConfig().getFilters(), equalTo(Collections.emptyMap()));
+    }
+
+    @Test
+    void isFiltersNotUsedWithScanBucketFilter_returns_true_when_filters_not_set() {
+        assertTrue(new S3SourceConfig().isFiltersNotUsedWithScanBucketFilter());
+    }
+
+    @Test
+    void isFiltersNotUsedWithScanBucketFilter_returns_false_when_both_filters_and_scan_bucket_filter_set() throws Exception {
+        final S3SourceConfig s3SourceConfig = new S3SourceConfig();
+
+        final S3ScanKeyPathOption scanFilter = mock(S3ScanKeyPathOption.class);
+        final S3ScanBucketOption bucketOption = mock(S3ScanBucketOption.class);
+        when(bucketOption.getS3ScanFilter()).thenReturn(scanFilter);
+        final S3ScanBucketOptions bucketOptions = mock(S3ScanBucketOptions.class);
+        when(bucketOptions.getS3ScanBucketOption()).thenReturn(bucketOption);
+        final S3ScanScanOptions scanOptions = mock(S3ScanScanOptions.class);
+        when(scanOptions.getBuckets()).thenReturn(List.of(bucketOptions));
+
+        ReflectivelySetField.setField(S3SourceConfig.class, s3SourceConfig, "s3ScanScanOptions", scanOptions);
+        ReflectivelySetField.setField(S3SourceConfig.class, s3SourceConfig, "filters", Map.of("my-bucket", mock(S3ScanKeyPathOption.class)));
+
+        assertFalse(s3SourceConfig.isFiltersNotUsedWithScanBucketFilter());
+    }
+
+    @Test
+    void isFiltersNotUsedWithScanBucketFilter_returns_true_when_filters_set_and_scan_bucket_filter_not_set() throws Exception {
+        final S3SourceConfig s3SourceConfig = new S3SourceConfig();
+
+        final S3ScanBucketOption bucketOption = mock(S3ScanBucketOption.class);
+        when(bucketOption.getS3ScanFilter()).thenReturn(null);
+        final S3ScanBucketOptions bucketOptions = mock(S3ScanBucketOptions.class);
+        when(bucketOptions.getS3ScanBucketOption()).thenReturn(bucketOption);
+        final S3ScanScanOptions scanOptions = mock(S3ScanScanOptions.class);
+        when(scanOptions.getBuckets()).thenReturn(List.of(bucketOptions));
+
+        ReflectivelySetField.setField(S3SourceConfig.class, s3SourceConfig, "s3ScanScanOptions", scanOptions);
+        ReflectivelySetField.setField(S3SourceConfig.class, s3SourceConfig, "filters", Map.of("my-bucket", mock(S3ScanKeyPathOption.class)));
+
+        assertTrue(s3SourceConfig.isFiltersNotUsedWithScanBucketFilter());
     }
 }

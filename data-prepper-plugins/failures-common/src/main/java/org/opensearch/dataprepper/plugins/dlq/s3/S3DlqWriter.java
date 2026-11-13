@@ -47,7 +47,7 @@ public class S3DlqWriter implements DlqWriter {
     static final String S3_DLQ_REQUEST_LATENCY = "dlqS3RequestLatency";
     static final String S3_DLQ_REQUEST_SIZE_BYTES = "dlqS3RequestSizeBytes";
     static final String DLQ_OBJECTS = "dlqObjects";
-    private static final String KEY_NAME_FORMAT = "dlq-v%s-%s-%s-%s-%s.json";
+    private static final String KEY_NAME_FORMAT = "dlq-v%s-%s-%s-%s-%s.%s";
     private static final String FULL_KEY_FORMAT = "%s%s";
 
     private static final Logger LOG = LoggerFactory.getLogger(S3DlqWriter.class);
@@ -55,7 +55,10 @@ public class S3DlqWriter implements DlqWriter {
     private final S3Client s3Client;
     private final String bucket;
     private final String keyPathPrefix;
+
+    private final String bucketOwner;
     private final ObjectMapper objectMapper;
+    private final DlqCodec codec;
 
     private final Counter dlqS3RecordsSuccessCounter;
     private final Counter dlqS3RecordsFailedCounter;
@@ -80,10 +83,17 @@ public class S3DlqWriter implements DlqWriter {
             enforceDefaultDelimiterOnKeyPathPrefix(s3DlqWriterConfig.getKeyPathPrefix());
         this.objectMapper = objectMapper;
         this.keyPathGenerator = new KeyPathGenerator(keyPathPrefix);
+        this.bucketOwner = s3DlqWriterConfig.getBucketOwner();
+        final DlqCodec configuredCodec = s3DlqWriterConfig.getCodec();
+        this.codec = configuredCodec != null ? configuredCodec : DlqCodec.JSON;
     }
 
     @Override
     public void write(final List<DlqObject> dlqObjects, final String pipelineName, final String pluginId) throws IOException {
+        if(dlqObjects.isEmpty()) {
+            return;
+        }
+
         try {
             doWrite(dlqObjects, pipelineName, pluginId);
             dlqS3RequestSuccessCounter.increment();
@@ -98,6 +108,7 @@ public class S3DlqWriter implements DlqWriter {
     private void doWrite(final List<DlqObject> dlqObjects, final String pipelineName, final String pluginId) throws IOException {
         final PutObjectRequest putObjectRequest = PutObjectRequest.builder()
             .bucket(bucket)
+            .expectedBucketOwner(bucketOwner)
             .key(buildKey(pipelineName, pluginId))
             .build();
 
@@ -106,8 +117,8 @@ public class S3DlqWriter implements DlqWriter {
         final PutObjectResponse response = timedPutObject(putObjectRequest, content);
 
         if (!response.sdkHttpResponse().isSuccessful()) {
-            LOG.error(SENSITIVE, "Failed to write to S3 dlq: [{}] to S3 due to status code: [{}]",
-                content, response.sdkHttpResponse().statusCode());
+            LOG.error(SENSITIVE, "Failed to write content [{}] to S3 dlq", content);
+            LOG.error("Failed to write to S3 dlq due to status code: [{}]", response.sdkHttpResponse().statusCode());
             throw new IOException(String.format(
                 "Failed to write to S3 dlq due to status code: %d", response.sdkHttpResponse().statusCode()));
         }
@@ -119,8 +130,7 @@ public class S3DlqWriter implements DlqWriter {
         } catch (final IOException ioException) {
             throw ioException;
         } catch (final Exception ex) {
-            LOG.error(SENSITIVE, "Failed timed write to S3 dlq: [{}] to S3 due to error: [{}]",
-                content, ex.getMessage());
+            LOG.error(SENSITIVE, "Failed timed write to S3 dlq with content: [{}]", content, ex);
             throw new IOException("Failed timed write to S3 dlq.", ex);
         }
     }
@@ -129,31 +139,37 @@ public class S3DlqWriter implements DlqWriter {
         try {
             return s3Client.putObject(request, RequestBody.fromString(content));
         } catch (Exception ex) {
-            LOG.error(SENSITIVE, "Failed to write to S3 dlq: [{}] to S3 due to error: [{}]",
-                content, ex.getMessage());
+            LOG.error(SENSITIVE, "Failed to write content [{}] to S3 dlq", content, ex);
             throw new IOException("Failed to write to S3 dlq.", ex);
         }
     }
 
     private String deserialize(final List<DlqObject> dlqObjects) throws IOException {
         try {
-            final Map<String, Object> output = Map.of(DLQ_OBJECTS, dlqObjects);
-
-            final String content = objectMapper.writeValueAsString(output);
+            final String content;
+            if (codec == DlqCodec.NDJSON) {
+                final StringBuilder builder = new StringBuilder();
+                for (final DlqObject dlqObject : dlqObjects) {
+                    builder.append(objectMapper.writeValueAsString(dlqObject)).append('\n');
+                }
+                content = builder.toString();
+            } else {
+                final Map<String, Object> output = Map.of(DLQ_OBJECTS, dlqObjects);
+                content = objectMapper.writeValueAsString(output);
+            }
 
             dlqS3RequestSizeBytesSummary.record(content.getBytes(StandardCharsets.UTF_8).length);
 
             return content;
         } catch (JsonProcessingException e) {
-            LOG.error(SENSITIVE, "Failed to build valid S3 request body with dlqObjects: [{}] due to error: [{}]",
-                dlqObjects, e.getMessage());
+            LOG.error(SENSITIVE, "Failed to build valid S3 request body with dlqObjects: [{}]", dlqObjects, e);
             throw new IOException("Failed to build valid S3 request body", e);
         }
     }
 
     private String buildKey(final String pipelineName, final String pluginId) {
         final String key = String.format(KEY_NAME_FORMAT, DataPrepperVersion.getCurrentVersion().getMajorVersion(),
-            pipelineName, pluginId, Instant.now(), UUID.randomUUID());
+            pipelineName, pluginId, Instant.now(), UUID.randomUUID(), codec.getExtension());
         return keyPathPrefix == null ? key : String.format(FULL_KEY_FORMAT, keyPathGenerator.generate(), key);
     }
 

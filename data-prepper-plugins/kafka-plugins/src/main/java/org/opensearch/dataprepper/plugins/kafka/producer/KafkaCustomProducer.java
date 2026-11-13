@@ -25,7 +25,9 @@ import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.EventHandle;
 import org.opensearch.dataprepper.model.log.JacksonLog;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerConfig;
+import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerProperties;
 import org.opensearch.dataprepper.plugins.kafka.service.SchemaService;
 import org.opensearch.dataprepper.plugins.kafka.sink.DLQSink;
 import org.opensearch.dataprepper.plugins.kafka.util.KafkaTopicProducerMetrics;
@@ -33,12 +35,15 @@ import org.opensearch.dataprepper.plugins.kafka.util.MessageFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.Collection;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 
 /**
@@ -72,6 +77,7 @@ public class KafkaCustomProducer<T> {
 
     private final KafkaTopicProducerMetrics topicMetrics;
 
+    private final CompressionOption compressionConfig;
 
     public KafkaCustomProducer(final KafkaProducer producer,
                                final KafkaProducerConfig kafkaProducerConfig,
@@ -79,7 +85,8 @@ public class KafkaCustomProducer<T> {
                                final ExpressionEvaluator expressionEvaluator,
                                final String tagTargetKey,
                                final KafkaTopicProducerMetrics topicMetrics,
-                               final SchemaService schemaService
+                               final SchemaService schemaService,
+                               final CompressionOption compressionConfig
     ) {
         this.producer = producer;
         this.kafkaProducerConfig = kafkaProducerConfig;
@@ -92,6 +99,18 @@ public class KafkaCustomProducer<T> {
         this.schemaService = schemaService;
         this.topicMetrics = topicMetrics;
         this.topicMetrics.register(this.producer);
+        this.compressionConfig = (compressionConfig == null) ? CompressionOption.NONE: compressionConfig;
+    }
+
+    public KafkaCustomProducer(final KafkaProducer producer,
+                               final KafkaProducerConfig kafkaProducerConfig,
+                               final DLQSink dlqSink,
+                               final ExpressionEvaluator expressionEvaluator,
+                               final String tagTargetKey,
+                               final KafkaTopicProducerMetrics topicMetrics,
+                               final SchemaService schemaService
+    ) {
+        this(producer, kafkaProducerConfig, dlqSink, expressionEvaluator, tagTargetKey, topicMetrics, schemaService, null);
     }
 
     KafkaTopicProducerMetrics getTopicMetrics() {
@@ -100,13 +119,29 @@ public class KafkaCustomProducer<T> {
 
     public void produceRawData(final byte[] bytes, final String key) throws Exception{
         try {
-            send(topicName, key, bytes).get();
+            long startPreparationTime = System.currentTimeMillis();
+            ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+            OutputStream compressedOutputStream = compressionConfig.getCompressionEngine().createOutputStream(byteArrayOutputStream);
+            compressedOutputStream.write(bytes);
+            compressedOutputStream.close();
+
+            topicMetrics.getProduceDataPreparationTimer().record(System.currentTimeMillis() - startPreparationTime, TimeUnit.MILLISECONDS);
+            send(topicName, key, byteArrayOutputStream.toByteArray()).get();
+
             topicMetrics.update(producer);
         } catch (Exception e) {
             topicMetrics.getNumberOfRawDataSendErrors().increment();
             LOG.error("Error occurred while publishing raw data", e);
             throw e;
         }
+    }
+
+    public Integer getMaxRequestSize() {
+        KafkaProducerProperties producerProperties = kafkaProducerConfig.getKafkaProducerProperties();
+        if (producerProperties != null) {
+            return Integer.valueOf(producerProperties.getMaxRequestSize());
+        }
+        return KafkaProducerProperties.DEFAULT_MAX_REQUEST_SIZE;
     }
 
     public void produceRecords(final Record<Event> record) throws Exception {
@@ -141,7 +176,13 @@ public class KafkaCustomProducer<T> {
     private void publishJsonMessageAsBytes(Record<Event> record, String key) throws Exception {
         JsonNode dataNode = record.getData().getJsonNode();
         byte[] bytes = objectMapper.writeValueAsBytes(dataNode);
-        send(topicName, key, bytes);
+
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        OutputStream compressedOutputStream = compressionConfig.getCompressionEngine().createOutputStream(byteArrayOutputStream);
+        compressedOutputStream.write(bytes);
+        compressedOutputStream.close();
+
+        send(topicName, key, byteArrayOutputStream.toByteArray());
     }
 
     private Event getEvent(final Record<Event> record) {
@@ -224,5 +265,4 @@ public class KafkaCustomProducer<T> {
         });
         return JacksonLog.builder().withData(eventData).build();
     }
-
 }

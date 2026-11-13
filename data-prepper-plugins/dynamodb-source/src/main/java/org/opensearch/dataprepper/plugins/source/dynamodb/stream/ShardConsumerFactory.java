@@ -6,11 +6,11 @@
 package org.opensearch.dataprepper.plugins.source.dynamodb.stream;
 
 import org.opensearch.dataprepper.metrics.PluginMetrics;
-import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
 import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.source.coordinator.enhanced.EnhancedSourceCoordinator;
+import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.StreamConfig;
 import org.opensearch.dataprepper.plugins.source.dynamodb.coordination.partition.GlobalState;
 import org.opensearch.dataprepper.plugins.source.dynamodb.coordination.partition.StreamPartition;
 import org.opensearch.dataprepper.plugins.source.dynamodb.coordination.state.StreamProgressState;
@@ -45,23 +45,26 @@ public class ShardConsumerFactory {
     private final DynamoDBSourceAggregateMetrics dynamoDBSourceAggregateMetrics;
     private final Buffer<Record<Event>> buffer;
 
+    private final StreamConfig streamConfig;
+
 
     public ShardConsumerFactory(final EnhancedSourceCoordinator enhancedSourceCoordinator,
                                 final DynamoDbStreamsClient streamsClient,
                                 final PluginMetrics pluginMetrics,
                                 final DynamoDBSourceAggregateMetrics dynamoDBSourceAggregateMetrics,
-                                final Buffer<Record<Event>> buffer) {
+                                final Buffer<Record<Event>> buffer,
+                                final StreamConfig streamConfig) {
         this.streamsClient = streamsClient;
         this.enhancedSourceCoordinator = enhancedSourceCoordinator;
         this.pluginMetrics = pluginMetrics;
         this.dynamoDBSourceAggregateMetrics = dynamoDBSourceAggregateMetrics;
         this.buffer = buffer;
-
+        this.streamConfig = streamConfig;
     }
 
     public Runnable createConsumer(final StreamPartition streamPartition,
-                                   final AcknowledgementSet acknowledgementSet,
-                                   final Duration shardAcknowledgmentTimeout) {
+                                   final Duration shardAcknowledgmentTimeout,
+                                   final ShardAcknowledgementManager shardAcknowledgementManager) {
 
         LOG.info("Starting to consume shard " + streamPartition.getShardId());
 
@@ -72,8 +75,10 @@ public class ShardConsumerFactory {
         Instant startTime = null;
         boolean waitForExport = false;
         if (progressState.isPresent()) {
-            // We can't checkpoint with acks yet
-            sequenceNumber = acknowledgementSet == null ? null : progressState.get().getSequenceNumber();
+            sequenceNumber = shardAcknowledgementManager == null ? null : progressState.get().getSequenceNumber();
+            if (streamConfig.isDisableCheckpointing()) {
+                sequenceNumber = null;
+            }
             waitForExport = progressState.get().shouldWaitForExport();
             if (progressState.get().getStartTime() != 0) {
                 startTime = Instant.ofEpochMilli(progressState.get().getStartTime());
@@ -81,11 +86,11 @@ public class ShardConsumerFactory {
             // If ending sequence number is present, get the shardIterator for last record
             String endingSequenceNumber = progressState.get().getEndingSequenceNumber();
             if (endingSequenceNumber != null && !endingSequenceNumber.isEmpty()) {
-                lastShardIterator = getShardIterator(streamPartition.getStreamArn(), streamPartition.getShardId(), endingSequenceNumber);
+                lastShardIterator = getShardIterator(streamPartition.getStreamArn(), streamPartition.getShardId(), endingSequenceNumber, ShardIteratorType.AT_SEQUENCE_NUMBER);
             }
         }
 
-        String shardIterator = getShardIterator(streamPartition.getStreamArn(), streamPartition.getShardId(), sequenceNumber);
+        String shardIterator = getShardIterator(streamPartition.getStreamArn(), streamPartition.getShardId(), sequenceNumber, ShardIteratorType.AFTER_SEQUENCE_NUMBER);
         if (shardIterator == null) {
             LOG.error("Failed to start consuming shard '{}'. Unable to get a shard iterator for this shard, this shard may have expired", streamPartition.getShardId());
             return null;
@@ -97,16 +102,16 @@ public class ShardConsumerFactory {
 
         LOG.debug("Create shard consumer for {} with shardIter {}", streamPartition.getShardId(), shardIterator);
         LOG.debug("Create shard consumer for {} with lastShardIter {}", streamPartition.getShardId(), lastShardIterator);
-        ShardConsumer shardConsumer = ShardConsumer.builder(streamsClient, pluginMetrics, dynamoDBSourceAggregateMetrics, buffer)
+        ShardConsumer shardConsumer = ShardConsumer.builder(streamsClient, pluginMetrics, dynamoDBSourceAggregateMetrics, buffer, streamConfig)
                 .tableInfo(tableInfo)
                 .checkpointer(checkpointer)
+                .shardAcknowledgementManager(shardAcknowledgementManager)
+                .streamPartition(streamPartition)
                 .shardIterator(shardIterator)
                 .shardId(streamPartition.getShardId())
                 .lastShardIterator(lastShardIterator)
                 .startTime(startTime)
                 .waitForExport(waitForExport)
-                .acknowledgmentSet(acknowledgementSet)
-                .acknowledgmentSetTimeout(shardAcknowledgmentTimeout)
                 .build();
         return shardConsumer;
     }
@@ -129,19 +134,19 @@ public class ShardConsumerFactory {
      * @param streamArn      Stream Arn
      * @param shardId        Shard Id
      * @param sequenceNumber The last Sequence Number processed if any
+     * @param shardIteratorType The type of shard iterator to retrieve
      * @return A shard iterator.
      */
-    public String getShardIterator(String streamArn, String shardId, String sequenceNumber) {
+    public String getShardIterator(String streamArn, String shardId, String sequenceNumber, ShardIteratorType shardIteratorType) {
         LOG.debug("Get Initial Shard Iter for {}", shardId);
         GetShardIteratorRequest getShardIteratorRequest;
 
         if (sequenceNumber != null && !sequenceNumber.isEmpty()) {
             LOG.debug("Get Shard Iterator at {}", sequenceNumber);
-            // There may be an overlap for 1 record
             getShardIteratorRequest = GetShardIteratorRequest.builder()
                     .shardId(shardId)
                     .streamArn(streamArn)
-                    .shardIteratorType(ShardIteratorType.AT_SEQUENCE_NUMBER)
+                    .shardIteratorType(shardIteratorType)
                     .sequenceNumber(sequenceNumber)
                     .build();
         } else {

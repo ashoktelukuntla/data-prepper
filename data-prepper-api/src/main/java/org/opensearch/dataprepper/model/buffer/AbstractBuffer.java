@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.buffer;
@@ -12,7 +16,11 @@ import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.CheckpointState;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
 
+import java.time.Instant;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -32,8 +40,10 @@ public abstract class AbstractBuffer<T extends Record<?>> implements Buffer<T> {
     private final Counter writeTimeoutCounter;
     private final Counter recordsWriteFailed;
     private final Timer writeTimer;
+    private final Timer latencyTimer;
     private final Timer readTimer;
     private final Timer checkpointTimer;
+    private HeadlessPipeline failurePipeline;
 
     public AbstractBuffer(final PluginSetting pluginSetting) {
         this(PluginMetrics.fromPluginSetting(pluginSetting), pluginSetting.getPipelineName());
@@ -54,7 +64,17 @@ public abstract class AbstractBuffer<T extends Record<?>> implements Buffer<T> {
         this.writeTimeoutCounter = pluginMetrics.counter(MetricNames.WRITE_TIMEOUTS);
         this.writeTimer = pluginMetrics.timer(MetricNames.WRITE_TIME_ELAPSED);
         this.readTimer = pluginMetrics.timer(MetricNames.READ_TIME_ELAPSED);
+        this.latencyTimer = pluginMetrics.timer(MetricNames.READ_LATENCY);
         this.checkpointTimer = pluginMetrics.timer(MetricNames.CHECKPOINT_TIME_ELAPSED);
+    }
+
+    @Override
+    public void setFailurePipeline(final HeadlessPipeline failurePipeline) {
+        this.failurePipeline = failurePipeline;
+    }
+
+    public HeadlessPipeline getFailurePipeline() {
+        return failurePipeline;
     }
 
     /**
@@ -118,8 +138,20 @@ public abstract class AbstractBuffer<T extends Record<?>> implements Buffer<T> {
     }
 
     @Override
-    public void writeBytes(final byte[] bytes, final String key, int timeoutInMillis) throws Exception {
-        throw new RuntimeException("not supported");
+    public void writeBytes(final byte[] bytes, final String key, final int timeoutInMillis) throws Exception {
+        long startTime = System.nanoTime();
+
+        try {
+            doWriteBytes(bytes, key, timeoutInMillis);
+            postProcess(recordsInBuffer.get());
+        } catch (Exception e) {
+            if (e instanceof TimeoutException) {
+                writeTimeoutCounter.increment();
+            }
+            throw e;
+        } finally {
+            writeTimer.record(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
+        }
     }
 
     /**
@@ -140,6 +172,23 @@ public abstract class AbstractBuffer<T extends Record<?>> implements Buffer<T> {
         }
         postProcess(recordsInBuffer.get());
         return readResult;
+    }
+
+    Timer getLatencyTimer() {
+        return latencyTimer;
+    }
+
+    protected void updateLatency(Collection<T> records) {
+        for (T rec : records) {
+            if (rec instanceof Record) {
+                Object data = rec.getData();
+                if (data instanceof Event) {
+                    Event event = (Event) data;
+                    Instant receivedTime = event.getEventHandle().getInternalOriginationTime();
+                    latencyTimer.record(Duration.between(receivedTime, Instant.now()));
+                }
+            }
+        }
     }
 
     @Override
@@ -173,6 +222,10 @@ public abstract class AbstractBuffer<T extends Record<?>> implements Buffer<T> {
      * @throws Exception Exception thrown when the operation times out
      */
     public abstract void doWriteAll(Collection<T> records, int timeoutInMillis) throws Exception;
+
+    public void doWriteBytes(final byte[] bytes, final String key, final int timeoutInMillis) throws Exception {
+        throw new UnsupportedOperationException("Not supported: This is not a byte buffer.");
+    }
 
     /**
      * This method should implement the logic for reading from the buffer

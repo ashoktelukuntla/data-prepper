@@ -1,6 +1,11 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ *
  */
 
 package org.opensearch.dataprepper.plugins.processor.oteltrace;
@@ -22,11 +27,13 @@ import org.opensearch.dataprepper.model.trace.DefaultTraceGroupFields;
 import org.opensearch.dataprepper.model.trace.JacksonSpan;
 import org.opensearch.dataprepper.model.trace.Span;
 import org.opensearch.dataprepper.model.trace.TraceGroupFields;
+import org.opensearch.dataprepper.plugins.otel.common.OTelSpanDerivationUtil;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -122,6 +129,10 @@ class OTelTraceRawProcessorTest {
 
         when(config.getTraceFlushIntervalSeconds()).thenReturn(TEST_TRACE_FLUSH_INTERVAL);
         when(config.getTraceGroupCacheMaxSize()).thenReturn(OtelTraceRawProcessorConfig.MAX_TRACE_ID_CACHE_SIZE);
+        when(config.isGenAiEnrichmentDisabled()).thenReturn(false);
+        when(config.getGenAiCoverageCacheMaxSize()).thenReturn(OtelTraceRawProcessorConfig.DEFAULT_GENAI_COVERAGE_CACHE_MAX_SIZE);
+        // testGenAiEnrichmentRunsDuringDoExecute copies onto a non-GenAI root.
+        when(config.getGenAiRootPropagation()).thenReturn(GenAiRootPropagation.ALL_ROOTS);
         when(config.getTraceGroupCacheTimeToLive()).thenReturn(OtelTraceRawProcessorConfig.DEFAULT_TRACE_ID_TTL);
 
         oTelTraceRawProcessor = new OTelTraceRawProcessor(config, pipelineDescription, pluginMetrics);
@@ -221,6 +232,155 @@ class OTelTraceRawProcessorTest {
     }
 
     @Test
+    void testServerSpansReceiveDerivedAttributes() {
+        final Collection<Record<Span>> processedRecords = oTelTraceRawProcessor.doExecute(TEST_TWO_FULL_TRACE_GROUP_RECORDS);
+
+        final List<Span> spans = processedRecords.stream()
+                .map(Record::getData)
+                .collect(Collectors.toList());
+        // We know TEST_TWO_FULL_TRACE_GROUP_RECORDS contains SERVER spans, so let's be specific
+        final List<Span> serverSpans = processedRecords.stream()
+                .map(Record::getData)
+                .filter(span -> "SPAN_KIND_SERVER".equals(span.getKind()))
+                .collect(Collectors.toList());
+
+        // Verify we have the expected SERVER spans
+        assertThat(serverSpans.size(), equalTo(4)); // 2 traces × 2 SERVER child spans each
+
+        // Test each SERVER span for exact derived attribute values
+        for (final Span serverSpan : serverSpans) {
+            final Map<String, Object> attributes = serverSpan.getAttributes();
+
+            // Verify all derived attributes are present
+            assertTrue(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_FAULT_ATTRIBUTE),
+                      "SERVER span should have derived.fault attribute");
+            assertTrue(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_ERROR_ATTRIBUTE),
+                      "SERVER span should have derived.error attribute");
+            assertTrue(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE),
+                      "SERVER span should have derived.operation attribute");
+            assertTrue(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_ENVIRONMENT_ATTRIBUTE),
+                      "SERVER span should have derived.environment attribute");
+
+            // Test exact expected values based on test data
+            final String fault = (String) attributes.get(OTelSpanDerivationUtil.DERIVED_FAULT_ATTRIBUTE);
+            final String error = (String) attributes.get(OTelSpanDerivationUtil.DERIVED_ERROR_ATTRIBUTE);
+            final String operation = (String) attributes.get(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE);
+            final String environment = (String) attributes.get(OTelSpanDerivationUtil.DERIVED_ENVIRONMENT_ATTRIBUTE);
+
+            // Test spans have no status and no HTTP attributes, so fault and error should be 0
+            assertThat(fault, equalTo("0"));
+            assertThat(error, equalTo("0"));
+
+            // Operation should be the span name since no HTTP attributes are present
+            assertThat(operation, equalTo(serverSpan.getName()));
+
+            // Environment should be default since no resource attributes are present
+            assertThat(environment, equalTo("generic:default"));
+        }
+    }
+
+
+
+    @Test
+    void testDerivedAttributesAllScenarios() {
+        // Test comprehensive derived attribute scenarios using dedicated JSON test files
+
+        // Scenario 1: ERROR status → fault=1, error=0
+        final List<Record<Span>> errorTraceRecords = Arrays.asList(
+            new Record<>(buildSpanFromJsonFile("error-status-root-span.json")),
+            new Record<>(buildSpanFromJsonFile("error-status-child-span.json"))
+        );
+        final Collection<Record<Span>> processedErrorRecords = oTelTraceRawProcessor.doExecute(errorTraceRecords);
+        final Span errorServerSpan = findServerSpan(processedErrorRecords);
+
+        Map<String, Object> attrs = errorServerSpan.getAttributes();
+        assertThat("ERROR status span fault", attrs.get(OTelSpanDerivationUtil.DERIVED_FAULT_ATTRIBUTE), equalTo("1"));
+        assertThat("ERROR status span error", attrs.get(OTelSpanDerivationUtil.DERIVED_ERROR_ATTRIBUTE), equalTo("0"));
+        assertThat("ERROR status operation", attrs.get(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE), equalTo("ERROR_OPERATION"));
+
+        // Scenario 2: HTTP 4xx error → fault=0, error=1
+        final List<Record<Span>> http4xxTraceRecords = Arrays.asList(
+            new Record<>(buildSpanFromJsonFile("http-4xx-root-span.json")),
+            new Record<>(buildSpanFromJsonFile("http-4xx-child-span.json"))
+        );
+        final Collection<Record<Span>> processedHttp4xxRecords = oTelTraceRawProcessor.doExecute(http4xxTraceRecords);
+        final Span http4xxServerSpan = findServerSpan(processedHttp4xxRecords);
+
+        attrs = http4xxServerSpan.getAttributes();
+        assertThat("HTTP 4xx span fault", attrs.get(OTelSpanDerivationUtil.DERIVED_FAULT_ATTRIBUTE), equalTo("0"));
+        assertThat("HTTP 4xx span error", attrs.get(OTelSpanDerivationUtil.DERIVED_ERROR_ATTRIBUTE), equalTo("1"));
+        assertThat("HTTP 4xx operation (preserves span name)", attrs.get(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE), equalTo("USER_LOOKUP"));
+
+        // Scenario 3: HTTP 5xx error → fault=1, error=0
+        final List<Record<Span>> http5xxTraceRecords = Arrays.asList(
+            new Record<>(buildSpanFromJsonFile("http-5xx-root-span.json")),
+            new Record<>(buildSpanFromJsonFile("http-5xx-child-span.json"))
+        );
+        final Collection<Record<Span>> processedHttp5xxRecords = oTelTraceRawProcessor.doExecute(http5xxTraceRecords);
+        final Span http5xxServerSpan = findServerSpan(processedHttp5xxRecords);
+
+        attrs = http5xxServerSpan.getAttributes();
+        assertThat("HTTP 5xx span fault", attrs.get(OTelSpanDerivationUtil.DERIVED_FAULT_ATTRIBUTE), equalTo("1"));
+        assertThat("HTTP 5xx span error", attrs.get(OTelSpanDerivationUtil.DERIVED_ERROR_ATTRIBUTE), equalTo("0"));
+        assertThat("HTTP 5xx operation (preserves span name)", attrs.get(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE), equalTo("ORDER_CREATE"));
+
+        // Scenario 4: Custom environment → production environment
+        final List<Record<Span>> customEnvTraceRecords = Arrays.asList(
+            new Record<>(buildSpanFromJsonFile("custom-env-root-span.json")),
+            new Record<>(buildSpanFromJsonFile("custom-env-child-span.json"))
+        );
+        final Collection<Record<Span>> processedEnvRecords = oTelTraceRawProcessor.doExecute(customEnvTraceRecords);
+        final Span envServerSpan = findServerSpan(processedEnvRecords);
+
+        attrs = envServerSpan.getAttributes();
+        assertThat("Custom environment", attrs.get(OTelSpanDerivationUtil.DERIVED_ENVIRONMENT_ATTRIBUTE), equalTo("production"));
+        assertThat("Custom env operation", attrs.get(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE), equalTo("HEALTH_CHECK"));
+
+        // Scenario 5: Generic span name → HTTP operation derivation
+        final List<Record<Span>> genericNameTraceRecords = Arrays.asList(
+            new Record<>(buildSpanFromJsonFile("generic-name-root-span.json")),
+            new Record<>(buildSpanFromJsonFile("generic-name-child-span.json"))
+        );
+        final Collection<Record<Span>> processedGenericRecords = oTelTraceRawProcessor.doExecute(genericNameTraceRecords);
+        final Span genericServerSpan = findServerSpan(processedGenericRecords);
+
+        attrs = genericServerSpan.getAttributes();
+        assertThat("Generic span name HTTP derivation", attrs.get(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE), equalTo("GET /api"));
+        assertThat("Generic span fault", attrs.get(OTelSpanDerivationUtil.DERIVED_FAULT_ATTRIBUTE), equalTo("0"));
+        assertThat("Generic span error", attrs.get(OTelSpanDerivationUtil.DERIVED_ERROR_ATTRIBUTE), equalTo("0"));
+    }
+
+    private Span findServerSpan(Collection<Record<Span>> records) {
+        return records.stream()
+                .map(Record::getData)
+                .filter(span -> "SPAN_KIND_SERVER".equals(span.getKind()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("No SERVER span found in processed records"));
+    }
+
+    @Test
+    void testNonServerSpansDoNotReceiveDerivedAttributes() {
+        final Collection<Record<Span>> processedRecords = oTelTraceRawProcessor.doExecute(TEST_TWO_FULL_TRACE_GROUP_RECORDS);
+
+        // Verify that non-SERVER spans do not have derived attributes
+        for (Record<Span> record : processedRecords) {
+            final Span span = record.getData();
+            if (!"SPAN_KIND_SERVER".equals(span.getKind())) {
+                final Map<String, Object> attributes = span.getAttributes();
+                
+                assertFalse(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_FAULT_ATTRIBUTE), 
+                           "Non-SERVER span should not have derived.fault attribute");
+                assertFalse(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_ERROR_ATTRIBUTE), 
+                           "Non-SERVER span should not have derived.error attribute");  
+                assertFalse(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_OPERATION_ATTRIBUTE), 
+                           "Non-SERVER span should not have derived.operation attribute");
+                assertFalse(attributes.containsKey(OTelSpanDerivationUtil.DERIVED_ENVIRONMENT_ATTRIBUTE), 
+                           "Non-SERVER span should not have derived.environment attribute");
+            }
+        }
+    }
+
+    @Test
     void testMetricsOnTraceGroup() {
         ArgumentCaptor<Object> gaugeObjectArgumentCaptor = ArgumentCaptor.forClass(Object.class);
         ArgumentCaptor<ToDoubleFunction> gaugeFunctionArgumentCaptor = ArgumentCaptor.forClass(ToDoubleFunction.class);
@@ -233,6 +393,26 @@ class OTelTraceRawProcessorTest {
         oTelTraceRawProcessor.doExecute(TEST_TWO_FULL_TRACE_GROUP_RECORDS);
 
         assertThat(actualFunction.applyAsDouble(actualMeasuredObject), equalTo(2.0));
+    }
+
+    @Test
+    void testMetricsOnGenAiCoverage() {
+        final ArgumentCaptor<Object> gaugeObjectArgumentCaptor = ArgumentCaptor.forClass(Object.class);
+        final ArgumentCaptor<ToDoubleFunction> gaugeFunctionArgumentCaptor = ArgumentCaptor.forClass(ToDoubleFunction.class);
+        verify(pluginMetrics).gauge(eq(OTelTraceRawProcessor.GENAI_COVERAGE_COUNT_METRIC_NAME), gaugeObjectArgumentCaptor.capture(),
+                gaugeFunctionArgumentCaptor.capture());
+
+        assertThat(gaugeFunctionArgumentCaptor.getValue().applyAsDouble(gaugeObjectArgumentCaptor.getValue()), equalTo(0.0));
+    }
+
+    @Test
+    void testMetricsOnGenAiCoverageSpanIds() {
+        final ArgumentCaptor<Object> gaugeObjectArgumentCaptor = ArgumentCaptor.forClass(Object.class);
+        final ArgumentCaptor<ToDoubleFunction> gaugeFunctionArgumentCaptor = ArgumentCaptor.forClass(ToDoubleFunction.class);
+        verify(pluginMetrics).gauge(eq(OTelTraceRawProcessor.GENAI_COVERAGE_SPAN_ID_COUNT_METRIC_NAME), gaugeObjectArgumentCaptor.capture(),
+                gaugeFunctionArgumentCaptor.capture());
+
+        assertThat(gaugeFunctionArgumentCaptor.getValue().applyAsDouble(gaugeObjectArgumentCaptor.getValue()), equalTo(0.0));
     }
 
     @Test
@@ -252,10 +432,10 @@ class OTelTraceRawProcessorTest {
 
     @ParameterizedTest
     @CsvSource({
-            "1, 4",
+            "0, 4",
             "2, 6"
     })
-    void traceGroupCacheMaxSize_provides_an_upper_bound(final long cacheMaxSize, final int expectedProcessedRecords) {
+    void traceGroupCacheMaxSize_provides_an_upper_bound(final long cacheMaxSize, final int leastExpectedProcessedRecordCount) {
         reset(config);
         when(config.getTraceFlushIntervalSeconds()).thenReturn(TEST_TRACE_FLUSH_INTERVAL);
         when(config.getTraceGroupCacheMaxSize()).thenReturn(cacheMaxSize);
@@ -267,7 +447,12 @@ class OTelTraceRawProcessorTest {
         processedRecords.addAll(oTelTraceRawProcessor.doExecute(TEST_TWO_TRACE_GROUP_INTERLEAVED_PART_1_RECORDS));
         processedRecords.addAll(oTelTraceRawProcessor.doExecute(TEST_TWO_TRACE_GROUP_INTERLEAVED_PART_2_RECORDS));
 
-        MatcherAssert.assertThat(processedRecords.size(), equalTo(expectedProcessedRecords));
+        // Caffeine cache eviction is not a synchronized action so trying to make an exact match with the
+        // expected record count may not always match depending on when the records are getting evicted.
+        // So changing this assertion from equals to greater than equals to expected record count
+        assertTrue(processedRecords.size() >= leastExpectedProcessedRecordCount,
+                String.format("Processed records of %d should be at least the expected record count of %d",
+                        processedRecords.size(), leastExpectedProcessedRecordCount));
         MatcherAssert.assertThat(getMissingTraceGroupFieldsSpanCount(processedRecords), equalTo(0));
     }
 
@@ -280,6 +465,8 @@ class OTelTraceRawProcessorTest {
         reset(config);
         when(config.getTraceFlushIntervalSeconds()).thenReturn(TEST_TRACE_FLUSH_INTERVAL);
         when(config.getTraceGroupCacheMaxSize()).thenReturn(OtelTraceRawProcessorConfig.MAX_TRACE_ID_CACHE_SIZE);
+        when(config.getGenAiCoverageCacheMaxSize()).thenReturn(OtelTraceRawProcessorConfig.DEFAULT_GENAI_COVERAGE_CACHE_MAX_SIZE);
+        when(config.getGenAiRootPropagation()).thenReturn(GenAiRootPropagation.AI_ROOT);
         when(config.getTraceGroupCacheTimeToLive()).thenReturn(Duration.ofMillis(traceIdTtlMillis));
 
         oTelTraceRawProcessor = new OTelTraceRawProcessor(config, pipelineDescription, pluginMetrics);
@@ -291,6 +478,23 @@ class OTelTraceRawProcessorTest {
 
         MatcherAssert.assertThat(processedRecords.size(), equalTo(expectedProcessedRecords));
         MatcherAssert.assertThat(getMissingTraceGroupFieldsSpanCount(processedRecords), equalTo(0));
+    }
+
+    @Test
+    void testGenAiEnrichmentRunsDuringDoExecute() {
+        // Verifies that GenAI enrichment (normalization + propagation) runs as part of doExecute.
+        // Uses a span with OpenLLMetry vendor attributes (llm.usage.prompt_tokens) and asserts
+        // the normalized gen_ai.* attribute appears on the output span.
+        final Span root = buildSpanFromJsonFile("genai-root-span.json");
+        final Span child = buildSpanFromJsonFile("openllmetry-child-span.json");
+
+        final Collection<Record<Span>> result = oTelTraceRawProcessor.doExecute(
+                Stream.of(root, child).map(Record::new).collect(Collectors.toList()));
+
+        final Span outputRoot = result.stream().map(Record::getData)
+                .filter(s -> s.getParentSpanId() == null || s.getParentSpanId().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(outputRoot.getAttributes().get("gen_ai.usage.input_tokens")).isNotNull();
     }
 
     private static Span buildSpanFromJsonFile(final String jsonFileName) {
@@ -307,6 +511,8 @@ class OTelTraceRawProcessorTest {
             final Long durationInNanos = ((Number) spanMap.get("durationInNanos")).longValue();
             final String startTime = (String) spanMap.get("startTime");
             final String endTime = (String) spanMap.get("endTime");
+            final Map<String, Object> status = (Map<String, Object>) spanMap.get("status");
+            final Map<String, Object> attributes = (Map<String, Object>) spanMap.get("attributes");
             spanBuilder = spanBuilder
                     .withTraceId(traceId)
                     .withSpanId(spanId)
@@ -318,8 +524,14 @@ class OTelTraceRawProcessorTest {
                     .withStartTime(startTime)
                     .withEndTime(endTime)
                     .withTraceGroup(null);
+            if (status != null) {
+                spanBuilder = spanBuilder.withStatus(status);
+            }
+            if (attributes != null) {
+                spanBuilder = spanBuilder.withAttributes(attributes);
+            }
             DefaultTraceGroupFields.Builder traceGroupFieldsBuilder = DefaultTraceGroupFields.builder();
-            if (parentSpanId.isEmpty()) {
+            if (parentSpanId == null || parentSpanId.isEmpty()) {
                 final Integer statusCode = (Integer) ((Map<String, Object>) spanMap.get("traceGroupFields")).get("statusCode");
                 traceGroupFieldsBuilder = traceGroupFieldsBuilder
                         .withStatusCode(statusCode)
@@ -358,4 +570,3 @@ class OTelTraceRawProcessorTest {
         return count;
     }
 }
-

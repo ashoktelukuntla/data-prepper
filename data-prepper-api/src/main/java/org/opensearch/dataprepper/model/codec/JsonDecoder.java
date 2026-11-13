@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.codec;
@@ -17,13 +21,35 @@ import org.opensearch.dataprepper.model.record.Record;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 
 public class JsonDecoder implements ByteDecoder {
-    private final ObjectMapper objectMapper = new ObjectMapper();
-    private final JsonFactory jsonFactory = new JsonFactory();
+    private final ObjectMapper objectMapper;
+    private final JsonFactory jsonFactory;
+    private String keyName;
+    private Collection<String> includeKeys;
+    private Collection<String> includeKeysMetadata;
+
+    public JsonDecoder(String keyName, Collection<String> includeKeys, Collection<String> includeKeysMetadata, Integer maxEventLength) {
+        this.keyName = keyName;
+        this.includeKeys = includeKeys;
+        this.includeKeysMetadata = includeKeysMetadata;
+        this.jsonFactory = maxEventLength != null ?
+                JsonFactories.jsonFactory(maxEventLength) : JsonFactories.defaultJsonFactory();
+        this.objectMapper = new ObjectMapper(jsonFactory);
+    }
+
+    public JsonDecoder() {
+        this.keyName = null;
+        this.includeKeys = null;
+        this.includeKeysMetadata = null;
+        this.jsonFactory = JsonFactories.defaultJsonFactory();
+        this.objectMapper = new ObjectMapper(jsonFactory);
+    }
 
     public void parse(InputStream inputStream, Instant timeReceived, Consumer<Record<Event>> eventConsumer) throws IOException {
         Objects.requireNonNull(inputStream);
@@ -31,18 +57,50 @@ public class JsonDecoder implements ByteDecoder {
 
         final JsonParser jsonParser = jsonFactory.createParser(inputStream);
 
+        Map<String, Object> includeKeysMap = new HashMap<>();
+        Map<String, Object> includeMetadataKeysMap = new HashMap<>();
         while (!jsonParser.isClosed() && jsonParser.nextToken() != JsonToken.END_OBJECT) {
+            final String nodeName = jsonParser.currentName();
+
+            if (includeKeys != null && includeKeys.contains(nodeName) ||
+                    (includeKeysMetadata != null && includeKeysMetadata.contains(nodeName))) {
+                jsonParser.nextToken();
+                if (includeKeys != null && includeKeys.contains(nodeName)) {
+                    includeKeysMap.put(nodeName, jsonParser.getValueAsString());
+                }
+                if (includeKeysMetadata != null && includeKeysMetadata.contains(nodeName)) {
+                    includeMetadataKeysMap.put(nodeName, jsonParser.getValueAsString());
+                }
+                continue;
+            }
+
             if (jsonParser.getCurrentToken() == JsonToken.START_ARRAY) {
-                parseRecordsArray(jsonParser, timeReceived, eventConsumer);
+                if (keyName != null && !keyName.equals(nodeName)) {
+                    continue;
+                }
+                parseRecordsArray(jsonParser, timeReceived, eventConsumer, includeKeysMap, includeMetadataKeysMap);
             }
         }
     }
 
-    private void parseRecordsArray(final JsonParser jsonParser, final Instant timeReceived, final Consumer<Record<Event>> eventConsumer) throws IOException {
+    private void parseRecordsArray(final JsonParser jsonParser,
+                                   final Instant timeReceived,
+                                   final Consumer<Record<Event>> eventConsumer,
+                                   final Map<String, Object> includeKeysMap,
+                                   final Map<String, Object> includeMetadataKeysMap
+    ) throws IOException {
         while (jsonParser.nextToken() != JsonToken.END_ARRAY) {
             final Map<String, Object> innerJson = objectMapper.readValue(jsonParser, Map.class);
 
             final Record<Event> record = createRecord(innerJson, timeReceived);
+            for (final Map.Entry<String, Object> entry : includeKeysMap.entrySet()) {
+                record.getData().put(entry.getKey(), entry.getValue());
+            }
+
+            for (final Map.Entry<String, Object> entry : includeMetadataKeysMap.entrySet()) {
+                record.getData().getMetadata().setAttribute(entry.getKey(), entry.getValue());
+            }
+
             eventConsumer.accept(record);
         }
     }

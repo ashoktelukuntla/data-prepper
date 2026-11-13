@@ -6,6 +6,8 @@
 package org.opensearch.dataprepper.plugins.processor.obfuscation;
 
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
@@ -29,8 +31,6 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
-
 @DataPrepperPlugin(name = "obfuscate", pluginType = Processor.class, pluginConfigurationType = ObfuscationProcessorConfig.class)
 public class ObfuscationProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
 
@@ -42,6 +42,7 @@ public class ObfuscationProcessor extends AbstractProcessor<Record<Event>, Recor
 
     private final String source;
     private final String target;
+    private final boolean singleWordOnly;
 
     private final List<Pattern> patterns;
     private final ObfuscationAction action;
@@ -60,6 +61,7 @@ public class ObfuscationProcessor extends AbstractProcessor<Record<Event>, Recor
         this.patterns = new ArrayList<>();
         this.expressionEvaluator = expressionEvaluator;
         this.obfuscationProcessorConfig = config;
+        this.singleWordOnly = config.getSingleWordOnly();
 
         config.validateObfuscateWhen(expressionEvaluator);
 
@@ -90,11 +92,19 @@ public class ObfuscationProcessor extends AbstractProcessor<Record<Event>, Recor
                         throw new InvalidPluginConfigurationException("Unable to find a predefined pattern for \"" + rawPattern + "\".");
                     }
                 }
+                if (singleWordOnly) {
+                    rawPattern = "\\b" + rawPattern + "\\b";
+                }
                 try {
                     Pattern p = Pattern.compile(rawPattern);
                     patterns.add(p);
                 } catch (Exception e) {
-                    LOG.error(e.getMessage());
+                    LOG.error(NOISY,e.getMessage());
+                    LOG.atError()
+                            .addMarker(EVENT)
+                            .addMarker(NOISY)
+                            .setMessage(e.getMessage())
+                            .log();
                     throw new InvalidPluginConfigurationException("Invalid Pattern: \"" + rawPattern + "\" for source field " + this.source);
                 }
             }
@@ -121,7 +131,7 @@ public class ObfuscationProcessor extends AbstractProcessor<Record<Event>, Recor
                 String rawValue = recordEvent.get(source, String.class);
 
                 // Call obfuscation action
-                String newValue = this.action.obfuscate(rawValue, patterns);
+                String newValue = this.action.obfuscate(rawValue, patterns, record);
 
                 // No changes means it does not match any patterns
                 if (rawValue.equals(newValue)) {

@@ -205,7 +205,11 @@ public class DataFileLoader implements Runnable {
 
                 if (System.currentTimeMillis() - lastCheckpointTime > DEFAULT_CHECKPOINT_INTERVAL_MILLS) {
                     LOG.debug("Perform regular checkpointing for Data File Loader");
-                    checkpointer.checkpoint(lastLineProcessed);
+                    if (acknowledgementSet != null) {
+                        checkpointer.updateDatafileForAcknowledgmentWait(dataFileAcknowledgmentTimeout);
+                    } else {
+                        checkpointer.checkpoint(lastLineProcessed);
+                    }
                     lastCheckpointTime = System.currentTimeMillis();
 
                 }
@@ -216,18 +220,20 @@ public class DataFileLoader implements Runnable {
                 recordConverter.writeToBuffer(acknowledgementSet, lines);
                 checkpointer.checkpoint(lineCount);
             }
+            LOG.info("Completed loading {} lines from s3://{}/{} to buffer", lines.size(), bucketName, key);
 
             lines.clear();
 
-            LOG.info("Completed loading s3://{}/{} to buffer", bucketName, key);
 
             if (acknowledgementSet != null) {
                 checkpointer.updateDatafileForAcknowledgmentWait(dataFileAcknowledgmentTimeout);
                 acknowledgementSet.complete();
             }
         } catch (Exception e) {
+            if (acknowledgementSet != null) {
+                acknowledgementSet.cancel();
+            }
             checkpointer.checkpoint(lineCount);
-
             String errorMessage = String.format("Loading of s3://%s/%s completed with Exception: %s", bucketName, key, e.getMessage());
             throw new RuntimeException(errorMessage);
         }

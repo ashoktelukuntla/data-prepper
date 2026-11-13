@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.sink.opensearch;
@@ -38,18 +42,23 @@ import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.MetricNames;
 import org.opensearch.dataprepper.metrics.MetricsTestUtil;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
+import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.EventType;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
 import org.opensearch.dataprepper.model.opensearch.OpenSearchBulkActions;
+import org.opensearch.dataprepper.model.plugin.PluginConfigObservable;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.sink.SinkContext;
+import org.opensearch.dataprepper.plugins.sink.opensearch.configuration.OpenSearchSinkConfig;
 import org.opensearch.dataprepper.plugins.sink.opensearch.index.AbstractIndexManager;
 import org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration;
 import org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConstants;
 import org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexType;
+import org.opensearch.dataprepper.plugins.sink.opensearch.index.TemplateType;
 
 import javax.ws.rs.HttpMethod;
 import java.io.BufferedReader;
@@ -64,6 +73,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -88,11 +98,15 @@ import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.closeTo;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.ArgumentCaptor;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.createContentParser;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.createOpenSearchClient;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.getHosts;
@@ -100,8 +114,11 @@ import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchInteg
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.waitForClusterStateUpdatesToFinish;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.wipeAllTemplates;
 
-public class OpenSearchSinkIT {
+class OpenSearchSinkIT {
     private static final int LUCENE_CHAR_LENGTH_LIMIT = 32_766;
+    private static final String AUTHENTICATION = "authentication";
+    private static final String USERNAME = "username";
+    private static final String PASSWORD = "password";
     private static final String TEST_STRING_WITH_SPECIAL_CHARS = "Hello! Data-Prepper? #Example123";
     private static final String TEST_STRING_WITH_NON_LATIN_CHARS = "Привет,Γειά σας,こんにちは,你好";
     private static final String PLUGIN_NAME = "opensearch";
@@ -114,16 +131,20 @@ public class OpenSearchSinkIT {
     private static final String TEST_INDEX_TEMPLATE_V2_FILE = "test-composable-index-template-v2.json";
     private static final String DEFAULT_RAW_SPAN_FILE_1 = "raw-span-1.json";
     private static final String DEFAULT_RAW_SPAN_FILE_2 = "raw-span-2.json";
+    private static final String ALTERNATE_RAW_SPAN_FILE_2_ID_AS_DEFAULT_SPAN_1 = "raw-span-2-same-id-as-1.json";
+
     private static final String DEFAULT_SERVICE_MAP_FILE = "service-map-1.json";
     private static final String INCLUDE_TYPE_NAME_FALSE_URI = "?include_type_name=false";
     private static final String TRACE_INGESTION_TEST_DISABLED_REASON = "Trace ingestion is not supported for ES 6";
+    private static final String LOG_INGESTION_TEST_DISABLED_REASON = "Log ingestion is not supported for ES 6";
+    private static final String METRIC_INGESTION_TEST_DISABLED_REASON = "Metric ingestion is not supported for ES 6";
 
     private RestClient client;
     private SinkContext sinkContext;
     private String testTagsTargetKey;
+    private List<OpenSearchSink> sinksToShutdown = new ArrayList<>();
 
-    @Mock
-    private PluginFactory pluginFactory;
+    ObjectMapper objectMapper;
 
     @Mock
     private AwsCredentialsSupplier awsCredentialsSupplier;
@@ -131,53 +152,115 @@ public class OpenSearchSinkIT {
     @Mock
     private ExpressionEvaluator expressionEvaluator;
 
-    public OpenSearchSink createObjectUnderTest(PluginSetting pluginSetting, boolean doInitialize) {
-        OpenSearchSink sink = new OpenSearchSink(pluginSetting, pluginFactory, null, expressionEvaluator, awsCredentialsSupplier);
+    @Mock
+    private PipelineDescription pipelineDescription;
+
+    @Mock
+    private PluginSetting pluginSetting;
+
+    @Mock
+    private PluginConfigObservable pluginConfigObservable;
+
+    @Mock
+    private PluginFactory pluginFactory;
+
+    private OpenSearchSink createObjectUnderTest(OpenSearchSinkConfig openSearchSinkConfig, boolean doInitialize) {
+        sinkContext = mock(SinkContext.class);
+        when(sinkContext.getTagsTargetKey()).thenReturn(null);
+        when(sinkContext.getForwardToPipelines()).thenReturn(Map.of());
+        when(pipelineDescription.getPipelineName()).thenReturn(PIPELINE_NAME);
+        when(pluginSetting.getPipelineName()).thenReturn(PIPELINE_NAME);
+        when(pluginSetting.getName()).thenReturn(PLUGIN_NAME);
+        OpenSearchSink sink = new OpenSearchSink(
+                pluginSetting, sinkContext, expressionEvaluator, awsCredentialsSupplier, pipelineDescription, pluginConfigObservable, pluginFactory, openSearchSinkConfig);
         if (doInitialize) {
             sink.doInitialize();
         }
+        sinksToShutdown.add(sink);
         return sink;
     }
 
-    public OpenSearchSink createObjectUnderTestWithSinkContext(PluginSetting pluginSetting, boolean doInitialize) {
+    private OpenSearchSink createObjectUnderTestWithDlqPipeline(OpenSearchSinkConfig openSearchSinkConfig, HeadlessPipeline dlqPipeline, boolean doInitialize) {
         sinkContext = mock(SinkContext.class);
-        testTagsTargetKey = RandomStringUtils.randomAlphabetic(5);
-        when(sinkContext.getTagsTargetKey()).thenReturn(testTagsTargetKey);
-        OpenSearchSink sink = new OpenSearchSink(pluginSetting, pluginFactory, sinkContext, expressionEvaluator, awsCredentialsSupplier);
+        when(sinkContext.getTagsTargetKey()).thenReturn(null);
+        when(sinkContext.getForwardToPipelines()).thenReturn(Map.of());
+        when(pipelineDescription.getPipelineName()).thenReturn(PIPELINE_NAME);
+        when(pluginSetting.getPipelineName()).thenReturn(PIPELINE_NAME);
+        when(pluginSetting.getName()).thenReturn(PLUGIN_NAME);
+        OpenSearchSink sink = new OpenSearchSink(
+                pluginSetting, sinkContext, expressionEvaluator, awsCredentialsSupplier, pipelineDescription, pluginConfigObservable, pluginFactory, openSearchSinkConfig);
+        sink.setFailurePipeline(dlqPipeline);
         if (doInitialize) {
             sink.doInitialize();
         }
+        sinksToShutdown.add(sink);
+        return sink;
+    }
+
+    private OpenSearchSink createObjectUnderTestWithSinkContext(OpenSearchSinkConfig openSearchSinkConfig, final Map<String, HeadlessPipeline> forwardPipelineMap, boolean doInitialize) {
+        sinkContext = mock(SinkContext.class);
+        testTagsTargetKey = RandomStringUtils.randomAlphabetic(5);
+        when(sinkContext.getTagsTargetKey()).thenReturn(testTagsTargetKey);
+        when(sinkContext.getForwardToPipelines()).thenReturn(forwardPipelineMap);
+        when(pipelineDescription.getPipelineName()).thenReturn(PIPELINE_NAME);
+        when(pluginSetting.getPipelineName()).thenReturn(PIPELINE_NAME);
+        when(pluginSetting.getName()).thenReturn(PLUGIN_NAME);
+        OpenSearchSink sink = new OpenSearchSink(
+                pluginSetting, sinkContext, expressionEvaluator, awsCredentialsSupplier, pipelineDescription, pluginConfigObservable, pluginFactory, openSearchSinkConfig);
+        if (doInitialize) {
+            sink.doInitialize();
+        }
+        sinksToShutdown.add(sink);
         return sink;
     }
 
     @BeforeEach
-    public void setup() {
-
+    void setup() {
+        pluginConfigObservable = mock(PluginConfigObservable.class);
         expressionEvaluator = mock(ExpressionEvaluator.class);
+        pipelineDescription = mock(PipelineDescription.class);
+        pluginSetting = mock(PluginSetting.class);
         when(expressionEvaluator.isValidExpressionStatement(any(String.class))).thenReturn(false);
 
     }
 
     @BeforeEach
-    public void metricsInit() throws IOException {
+    void metricsInit() throws IOException {
         MetricsTestUtil.initMetrics();
 
         client = createOpenSearchClient();
     }
 
     @AfterEach
-    public void cleanOpenSearch() throws Exception {
+    void cleanOpenSearch() throws Exception {
         wipeAllOpenSearchIndices();
         wipeAllTemplates();
         waitForClusterStateUpdatesToFinish();
     }
 
+    @AfterEach
+    void shutdownSinks() {
+        for (final OpenSearchSink sink : sinksToShutdown) {
+            sink.shutdown();
+        }
+        sinksToShutdown.clear();
+    }
+
+    @AfterEach
+    void closeClient() throws IOException {
+        if (client != null) {
+            client.close();
+        }
+    }
+
     @Test
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
-    public void testInstantiateSinkRawSpanDefault() throws IOException {
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkRawSpanDefault() throws IOException {
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         final String indexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_RAW);
+        assertThat(indexAlias, equalTo("otel-v1-apm-span"));
         Request request = new Request(HttpMethod.HEAD, indexAlias);
         Response response = client.performRequest(request);
         assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
@@ -185,7 +268,6 @@ public class OpenSearchSinkIT {
         final Map<String, Object> mappings = getIndexMappings(index);
         assertThat(mappings, notNullValue());
         assertThat((boolean) mappings.get("date_detection"), equalTo(false));
-        sink.shutdown();
 
         if (isOSBundle()) {
             // Check managed index
@@ -202,29 +284,187 @@ public class OpenSearchSinkIT {
         assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
 
         // Instantiate sink again
-        sink = createObjectUnderTest(pluginSetting, true);
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
         // Make sure no new write index *-000001 is created under alias
         final String rolloverIndexName = String.format("%s-000002", indexAlias);
         request = new Request(HttpMethod.GET, rolloverIndexName + "/_alias");
         response = client.performRequest(request);
         assertThat(checkIsWriteIndex(EntityUtils.toString(response.getEntity()), indexAlias, rolloverIndexName), equalTo(true));
-        sink.shutdown();
+
+        if (isOSBundle()) {
+            await().atMost(1, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(getIndexPolicyId(rolloverIndexName), equalTo(IndexConstants.RAW_ISM_POLICY))
+            );
+        }
+    }
+
+    @Test
+    @DisabledIf(value = "isES6", disabledReason = LOG_INGESTION_TEST_DISABLED_REASON)
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkLogsDefaultLogSink() throws IOException {
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.LOG_ANALYTICS.getValue(), null, null);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+        final String indexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.LOG_ANALYTICS);
+        assertThat(indexAlias, equalTo("logs-otel-v1"));
+        Request request = new Request(HttpMethod.HEAD, indexAlias);
+        Response response = client.performRequest(request);
+        assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
+        final String index = String.format("%s-000001", indexAlias);
+        final Map<String, Object> mappings = getIndexMappings(index);
+        assertThat(mappings, notNullValue());
+        assertThat((boolean) mappings.get("date_detection"), equalTo(false));
 
         if (isOSBundle()) {
             // Check managed index
-            assertThat(getIndexPolicyId(rolloverIndexName), equalTo(IndexConstants.RAW_ISM_POLICY));
+            await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
+                        assertThat(getIndexPolicyId(index), equalTo(IndexConstants.LOGS_ISM_POLICY));
+                    }
+            );
+        }
+
+        // roll over initial index
+        request = new Request(HttpMethod.POST, String.format("%s/_rollover", indexAlias));
+        request.setJsonEntity("{ \"conditions\" : { } }\n");
+        response = client.performRequest(request);
+        assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
+
+        // Instantiate sink again
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
+        // Make sure no new write index *-000001 is created under alias
+        final String rolloverIndexName = String.format("%s-000002", indexAlias);
+        request = new Request(HttpMethod.GET, rolloverIndexName + "/_alias");
+        response = client.performRequest(request);
+        assertThat(checkIsWriteIndex(EntityUtils.toString(response.getEntity()), indexAlias, rolloverIndexName), equalTo(true));
+
+        if (isOSBundle()) {
+            // Check managed index
+            await().atMost(1, TimeUnit.SECONDS).untilAsserted(() ->
+                assertThat(getIndexPolicyId(rolloverIndexName), equalTo(IndexConstants.LOGS_ISM_POLICY))
+            );
+        }
+    }
+
+    @Test
+    @DisabledIf(value = "isComposableIndexTemplateNotSupported", disabledReason = "Composable index templates are not supported on this version")
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkLogsPlainWithTemplateTypeUsesIndexType() throws IOException {
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(
+                IndexType.LOG_ANALYTICS_PLAIN.getValue(),
+                null,
+                TemplateType.INDEX_TEMPLATE.getTypeName(),
+                null);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+
+        final String indexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.LOG_ANALYTICS_PLAIN);
+        final String expectedIndexTemplateName = indexAlias + "-index-template";
+
+        // Verify composable index template is created
+        Request getTemplateRequest = new Request(HttpMethod.GET, "/_index_template/" + expectedIndexTemplateName);
+        Response getTemplateResponse = client.performRequest(getTemplateRequest);
+        assertThat(getTemplateResponse.getStatusLine().getStatusCode(), equalTo(SC_OK));
+        String getTemplateResponseBody = EntityUtils.toString(getTemplateResponse.getEntity());
+        @SuppressWarnings("unchecked") final List<Map<String, Map<String, Object>>> indexTemplates =
+                (List<Map<String, Map<String, Object>>>) createContentParser(XContentType.JSON.xContent(), getTemplateResponseBody)
+                        .map().get("index_templates");
+        assertThat(indexTemplates, notNullValue());
+        assertThat(indexTemplates.isEmpty(), equalTo(false));
+        @SuppressWarnings("unchecked") final List<String> indexPatterns =
+                (List<String>) indexTemplates.get(0).get("index_template").get("index_patterns");
+        assertThat(indexPatterns, hasItem(indexAlias + "-*"));
+
+        Request request = new Request(HttpMethod.HEAD, indexAlias);
+        Response response = client.performRequest(request);
+        assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
+
+        final String index = String.format("%s-000001", indexAlias);
+        final Map<String, Object> mappings = getIndexMappings(index);
+        assertThat(mappings, notNullValue());
+        assertThat((boolean) mappings.get("date_detection"), equalTo(false));
+
+        if (isOSBundle()) {
+            await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
+                        assertThat(getIndexPolicyId(index), equalTo(IndexConstants.LOGS_ISM_POLICY));
+                    }
+            );
+        }
+
+        // roll over initial index
+        request = new Request(HttpMethod.POST, String.format("%s/_rollover", indexAlias));
+        request.setJsonEntity("{ \"conditions\" : { } }\n");
+        response = client.performRequest(request);
+        assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
+
+        // Instantiate sink again
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
+        // Make sure no new write index *-000001 is created under alias
+        final String rolloverIndexName = String.format("%s-000002", indexAlias);
+        request = new Request(HttpMethod.GET, rolloverIndexName + "/_alias");
+        response = client.performRequest(request);
+        assertThat(checkIsWriteIndex(EntityUtils.toString(response.getEntity()), indexAlias, rolloverIndexName), equalTo(true));
+
+        if (isOSBundle()) {
+            await().atMost(1, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(getIndexPolicyId(rolloverIndexName), equalTo(IndexConstants.LOGS_ISM_POLICY))
+            );
+        }
+    }
+
+    @Test
+    @DisabledIf(value = "isES6", disabledReason = METRIC_INGESTION_TEST_DISABLED_REASON)
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkMetricsDefaultMetricSink() throws IOException {
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.METRIC_ANALYTICS.getValue(), null, null);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+        final String indexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.METRIC_ANALYTICS);
+        assertThat(indexAlias, equalTo("metrics-otel-v1"));
+        Request request = new Request(HttpMethod.HEAD, indexAlias);
+        Response response = client.performRequest(request);
+        assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
+        final String index = String.format("%s-000001", indexAlias);
+        final Map<String, Object> mappings = getIndexMappings(index);
+        assertThat(mappings, notNullValue());
+        assertThat((boolean) mappings.get("date_detection"), equalTo(false));
+
+        if (isOSBundle()) {
+            // Check managed index
+            await().atMost(1, TimeUnit.SECONDS).untilAsserted(() -> {
+                        assertThat(getIndexPolicyId(index), equalTo(IndexConstants.METRICS_ISM_POLICY));
+                    }
+            );
+        }
+
+        // roll over initial index
+        request = new Request(HttpMethod.POST, String.format("%s/_rollover", indexAlias));
+        request.setJsonEntity("{ \"conditions\" : { } }\n");
+        response = client.performRequest(request);
+        assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
+
+        // Instantiate sink again
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
+        // Make sure no new write index *-000001 is created under alias
+        final String rolloverIndexName = String.format("%s-000002", indexAlias);
+        request = new Request(HttpMethod.GET, rolloverIndexName + "/_alias");
+        response = client.performRequest(request);
+        assertThat(checkIsWriteIndex(EntityUtils.toString(response.getEntity()), indexAlias, rolloverIndexName), equalTo(true));
+
+        if (isOSBundle()) {
+            // Check managed index
+            await().atMost(1, TimeUnit.SECONDS).untilAsserted(() ->
+                assertThat(getIndexPolicyId(rolloverIndexName), equalTo(IndexConstants.METRICS_ISM_POLICY))
+            );
         }
     }
 
     @Test
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
-    public void testInstantiateSinkRawSpanReservedAliasAlreadyUsedAsIndex() throws IOException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkRawSpanReservedAliasAlreadyUsedAsIndex() throws IOException {
 
         final String reservedIndexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_RAW);
         final Request request = new Request(HttpMethod.PUT, reservedIndexAlias);
         client.performRequest(request);
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, false);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, false);
         Assert.assertThrows(String.format(AbstractIndexManager.INDEX_ALIAS_USED_AS_INDEX_ERROR, reservedIndexAlias),
                 RuntimeException.class, () -> sink.doInitialize());
     }
@@ -232,7 +472,8 @@ public class OpenSearchSinkIT {
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
     @ParameterizedTest
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
-    public void testOutputRawSpanDefault(final boolean estimateBulkSizeUsingCompression,
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOutputRawSpanDefault(final boolean estimateBulkSizeUsingCompression,
                                          final boolean isRequestCompressionEnabled) throws IOException, InterruptedException {
         final String testDoc1 = readDocFromFile(DEFAULT_RAW_SPAN_FILE_1);
         final String testDoc2 = readDocFromFile(DEFAULT_RAW_SPAN_FILE_2);
@@ -241,17 +482,16 @@ public class OpenSearchSinkIT {
         @SuppressWarnings("unchecked") final Map<String, Object> expData2 = mapper.readValue(testDoc2, Map.class);
 
         final List<Record<Event>> testRecords = Arrays.asList(jsonStringToRecord(testDoc1), jsonStringToRecord(testDoc2));
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null,
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null,
                 estimateBulkSizeUsingCompression, isRequestCompressionEnabled);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
 
         final String expIndexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_RAW);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(expIndexAlias);
         assertThat(retSources.size(), equalTo(2));
         assertThat(retSources, hasItems(expData1, expData2));
-        assertThat(getDocumentCount(expIndexAlias, "_id", (String) expData1.get("spanId")), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
+        assertThat(getDocumentCount(expIndexAlias, "_id", (String) expData1.get("traceId") + "/" + (String) expData1.get("spanId")), equalTo(Integer.valueOf(1)));
 
         // Verify metrics
         final List<Measurement> bulkRequestErrors = MetricsTestUtil.getMeasurementList(
@@ -293,7 +533,7 @@ public class OpenSearchSinkIT {
                         .add(OpenSearchSink.BULKREQUEST_SIZE_BYTES).toString());
         assertThat(bulkRequestSizeBytesMetrics.size(), equalTo(3));
         assertThat(bulkRequestSizeBytesMetrics.get(0).getValue(), closeTo(1.0, 0));
-        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 773.0 : 2058.0;
+        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 830.0 : 2058.0;
         assertThat(bulkRequestSizeBytesMetrics.get(1).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
         assertThat(bulkRequestSizeBytesMetrics.get(2).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
     }
@@ -301,7 +541,30 @@ public class OpenSearchSinkIT {
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
     @ParameterizedTest
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
-    public void testOutputRawSpanWithDLQ(final boolean estimateBulkSizeUsingCompression,
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOutputRawSpanWithEqualId(final boolean estimateBulkSizeUsingCompression,
+                                         final boolean isRequestCompressionEnabled) throws IOException, InterruptedException {
+        final String testDoc1 = readDocFromFile(DEFAULT_RAW_SPAN_FILE_1);
+        final String testDoc2 = readDocFromFile(ALTERNATE_RAW_SPAN_FILE_2_ID_AS_DEFAULT_SPAN_1);
+        final ObjectMapper mapper = new ObjectMapper();
+
+        final List<Record<Event>> testRecords = Arrays.asList(jsonStringToRecord(testDoc1), jsonStringToRecord(testDoc2));
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null,
+                                                                                       estimateBulkSizeUsingCompression, isRequestCompressionEnabled);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+        sink.output(testRecords);
+
+        final String expIndexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_RAW);
+        final List<Map<String, Object>> retSources = getSearchResponseDocSources(expIndexAlias);
+        assertThat("Spans should not overwrite each other",retSources.size(), equalTo(2));
+    }
+
+
+    @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void testOutputRawSpanWithDLQ(final boolean estimateBulkSizeUsingCompression,
                                          final boolean isRequestCompressionEnabled) throws IOException, InterruptedException {
         // TODO: write test case
         final String testDoc1 = readDocFromFile("raw-span-error.json");
@@ -310,17 +573,19 @@ public class OpenSearchSinkIT {
         @SuppressWarnings("unchecked") final Map<String, Object> expData = mapper.readValue(testDoc2, Map.class);
 
         final List<Record<Event>> testRecords = Arrays.asList(jsonStringToRecord(testDoc1), jsonStringToRecord(testDoc2));
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null,
+        Map<String, Object> metadata = initializeConfigurationMetadata(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null,
                 estimateBulkSizeUsingCompression, isRequestCompressionEnabled);
         // generate temporary directory for dlq file
         final File tempDirectory = Files.createTempDirectory("").toFile();
         // add dlq file path into setting
         final String expDLQFile = tempDirectory.getAbsolutePath() + "/test-dlq.txt";
-        pluginSetting.getSettings().put(RetryConfiguration.DLQ_FILE, expDLQFile);
+        metadata.put(RetryConfiguration.DLQ_FILE, expDLQFile);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
 
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
-        sink.shutdown();
+        sink.shutdown();  // We must shut this down to flush the DLQ.
+        sinksToShutdown.remove(sink);
 
         final StringBuilder dlqContent = new StringBuilder();
         Files.lines(Paths.get(expDLQFile)).forEach(dlqContent::append);
@@ -354,7 +619,7 @@ public class OpenSearchSinkIT {
                         .add(OpenSearchSink.BULKREQUEST_SIZE_BYTES).toString());
         assertThat(bulkRequestSizeBytesMetrics.size(), equalTo(3));
         assertThat(bulkRequestSizeBytesMetrics.get(0).getValue(), closeTo(1.0, 0));
-        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 1066.0 : 2072.0;
+        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 1114.0 : 2072.0;
         assertThat(bulkRequestSizeBytesMetrics.get(1).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
         assertThat(bulkRequestSizeBytesMetrics.get(2).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
 
@@ -362,9 +627,10 @@ public class OpenSearchSinkIT {
 
     @Test
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
-    public void testInstantiateSinkServiceMapDefault() throws IOException {
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_SERVICE_MAP.getValue(), null, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkServiceMapDefault() throws IOException {
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_SERVICE_MAP.getValue(), null, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         final String indexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_SERVICE_MAP);
         final Request request = new Request(HttpMethod.HEAD, indexAlias);
         final Response response = client.performRequest(request);
@@ -372,7 +638,6 @@ public class OpenSearchSinkIT {
         final Map<String, Object> mappings = getIndexMappings(indexAlias);
         assertThat(mappings, notNullValue());
         assertThat((boolean) mappings.get("date_detection"), equalTo(false));
-        sink.shutdown();
 
         if (isOSBundle()) {
             // Check managed index
@@ -382,23 +647,23 @@ public class OpenSearchSinkIT {
 
     @ParameterizedTest
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
-    public void testOutputServiceMapDefault(final boolean estimateBulkSizeUsingCompression,
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOutputServiceMapDefault(final boolean estimateBulkSizeUsingCompression,
                                             final boolean isRequestCompressionEnabled) throws IOException, InterruptedException {
         final String testDoc = readDocFromFile(DEFAULT_SERVICE_MAP_FILE);
         final ObjectMapper mapper = new ObjectMapper();
         @SuppressWarnings("unchecked") final Map<String, Object> expData = mapper.readValue(testDoc, Map.class);
 
         final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(testDoc));
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_SERVICE_MAP.getValue(), null, null,
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_SERVICE_MAP.getValue(), null, null,
                 estimateBulkSizeUsingCompression, isRequestCompressionEnabled);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final String expIndexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_SERVICE_MAP);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(expIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources.get(0), equalTo(expData));
         assertThat(getDocumentCount(expIndexAlias, "_id", (String) expData.get("hashId")), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -416,38 +681,37 @@ public class OpenSearchSinkIT {
                         .add(OpenSearchSink.BULKREQUEST_SIZE_BYTES).toString());
         assertThat(bulkRequestSizeBytesMetrics.size(), equalTo(3));
         assertThat(bulkRequestSizeBytesMetrics.get(0).getValue(), closeTo(1.0, 0));
-        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 366.0 : 265.0;
+        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 410.0 : 265.0;
         assertThat(bulkRequestSizeBytesMetrics.get(1).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
         assertThat(bulkRequestSizeBytesMetrics.get(2).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
 
         // Check restart for index already exists
-        sink = createObjectUnderTest(pluginSetting, true);
-        sink.shutdown();
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
     }
 
     @Test
-    public void testInstantiateSinkCustomIndex_NoRollOver() throws IOException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkCustomIndex_NoRollOver() throws IOException {
         final String testIndexAlias = "test-alias";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, testTemplateFile);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         final String extraURI = DeclaredOpenSearchVersion.OPENDISTRO_0_10.compareTo(
                 OpenSearchIntegrationHelper.getVersion()) >= 0 ? INCLUDE_TYPE_NAME_FALSE_URI : "";
         final Request request = new Request(HttpMethod.HEAD, testIndexAlias + extraURI);
         final Response response = client.performRequest(request);
         assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
-        sink.shutdown();
 
         // Check restart for index already exists
-        sink = createObjectUnderTest(pluginSetting, true);
-        sink.shutdown();
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
     }
 
     @ParameterizedTest
     @ArgumentsSource(CreateSingleWithTemplatesArgumentsProvider.class)
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
-    public void testInstantiateSinkCustomIndex_WithIsmPolicy(
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkCustomIndex_WithIsmPolicy(
             final String templateType,
             final String templateFile) throws IOException {
         final String indexAlias = "sink-custom-index-ism-test-alias";
@@ -456,9 +720,9 @@ public class OpenSearchSinkIT {
         final Map<String, Object> metadata = initializeConfigurationMetadata(null, indexAlias, testTemplateFile);
         metadata.put(IndexConfiguration.ISM_POLICY_FILE, TEST_CUSTOM_INDEX_POLICY_FILE);
         metadata.put(IndexConfiguration.TEMPLATE_TYPE, templateType);
-        final PluginSetting pluginSetting = generatePluginSettingByMetadata(metadata);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
 
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         final String extraURI = DeclaredOpenSearchVersion.OPENDISTRO_0_10.compareTo(
                 OpenSearchIntegrationHelper.getVersion()) >= 0 ? INCLUDE_TYPE_NAME_FALSE_URI : "";
         Request request = new Request(HttpMethod.HEAD, indexAlias + extraURI);
@@ -469,7 +733,6 @@ public class OpenSearchSinkIT {
         assertThat(mappings, notNullValue());
         assertThat((boolean) mappings.get("date_detection"), equalTo(false));
 
-        sink.shutdown();
 
         JsonNode settings = getIndexSettings(index);
 
@@ -489,7 +752,7 @@ public class OpenSearchSinkIT {
         final String expectedIndexPolicyName = indexAlias + "-policy";
         if (isOSBundle()) {
             // Check managed index
-            await().atMost(1, TimeUnit.SECONDS).untilAsserted(() -> {
+            await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
                         assertThat(getIndexPolicyId(index), equalTo(expectedIndexPolicyName));
                     }
             );
@@ -502,23 +765,25 @@ public class OpenSearchSinkIT {
         assertThat(response.getStatusLine().getStatusCode(), equalTo(SC_OK));
 
         // Instantiate sink again
-        sink = createObjectUnderTest(pluginSetting, true);
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
         // Make sure no new write index *-000001 is created under alias
         final String rolloverIndexName = String.format("%s-000002", indexAlias);
         request = new Request(HttpMethod.GET, rolloverIndexName + "/_alias");
         response = client.performRequest(request);
         assertThat(checkIsWriteIndex(EntityUtils.toString(response.getEntity()), indexAlias, rolloverIndexName), equalTo(true));
-        sink.shutdown();
 
         if (isOSBundle()) {
             // Check managed index
-            assertThat(getIndexPolicyId(rolloverIndexName), equalTo(expectedIndexPolicyName));
+            await().atMost(2, TimeUnit.SECONDS).untilAsserted(() ->
+                assertThat(getIndexPolicyId(rolloverIndexName), equalTo(expectedIndexPolicyName))
+            );
         }
     }
 
     @ParameterizedTest
     @ArgumentsSource(CreateWithTemplatesArgumentsProvider.class)
-    public void testInstantiateSinkDoesNotOverwriteNewerIndexTemplates(
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testInstantiateSinkDoesNotOverwriteNewerIndexTemplates(
             final String templateType,
             final String templatePath,
             final String v1File,
@@ -530,8 +795,8 @@ public class OpenSearchSinkIT {
         final String testTemplateFileV2 = getClass().getClassLoader().getResource(v2File).getFile();
 
         // Create sink with template version 1
-        PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, templateType, testTemplateFileV1);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, templateType, testTemplateFileV1);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
 
         final String extraURI = DeclaredOpenSearchVersion.OPENDISTRO_0_10.compareTo(
                 OpenSearchIntegrationHelper.getVersion()) >= 0 ? INCLUDE_TYPE_NAME_FALSE_URI : "";
@@ -546,11 +811,10 @@ public class OpenSearchSinkIT {
                         responseBody).map(), expectedIndexTemplateName);
 
         assertThat(firstResponseVersion, equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // Create sink with template version 2
-        pluginSetting = generatePluginSetting(null, testIndexAlias, templateType, testTemplateFileV2);
-        sink = createObjectUnderTest(pluginSetting, true);
+        openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, templateType, testTemplateFileV2);
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
 
         getTemplateRequest = new Request(HttpMethod.GET,
                 "/" + templatePath + "/" + expectedIndexTemplateName + extraURI);
@@ -563,11 +827,10 @@ public class OpenSearchSinkIT {
                         responseBody).map(), expectedIndexTemplateName);
 
         assertThat(secondResponseVersion, equalTo(Integer.valueOf(2)));
-        sink.shutdown();
 
         // Create sink with template version 1 again
-        pluginSetting = generatePluginSetting(null, testIndexAlias, templateType, testTemplateFileV1);
-        sink = createObjectUnderTest(pluginSetting, true);
+        openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, templateType, testTemplateFileV1);
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
 
         getTemplateRequest = new Request(HttpMethod.GET,
                 "/" + templatePath + "/" + expectedIndexTemplateName + extraURI);
@@ -581,13 +844,13 @@ public class OpenSearchSinkIT {
 
         // Assert version 2 was not overwritten by version 1
         assertThat(thirdResponseVersion, equalTo(Integer.valueOf(2)));
-        sink.shutdown();
 
     }
 
     @ParameterizedTest
     @ArgumentsSource(CreateWithIndexTemplateArgumentsProvider.class)
-    public void testIndexNameWithDateNotAsSuffixCreatesIndexTemplate(
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testIndexNameWithDateNotAsSuffixCreatesIndexTemplate(
             final String templateType,
             final String templatePath,
             final String templateFile,
@@ -599,8 +862,8 @@ public class OpenSearchSinkIT {
         final String expectedIndexTemplateName = "prefix-suffix-index-template";
         final String testTemplateFileV1 = getClass().getClassLoader().getResource(templateFile).getFile();
 
-        PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, templateType, testTemplateFileV1);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, templateType, testTemplateFileV1);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
 
         final String extraURI = DeclaredOpenSearchVersion.OPENDISTRO_0_10.compareTo(
                 OpenSearchIntegrationHelper.getVersion()) >= 0 ? INCLUDE_TYPE_NAME_FALSE_URI : "";
@@ -633,7 +896,6 @@ public class OpenSearchSinkIT {
         // assert the mappings from index template are applied to the index
         assertThat(mappingsBlob, equalTo(templateMappings));
 
-        sink.shutdown();
     }
 
     static class CreateWithTemplatesArgumentsProvider implements ArgumentsProvider {
@@ -704,21 +966,93 @@ public class OpenSearchSinkIT {
     }
 
     @Test
-    public void testOutputCustomIndex() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOutputForwardsCreatedDocumentsToAPipeline() throws IOException, InterruptedException {
+        HeadlessPipeline forwardPipeline1 = mock(HeadlessPipeline.class);
+        Map<String, HeadlessPipeline> forwardPipelineMap = Map.of("fwd_pipeline1", forwardPipeline1);
         final String testIndexAlias = "test-alias";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
         final String testIdField = "someId";
         final String testId = "foo";
         final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTestWithSinkContext(openSearchSinkConfig, forwardPipelineMap, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
+
+        // verify metrics
+        final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
+                new StringJoiner(MetricNames.DELIMITER).add(PIPELINE_NAME).add(PLUGIN_NAME)
+                        .add(OpenSearchSink.BULKREQUEST_LATENCY).toString());
+        assertThat(bulkRequestLatencies.size(), equalTo(3));
+        // COUNT
+        Assert.assertEquals(1.0, bulkRequestLatencies.get(0).getValue(), 0);
+        verify(sinkContext).forwardRecords(any(), eq(null), eq(null));
+    }
+
+    @Test
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOutputFailedDocumentsToDLQPipeline() throws IOException, InterruptedException {
+        HeadlessPipeline dlqPipeline = mock(HeadlessPipeline.class);
+        final String testIndexAlias = "test-alias";
+        final String testTemplateFile = Objects.requireNonNull(
+                getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
+        final String testIdField = "someId";
+        final String testId = "foo";
+        final String testId2 = "foo2";
+        final Record<Event> testRecord1 = new Record(JacksonEvent.builder()
+                    .withEventType(EventType.TRACE.toString())
+                    .withData(Map.of(testIdField, testId, "name", "value")).build());
+        final Record<Event> testRecord2 = new Record(JacksonEvent.builder()
+                    .withEventType(EventType.TRACE.toString())
+                    .withData(Map.of(testIdField, testId, "name", Map.of("key", "value"))).build());
+        //List<Record<Event>> testRecords = Arrays.asList(testRecord1, testRecord2);
+        List<Record<Event>> testRecords = Collections.singletonList(testRecord1);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTestWithDlqPipeline(openSearchSinkConfig, dlqPipeline, true);
+        sink.output(testRecords);
+        final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
+        assertThat(retSources.size(), equalTo(1));
+        assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
+
+        // verify metrics
+        final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
+                new StringJoiner(MetricNames.DELIMITER).add(PIPELINE_NAME).add(PLUGIN_NAME)
+                        .add(OpenSearchSink.BULKREQUEST_LATENCY).toString());
+        assertThat(bulkRequestLatencies.size(), equalTo(3));
+        // COUNT
+        Assert.assertEquals(1.0, bulkRequestLatencies.get(0).getValue(), 0);
+        testRecords = Collections.singletonList(testRecord2);
+        sink.output(testRecords);
+        ArgumentCaptor<Collection<Record<Event>>> captor = ArgumentCaptor.forClass(Collection.class);
+        verify(dlqPipeline).sendEvents(captor.capture());
+        assertThat(captor.getValue().size(), equalTo(1));
+    }
+
+    @Test
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOutputCustomIndex() throws IOException, InterruptedException {
+        final String testIndexAlias = "test-alias";
+        final String testTemplateFile = Objects.requireNonNull(
+                getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
+        final String testIdField = "someId";
+        final String testId = "foo";
+        final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+        sink.output(testRecords);
+        final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
+        assertThat(retSources.size(), equalTo(1));
+        assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -730,22 +1064,23 @@ public class OpenSearchSinkIT {
     }
 
     @Test
-    public void testOpenSearchBulkActionsCreate() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchBulkActionsCreate() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
         final String testIdField = "someId";
         final String testId = "foo";
         final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTION, OpenSearchBulkActions.CREATE.toString());
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        metadata.put(IndexConfiguration.ACTION, OpenSearchBulkActions.CREATE.toString());
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -757,28 +1092,25 @@ public class OpenSearchSinkIT {
     }
 
     @Test
-    public void testOpenSearchBulkActionsCreateWithExpression() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchBulkActionsCreateWithExpression() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
         final String testIdField = "someId";
         final String testId = "foo";
         final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         Event event = (Event) testRecords.get(0).getData();
         event.getMetadata().setAttribute("action", "create");
-        final String actionFormatExpression = "${getMetadata(\"action\")}";
-        when(expressionEvaluator.isValidFormatExpression(actionFormatExpression)).thenReturn(true);
-        when(expressionEvaluator.isValidExpressionStatement("getMetadata(\"action\")")).thenReturn(true);
-        when(expressionEvaluator.evaluate("getMetadata(\"action\")", event)).thenReturn(event.getMetadata().getAttribute("action"));
-        pluginSetting.getSettings().put(IndexConfiguration.ACTION, actionFormatExpression);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTION, "create");
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -790,32 +1122,24 @@ public class OpenSearchSinkIT {
     }
 
     @Test
-    public void testOpenSearchBulkActionsCreateWithInvalidExpression() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchBulkActionsCreateWithInvalidExpression() throws IOException {
         final String testIndexAlias = "test-alias";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
         final String testIdField = "someId";
         final String testId = "foo";
         final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
-        Event event = (Event) testRecords.get(0).getData();
-        event.getMetadata().setAttribute("action", "unknown");
-        final String actionFormatExpression = "${getMetadata(\"action\")}";
-        when(expressionEvaluator.isValidFormatExpression(actionFormatExpression)).thenReturn(true);
-        when(expressionEvaluator.isValidExpressionStatement("getMetadata(\"action\")")).thenReturn(true);
-        when(expressionEvaluator.evaluate("getMetadata(\"action\")", event)).thenReturn(event.getMetadata().getAttribute("action"));
-        pluginSetting.getSettings().put(IndexConfiguration.ACTION, actionFormatExpression);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
-        sink.output(testRecords);
-        final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
-        assertThat(retSources.size(), equalTo(0));
-        assertThat(sink.getInvalidActionErrorsCount(), equalTo(1.0));
-        sink.shutdown();
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        metadata.put(IndexConfiguration.ACTION, "unknown");
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        assertThrows(IllegalArgumentException.class, () -> createObjectUnderTest(openSearchSinkConfig, true));
     }
 
     @Test
-    public void testBulkActionCreateWithActions() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testBulkActionCreateWithActions() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_V1_FILE)).getFile();
@@ -823,19 +1147,19 @@ public class OpenSearchSinkIT {
         final String testId = "foo";
         final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         List<Map<String, Object>> aList = new ArrayList<>();
         Map<String, Object> aMap = new HashMap<>();
         aMap.put("type", OpenSearchBulkActions.CREATE.toString());
         aList.add(aMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -847,7 +1171,8 @@ public class OpenSearchSinkIT {
     }
 
     @Test
-    public void testBulkActionUpdateWithActions() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testBulkActionUpdateWithActions() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias-upd1";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
@@ -856,19 +1181,19 @@ public class OpenSearchSinkIT {
         final String testId = "foo";
         List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson2(testIdField, testId, "name", "value1")));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         List<Map<String, Object>> aList = new ArrayList<>();
         Map<String, Object> aMap = new HashMap<>();
         aMap.put("type", OpenSearchBulkActions.CREATE.toString());
         aList.add(aMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -882,8 +1207,9 @@ public class OpenSearchSinkIT {
         aMap = new HashMap<>();
         aMap.put("type", OpenSearchBulkActions.UPDATE.toString());
         aList.add(aMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         retSources = getSearchResponseDocSources(testIndexAlias);
 
@@ -891,11 +1217,11 @@ public class OpenSearchSinkIT {
         Map<String, Object> source = retSources.get(0);
         assertThat((String) source.get("name"), equalTo("value2"));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
     }
 
     @Test
-    public void testBulkActionUpdateWithDocumentRootKey() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testBulkActionUpdateWithDocumentRootKey() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias-update";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
@@ -912,25 +1238,25 @@ public class OpenSearchSinkIT {
 
         List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(createJsonEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
 
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ROOT_KEY, documentRootKey);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        metadata.put(IndexConfiguration.DOCUMENT_ROOT_KEY, documentRootKey);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         List<Map<String, Object>> aList = new ArrayList<>();
         Map<String, Object> actionMap = new HashMap<>();
         actionMap.put("type", OpenSearchBulkActions.CREATE.toString());
 
 
         aList.add(actionMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources.get(0).containsKey(documentRootKey), equalTo(false));
         assertThat((String) retSources.get(0).get("value"), equalTo(originalValue));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -947,8 +1273,9 @@ public class OpenSearchSinkIT {
         actionMap = new HashMap<>();
         actionMap.put("type", OpenSearchBulkActions.UPDATE.toString());
         aList.add(actionMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         retSources = getSearchResponseDocSources(testIndexAlias);
 
@@ -957,11 +1284,11 @@ public class OpenSearchSinkIT {
         assertThat(source.containsKey(documentRootKey), equalTo(false));
         assertThat((String) source.get("value"), equalTo(updatedValue));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
     }
 
     @Test
-    public void testBulkActionUpsertWithActionsAndNoCreate() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testBulkActionUpsertWithActionsAndNoCreate() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias-upsert-no-create2";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
@@ -975,10 +1302,11 @@ public class OpenSearchSinkIT {
         actionMap.put("type", OpenSearchBulkActions.UPSERT.toString());
         aList.add(actionMap);
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField); 
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
 
         sink.output(testRecords);
         List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
@@ -988,11 +1316,11 @@ public class OpenSearchSinkIT {
         assertThat((String) source.get("key"), equalTo("value"));
         assertThat((String) source.get(testIdField), equalTo(testId));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
     }
 
     @Test
-    public void testBulkActionUpsertWithActions() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testBulkActionUpsertWithActions() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias-upsert";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
@@ -1001,19 +1329,20 @@ public class OpenSearchSinkIT {
         final String testId = "foo";
         List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson2(testIdField, testId, "name", "value1")));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         List<Map<String, Object>> aList = new ArrayList<>();
         Map<String, Object> aMap = new HashMap<>();
         aMap.put("type", OpenSearchBulkActions.CREATE.toString());
         aList.add(aMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -1027,8 +1356,9 @@ public class OpenSearchSinkIT {
         aMap = new HashMap<>();
         aMap.put("type", OpenSearchBulkActions.UPSERT.toString());
         aList.add(aMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         retSources = getSearchResponseDocSources(testIndexAlias);
 
@@ -1037,11 +1367,11 @@ public class OpenSearchSinkIT {
         assertThat((String) source.get("name"), equalTo("value3"));
         assertThat((String) source.get("newKey"), equalTo("newValue"));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
     }
 
     @Test
-    public void testBulkActionUpsertWithoutCreate() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testBulkActionUpsertWithoutCreate() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias-upd2";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
@@ -1049,14 +1379,15 @@ public class OpenSearchSinkIT {
         final String testIdField = "someId";
         final String testId = "foo";
         List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson3(testIdField, testId, "name", "value1", "newKey", "newValue")));
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         List<Map<String, Object>> aList = new ArrayList<>();
         Map<String, Object> aMap = new HashMap<>();
         aMap.put("type", OpenSearchBulkActions.UPSERT.toString());
         aList.add(aMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
 
@@ -1065,7 +1396,6 @@ public class OpenSearchSinkIT {
         assertThat((String) source.get("name"), equalTo("value1"));
         assertThat((String) source.get("newKey"), equalTo("newValue"));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
                 new StringJoiner(MetricNames.DELIMITER).add(PIPELINE_NAME).add(PLUGIN_NAME)
@@ -1076,7 +1406,8 @@ public class OpenSearchSinkIT {
     }
 
     @Test
-    public void testBulkActionDeleteWithActions() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testBulkActionDeleteWithActions() throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias-upd1";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
@@ -1085,23 +1416,24 @@ public class OpenSearchSinkIT {
         final String testId = "foo";
         List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, testTemplateFile);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         List<Map<String, Object>> aList = new ArrayList<>();
         Map<String, Object> aMap = new HashMap<>();
         aMap.put("type", OpenSearchBulkActions.DELETE.toString());
         aList.add(aMap);
-        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        metadata.put(IndexConfiguration.ACTIONS, aList);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(0));
-        sink.shutdown();
     }
 
     @Test
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
-    public void testEventOutputWithTags() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testEventOutputWithTags() throws IOException, InterruptedException {
         final Event testEvent = JacksonEvent.builder()
                 .withData("{\"log\": \"foobar\"}")
                 .withEventType("event")
@@ -1111,8 +1443,8 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
-        final OpenSearchSink sink = createObjectUnderTestWithSinkContext(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
+        final OpenSearchSink sink = createObjectUnderTestWithSinkContext(openSearchSinkConfig, Map.of(), true);
         sink.output(testRecords);
 
         final String expIndexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_RAW);
@@ -1124,12 +1456,12 @@ public class OpenSearchSinkIT {
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources.containsAll(Arrays.asList(expectedContent)), equalTo(true));
         assertThat(getDocumentCount(expIndexAlias, "log", "foobar"), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
     }
 
     @Test
     @DisabledIf(value = "isES6", disabledReason = TRACE_INGESTION_TEST_DISABLED_REASON)
-    public void testEventOutput() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testEventOutput() throws IOException, InterruptedException {
         final String spanId = UUID.randomUUID().toString();
         final Event testEvent = JacksonEvent.builder()
                 .withData("{\"log\": \"foobar\", \"spanId\": \""+spanId+"\"}")
@@ -1138,8 +1470,9 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+        verify(pluginConfigObservable).addPluginConfigObserver(any());
         sink.output(testRecords);
 
         final String expIndexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_RAW);
@@ -1151,12 +1484,12 @@ public class OpenSearchSinkIT {
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources.containsAll(Arrays.asList(expectedContent)), equalTo(true));
         assertThat(getDocumentCount(expIndexAlias, "log", "foobar"), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @MethodSource("getAttributeTestSpecialAndExtremeValues")
-    public void testEventOutputWithSpecialAndExtremeValues(final Object testValue) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testEventOutputWithSpecialAndExtremeValues(final Object testValue) throws IOException, InterruptedException {
         final String testIndexAlias = "test-alias";
         final String testField = "value";
         final Map<String, Object> data = new HashMap<>();
@@ -1168,8 +1501,8 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
 
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
@@ -1178,12 +1511,12 @@ public class OpenSearchSinkIT {
 
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources.get(0), equalTo(expectedContent));
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"info/ids/id", "id"})
-    public void testOpenSearchDocumentId(final String testDocumentIdField) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchDocumentId(final String testDocumentIdField) throws IOException, InterruptedException {
         final String expectedId = UUID.randomUUID().toString();
         final String testIndexAlias = "test_index";
         final Event testEvent = JacksonEvent.builder()
@@ -1194,21 +1527,22 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
-        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testDocumentIdField);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, null);
+        metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testDocumentIdField);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
 
         final List<String> docIds = getSearchResponseDocIds(testIndexAlias);
         for (String docId : docIds) {
             assertThat(docId, equalTo(expectedId));
         }
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"info/ids/rid", "rid"})
-    public void testOpenSearchRoutingField(final String testRoutingField) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchRoutingField(final String testRoutingField) throws IOException, InterruptedException {
         final String expectedRoutingField = UUID.randomUUID().toString();
         final String testIndexAlias = "test_index";
         final Event testEvent = JacksonEvent.builder()
@@ -1219,21 +1553,22 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
-        pluginSetting.getSettings().put(IndexConfiguration.ROUTING_FIELD, testRoutingField);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, null);
+        metadata.put(IndexConfiguration.ROUTING_FIELD, testRoutingField);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
 
         final List<String> routingFields = getSearchResponseRoutingFields(testIndexAlias);
         for (String routingField : routingFields) {
             assertThat(routingField, equalTo(expectedRoutingField));
         }
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"", "info/ids/rid", "rid"})
-    public void testOpenSearchRouting(final String testRouting) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchRouting(final String testRouting) throws IOException, InterruptedException {
         final String expectedRouting = UUID.randomUUID().toString();
         final String testIndexAlias = "test_index";
         final Event testEvent = JacksonEvent.builder()
@@ -1246,11 +1581,12 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, null);
         if (!testRouting.isEmpty()) {
-            pluginSetting.getSettings().put(IndexConfiguration.ROUTING, "${"+testRouting+"}");
+            metadata.put(IndexConfiguration.ROUTING, "${"+testRouting+"}");
         }
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
 
         final List<String> routingFields = getSearchResponseRoutingFields(testIndexAlias);
@@ -1261,12 +1597,12 @@ public class OpenSearchSinkIT {
                 assertTrue(Objects.isNull(routingField));
             }
         }
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"info/ids/rid", "rid"})
-    public void testOpenSearchRoutingWithExpressions(final String testRouting) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchRoutingWithExpressions(final String testRouting) throws IOException, InterruptedException {
         final String expectedRouting = UUID.randomUUID().toString();
         final String testIndexAlias = "test_index";
         final Event testEvent = JacksonEvent.builder()
@@ -1277,22 +1613,23 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
-        pluginSetting.getSettings().put(IndexConfiguration.ROUTING, "${/"+testRouting+"}");
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, null);
+        metadata.put(IndexConfiguration.ROUTING, "${/"+testRouting+"}");
         when(expressionEvaluator.isValidFormatExpression(any(String.class))).thenReturn(true);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
 
         final List<String> routingFields = getSearchResponseRoutingFields(testIndexAlias);
         for (String routingField : routingFields) {
             assertThat(routingField, equalTo(expectedRouting));
         }
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"info/ids/rid", "rid"})
-    public void testOpenSearchRoutingWithMixedExpressions(final String testRouting) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchRoutingWithMixedExpressions(final String testRouting) throws IOException, InterruptedException {
         final String routing = UUID.randomUUID().toString();
         final String testIndexAlias = "test_index";
         final Event testEvent = JacksonEvent.builder()
@@ -1305,10 +1642,11 @@ public class OpenSearchSinkIT {
 
         final String prefix = RandomStringUtils.randomAlphabetic(5);
         final String suffix = RandomStringUtils.randomAlphabetic(6);
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
-        pluginSetting.getSettings().put(IndexConfiguration.ROUTING, prefix+"-${/"+testRouting+"}-"+suffix);
+        Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, null);
+        metadata.put(IndexConfiguration.ROUTING, prefix+"-${/"+testRouting+"}-"+suffix);
         when(expressionEvaluator.isValidFormatExpression(any(String.class))).thenReturn(true);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final String expectedRouting = prefix+"-"+routing+"-"+suffix;
 
@@ -1316,12 +1654,12 @@ public class OpenSearchSinkIT {
         for (String field : routingFields) {
             assertThat(field, equalTo(expectedRouting));
         }
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"info/ids/id", "id"})
-    public void testOpenSearchDynamicIndex(final String testIndex) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchDynamicIndex(final String testIndex) throws IOException, InterruptedException {
         final String dynamicTestIndexAlias = "test-${" + testIndex + "}-index";
         final String testIndexName = "idx1";
         final String testIndexAlias = "test-" + testIndexName + "-index";
@@ -1337,13 +1675,12 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, dynamicTestIndexAlias, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, dynamicTestIndexAlias, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources, hasItem(expectedMap));
-        sink.shutdown();
     }
 
     @ParameterizedTest
@@ -1351,7 +1688,8 @@ public class OpenSearchSinkIT {
             "info/ids/id, yyyy-MM",
             "id, yyyy-MM-dd",
     })
-    public void testOpenSearchDynamicIndexWithDate(final String testIndex, final String testDatePattern) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchDynamicIndexWithDate(final String testIndex, final String testDatePattern) throws IOException, InterruptedException {
         final String dynamicTestIndexAlias = "test-${" + testIndex + "}-index-%{" + testDatePattern + "}";
         final String testIndexName = "idx1";
         SimpleDateFormat formatter = new SimpleDateFormat(testDatePattern);
@@ -1370,13 +1708,12 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, dynamicTestIndexAlias, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, dynamicTestIndexAlias, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(expectedIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources, hasItem(expectedMap));
-        sink.shutdown();
     }
 
     @ParameterizedTest
@@ -1385,7 +1722,8 @@ public class OpenSearchSinkIT {
             "id, yyyy-MM-dd, test-%{yyyy-MM-dd}-${id}-index",
             "id, yyyy-MM-dd, test-${id}-%{yyyy-MM-dd}-index",
     })
-    public void testOpenSearchDynamicIndexWithDateNotAsSuffix(
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchDynamicIndexWithDateNotAsSuffix(
             final String testIndex, final String testDatePattern, final String dynamicTestIndexAlias) throws IOException {
         final String testIndexName = "idx1";
         SimpleDateFormat formatter = new SimpleDateFormat(testDatePattern);
@@ -1406,18 +1744,18 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, dynamicTestIndexAlias, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, dynamicTestIndexAlias, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(expectedIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources, hasItem(expectedMap));
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"yyyy-MM", "yyyy-MM-dd", "dd-MM-yyyy"})
-    public void testOpenSearchIndexWithDate(final String testDatePattern) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchIndexWithDate(final String testDatePattern) throws IOException, InterruptedException {
         SimpleDateFormat formatter = new SimpleDateFormat(testDatePattern);
         Date date = new Date();
         String expectedIndexName = "test-index-" + formatter.format(date);
@@ -1434,18 +1772,18 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(expectedIndexName);
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources, hasItem(expectedMap));
-        sink.shutdown();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"test-%{yyyy-MM-dd}-index", "%{yyyy-MM-dd}-test-index"})
-    public void testOpenSearchIndexWithDateNotAsSuffix(final String testIndexAlias) throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchIndexWithDateNotAsSuffix(final String testIndexAlias) throws IOException, InterruptedException {
         final String testDatePattern = "yyyy-MM-dd";
         SimpleDateFormat formatter = new SimpleDateFormat(testDatePattern);
         Date date = new Date();
@@ -1462,37 +1800,112 @@ public class OpenSearchSinkIT {
 
         final List<Record<Event>> testRecords = Collections.singletonList(new Record<>(testEvent));
 
-        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, null);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, testIndexAlias, null);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
         sink.output(testRecords);
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(expectedIndexName);
         assertThat(retSources.size(), equalTo(1));
         assertThat(retSources, hasItem(expectedMap));
-        sink.shutdown();
     }
 
     @Test
-    public void testOpenSearchIndexWithInvalidDate() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchIndexWithInvalidDate() throws IOException, InterruptedException {
         String invalidDatePattern = "yyyy-MM-dd HH:ss:mm";
         final String invalidTestIndexAlias = "test-index-%{" + invalidDatePattern + "}";
-        final PluginSetting pluginSetting = generatePluginSetting(null, invalidTestIndexAlias, null);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, false);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, invalidTestIndexAlias, null);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, false);
         Assert.assertThrows(IllegalArgumentException.class, () -> sink.doInitialize());
     }
 
     @Test
-    public void testOpenSearchIndexWithInvalidChars() throws IOException, InterruptedException {
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testOpenSearchIndexWithInvalidChars() throws IOException, InterruptedException {
         final String invalidTestIndexAlias = "test#-index";
-        final PluginSetting pluginSetting = generatePluginSetting(null, invalidTestIndexAlias, null);
-        OpenSearchSink sink = createObjectUnderTest(pluginSetting, false);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig(null, invalidTestIndexAlias, null);
+        OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, false);
         Assert.assertThrows(RuntimeException.class, () -> sink.doInitialize());
+    }
+
+    @Test
+    @DisabledIf(value = "isDataStreamNotSupported", disabledReason = "Data streams require OpenSearch 1.3.0+")
+    @Timeout(value = 50, unit = TimeUnit.SECONDS)
+    void testDataStreamDetection() throws IOException, InterruptedException {
+        final String dataStreamName = "test-data-stream-" + UUID.randomUUID();
+        final String templateName = dataStreamName + "-template";
+        final File tempDirectory = Files.createTempDirectory("").toFile();
+        final String dlqFile = tempDirectory.getAbsolutePath() + "/test-dlq.txt";
+        
+        try {
+            // Create an index template for the data stream first
+            final Request createTemplateRequest = new Request(HttpMethod.PUT, "/_index_template/" + templateName);
+            final String templateBody = "{" +
+                    "\"index_patterns\": [\"" + dataStreamName + "\"]," +
+                    "\"data_stream\": {}," +
+                    "\"template\": {" +
+                    "\"mappings\": {" +
+                    "\"properties\": {" +
+                    "\"@timestamp\": {\"type\": \"date\"}" +
+                    "}" +
+                    "}" +
+                    "}" +
+                    "}";
+            createTemplateRequest.setJsonEntity(templateBody);
+            client.performRequest(createTemplateRequest);
+            
+            // Create a data stream
+            final Request createDataStreamRequest = new Request(HttpMethod.PUT, "/_data_stream/" + dataStreamName);
+            client.performRequest(createDataStreamRequest);
+            
+            // Initialize sink AFTER creating the data stream so detection works
+            Map<String, Object> metadata = initializeConfigurationMetadata(null, dataStreamName, null);
+            metadata.put(RetryConfiguration.DLQ_FILE, dlqFile);
+            final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+            final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+            
+            // Test that the data stream is detected
+            final String testIdField = "someId";
+            final String testId = "foo";
+            final List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson(testIdField, testId)));
+            
+            sink.output(testRecords);
+            
+            // Wait for indexing to complete
+            Thread.sleep(2000);
+            
+            // Verify the document was written to the data stream
+            final List<Map<String, Object>> retSources = getSearchResponseDocSources(dataStreamName);
+            assertThat("Expected 1 document in data stream " + dataStreamName + " but found " + retSources.size(), 
+                       retSources.size(), equalTo(1));
+        } catch (Exception e) {
+            throw e;
+        } finally {
+            // Clean up the data stream
+            final Request deleteDataStreamRequest = new Request(HttpMethod.DELETE, "/_data_stream/" + dataStreamName);
+            try {
+                client.performRequest(deleteDataStreamRequest);
+            } catch (IOException e) {
+                // Ignore cleanup errors
+            }
+            
+            // Clean up the index template
+            final Request deleteTemplateRequest = new Request(HttpMethod.DELETE, "/_index_template/" + templateName);
+            try {
+                client.performRequest(deleteTemplateRequest);
+            } catch (IOException e) {
+                // Ignore cleanup errors
+            }
+            
+            // Clean up DLQ
+            FileUtils.deleteQuietly(tempDirectory);
+        }
     }
 
     @Test
     @Timeout(value = 1, unit = TimeUnit.MINUTES)
     @DisabledIf(value = "isES6",
             disabledReason = "PUT _opendistro/_security/api/roles/<role-id> request could not be parsed in ES 6.")
-    public void testOutputManagementDisabled() throws IOException, InterruptedException {
+    void testOutputManagementDisabled() throws IOException, InterruptedException {
         final String testIndexAlias = "test-" + UUID.randomUUID();
         final String roleName = UUID.randomUUID().toString();
         final String username = UUID.randomUUID().toString();
@@ -1508,11 +1921,11 @@ public class OpenSearchSinkIT {
 
         final Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, null);
         metadata.put(IndexConfiguration.INDEX_TYPE, IndexType.MANAGEMENT_DISABLED.getValue());
-        metadata.put(ConnectionConfiguration.USERNAME, username);
-        metadata.put(ConnectionConfiguration.PASSWORD, password);
+        metadata.put(USERNAME, username);
+        metadata.put(PASSWORD, password);
         metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
-        final PluginSetting pluginSetting = generatePluginSettingByMetadata(metadata);
-        final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+        final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
 
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource("management-disabled-index-template.json")).getFile();
@@ -1523,7 +1936,6 @@ public class OpenSearchSinkIT {
         final List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
         assertThat(retSources.size(), equalTo(1));
         assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
-        sink.shutdown();
 
         // verify metrics
         final List<Measurement> bulkRequestLatencies = MetricsTestUtil.getMeasurementList(
@@ -1542,11 +1954,11 @@ public class OpenSearchSinkIT {
         metadata.put(IndexConfiguration.INDEX_ALIAS, indexAlias);
         metadata.put(IndexConfiguration.TEMPLATE_FILE, templateFilePath);
         metadata.put(IndexConfiguration.FLUSH_TIMEOUT, -1);
+        metadata.put("insecure", true);
         final String user = System.getProperty("tests.opensearch.user");
         final String password = System.getProperty("tests.opensearch.password");
         if (user != null) {
-            metadata.put(ConnectionConfiguration.USERNAME, user);
-            metadata.put(ConnectionConfiguration.PASSWORD, password);
+            metadata.put(AUTHENTICATION, Map.of(USERNAME, user, PASSWORD, password));
         }
         final String distributionVersion = DeclaredOpenSearchVersion.OPENDISTRO_0_10.compareTo(
                 OpenSearchIntegrationHelper.getVersion()) >= 0 ?
@@ -1555,33 +1967,44 @@ public class OpenSearchSinkIT {
         return metadata;
     }
 
-    private PluginSetting generatePluginSetting(final String indexType, final String indexAlias,
-                                                final String templateFilePath) {
-        final Map<String, Object> metadata = initializeConfigurationMetadata(indexType, indexAlias, templateFilePath);
-        return generatePluginSettingByMetadata(metadata);
-    }
-
-    private PluginSetting generatePluginSetting(final String indexType, final String indexAlias,
-                                                final String templateFilePath, final boolean estimateBulkSizeUsingCompression,
-                                                final boolean requestCompressionEnabled) {
+    private Map<String, Object> initializeConfigurationMetadata(final String indexType, final String indexAlias,
+                                                              final String templateFilePath, final boolean estimateBulkSizeUsingCompression,
+                                                              final boolean requestCompressionEnabled) throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigurationMetadata(indexType, indexAlias, templateFilePath);
         metadata.put(IndexConfiguration.ESTIMATE_BULK_SIZE_USING_COMPRESSION, estimateBulkSizeUsingCompression);
         metadata.put(ConnectionConfiguration.REQUEST_COMPRESSION_ENABLED, requestCompressionEnabled);
-        return generatePluginSettingByMetadata(metadata);
+        return metadata;
     }
 
-    private PluginSetting generatePluginSetting(final String indexType, final String indexAlias,
+    private OpenSearchSinkConfig generateOpenSearchSinkConfig(final String indexType, final String indexAlias,
+                                                final String templateFilePath) throws JsonProcessingException {
+        final Map<String, Object> metadata = initializeConfigurationMetadata(indexType, indexAlias, templateFilePath);
+        return generateOpenSearchSinkConfigByMetadata(metadata);
+    }
+
+    private OpenSearchSinkConfig generateOpenSearchSinkConfig(final String indexType, final String indexAlias,
+                                                final String templateFilePath, final boolean estimateBulkSizeUsingCompression,
+                                                final boolean requestCompressionEnabled) throws JsonProcessingException {
+        final Map<String, Object> metadata = initializeConfigurationMetadata(indexType, indexAlias, templateFilePath);
+        metadata.put(IndexConfiguration.ESTIMATE_BULK_SIZE_USING_COMPRESSION, estimateBulkSizeUsingCompression);
+        metadata.put(ConnectionConfiguration.REQUEST_COMPRESSION_ENABLED, requestCompressionEnabled);
+        return generateOpenSearchSinkConfigByMetadata(metadata);
+    }
+
+    private OpenSearchSinkConfig generateOpenSearchSinkConfig(final String indexType, final String indexAlias,
                                                 final String templateType,
-                                                final String templateFilePath) {
+                                                final String templateFilePath) throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigurationMetadata(indexType, indexAlias, templateFilePath);
         metadata.put(IndexConfiguration.TEMPLATE_TYPE, templateType);
-        return generatePluginSettingByMetadata(metadata);
+        return generateOpenSearchSinkConfigByMetadata(metadata);
     }
 
-    private PluginSetting generatePluginSettingByMetadata(final Map<String, Object> configurationMetadata) {
-        final PluginSetting pluginSetting = new PluginSetting(PLUGIN_NAME, configurationMetadata);
-        pluginSetting.setPipelineName(PIPELINE_NAME);
-        return pluginSetting;
+    private OpenSearchSinkConfig generateOpenSearchSinkConfigByMetadata(final Map<String, Object> configurationMetadata) throws JsonProcessingException {
+        objectMapper = new ObjectMapper();
+        String json = new ObjectMapper().writeValueAsString(configurationMetadata);
+        OpenSearchSinkConfig openSearchSinkConfig = objectMapper.readValue(json, OpenSearchSinkConfig.class);
+
+        return openSearchSinkConfig;
     }
 
     private String generateCustomRecordJson(final String idField, final String documentId) throws IOException {
@@ -1800,6 +2223,99 @@ public class OpenSearchSinkIT {
 
     private static boolean isES6() {
         return DeclaredOpenSearchVersion.OPENDISTRO_0_10.compareTo(OpenSearchIntegrationHelper.getVersion()) >= 0;
+    }
+
+    private static boolean isComposableIndexTemplateNotSupported() {
+        return OpenSearchIntegrationHelper.getVersion().compareTo(DeclaredOpenSearchVersion.OPENDISTRO_1_9) < 0;
+    }
+
+    private static boolean isDataStreamNotSupported() {
+        // Data streams require OpenSearch 1.3.0+
+        return OpenSearchIntegrationHelper.getVersion().compareTo(DeclaredOpenSearchVersion.parse("opensearch:1.3.0")) < 0;
+    }
+
+    @Test
+    @DisabledIf(value = "isDataStreamNotSupported", disabledReason = "Data streams require OpenSearch 1.3.0+")
+    void testDataStreamFirstWriteWinsBehavior() throws IOException, InterruptedException {
+        final String dataStreamName = "test-first-write-wins-" + UUID.randomUUID();
+        final String templateName = dataStreamName + "-template";
+        final File tempDirectory = Files.createTempDirectory("").toFile();
+        final String dlqFile = tempDirectory.getAbsolutePath() + "/test-dlq.txt";
+        
+        try {
+            // Create an index template for the data stream
+            final Request createTemplateRequest = new Request(HttpMethod.PUT, "/_index_template/" + templateName);
+            final String templateBody = "{" +
+                    "\"index_patterns\": [\"" + dataStreamName + "\"]," +
+                    "\"data_stream\": {}," +
+                    "\"template\": {" +
+                    "\"mappings\": {" +
+                    "\"properties\": {" +
+                    "\"@timestamp\": {\"type\": \"date\"}," +
+                    "\"value\": {\"type\": \"keyword\"}" +
+                    "}" +
+                    "}" +
+                    "}" +
+                    "}";
+            createTemplateRequest.setJsonEntity(templateBody);
+            client.performRequest(createTemplateRequest);
+            
+            // Create the data stream
+            final Request createDataStreamRequest = new Request(HttpMethod.PUT, "/_data_stream/" + dataStreamName);
+            client.performRequest(createDataStreamRequest);
+            
+            // Initialize sink with document_id configuration
+            final String testIdField = "someId";
+            final String testId = "duplicate-id";
+            Map<String, Object> metadata = initializeConfigurationMetadata(null, dataStreamName, null);
+            metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
+            metadata.put(RetryConfiguration.DLQ_FILE, dlqFile);
+            final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfigByMetadata(metadata);
+            final OpenSearchSink sink = createObjectUnderTest(openSearchSinkConfig, true);
+            
+            // Write first document with value "first"
+            final String firstDoc = "{\"" + testIdField + "\": \"" + testId + "\", \"value\": \"first\"}";
+            final List<Record<Event>> firstRecords = Collections.singletonList(jsonStringToRecord(firstDoc));
+            sink.output(firstRecords);
+            
+            // Wait for indexing
+            Thread.sleep(1000);
+            
+            // Write second document with same ID but value "second"
+            final String secondDoc = "{\"" + testIdField + "\": \"" + testId + "\", \"value\": \"second\"}";
+            final List<Record<Event>> secondRecords = Collections.singletonList(jsonStringToRecord(secondDoc));
+            sink.output(secondRecords);
+            
+            
+            // Wait for indexing to complete
+            Thread.sleep(2000);
+            
+            // Verify only one document exists
+            final List<Map<String, Object>> retSources = getSearchResponseDocSources(dataStreamName);
+            assertThat("Expected exactly 1 document due to first-write-wins", retSources.size(), equalTo(1));
+            
+            // Verify the document has the FIRST value (first-write-wins)
+            final Map<String, Object> document = retSources.get(0);
+            assertThat("Expected first write to win", document.get("value"), equalTo("first"));
+            
+        } finally {
+            // Clean up
+            final Request deleteDataStreamRequest = new Request(HttpMethod.DELETE, "/_data_stream/" + dataStreamName);
+            try {
+                client.performRequest(deleteDataStreamRequest);
+            } catch (IOException e) {
+                // Ignore cleanup errors
+            }
+            
+            final Request deleteTemplateRequest = new Request(HttpMethod.DELETE, "/_index_template/" + templateName);
+            try {
+                client.performRequest(deleteTemplateRequest);
+            } catch (IOException e) {
+                // Ignore cleanup errors
+            }
+            
+            FileUtils.deleteQuietly(tempDirectory);
+        }
     }
 
     private static Stream<Object> getAttributeTestSpecialAndExtremeValues() {

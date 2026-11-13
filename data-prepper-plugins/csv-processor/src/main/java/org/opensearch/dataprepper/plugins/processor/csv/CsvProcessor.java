@@ -1,34 +1,41 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.csv;
 
-import org.opensearch.dataprepper.expression.ExpressionEvaluator;
-import org.opensearch.dataprepper.metrics.PluginMetrics;
-import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
-import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
-import org.opensearch.dataprepper.model.event.Event;
-import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
-import org.opensearch.dataprepper.model.processor.AbstractProcessor;
-import org.opensearch.dataprepper.model.processor.Processor;
-import org.opensearch.dataprepper.model.record.Record;
 import com.fasterxml.jackson.databind.MappingIterator;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
 import com.fasterxml.jackson.dataformat.csv.CsvParser;
 import com.fasterxml.jackson.dataformat.csv.CsvSchema;
 import io.micrometer.core.instrument.Counter;
+import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
+import org.opensearch.dataprepper.metrics.PluginMetrics;
+import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
+import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
+import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.DefaultEventHandle;
+import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
+import org.opensearch.dataprepper.model.processor.AbstractProcessor;
+import org.opensearch.dataprepper.model.processor.Processor;
+import org.opensearch.dataprepper.model.record.Record;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
-
-import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
 
 /**
  * Processor to parse CSV data in Events.
@@ -46,6 +53,11 @@ public class CsvProcessor extends AbstractProcessor<Record<Event>, Record<Event>
 
     private final ExpressionEvaluator expressionEvaluator;
 
+    private final CsvMapper mapper;
+    private final CsvSchema schema;
+
+    private final boolean normalizeKeys;
+
     @DataPrepperPluginConstructor
     public CsvProcessor(final PluginMetrics pluginMetrics,
                         final CsvProcessorConfig config,
@@ -61,13 +73,14 @@ public class CsvProcessor extends AbstractProcessor<Record<Event>, Record<Event>
                     String.format("csv_when value of %s is not a valid expression statement. " +
                             "See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax.", config.getCsvWhen()));
         }
+        this.normalizeKeys = config.getNormalizeKeys();
+        this.mapper = createCsvMapper();
+        this.schema = createCsvSchema();
     }
 
     @Override
     public Collection<Record<Event>> doExecute(final Collection<Record<Event>> records) {
-        final CsvMapper mapper = createCsvMapper();
-        final CsvSchema schema = createCsvSchema();
-
+        List<Record<Event>> recordsOut = new ArrayList<>();
         for (final Record<Event> record : records) {
 
             final Event event = record.getData();
@@ -83,6 +96,25 @@ public class CsvProcessor extends AbstractProcessor<Record<Event>, Record<Event>
                 if (Objects.isNull(message)) {
                     continue;
                 }
+                if (config.isMultiLine()) {
+                    String[] lines = message.split("[\r\n]+");
+                    if (lines.length <= 1) {
+                        continue;
+                    }
+                    final List<String> header = Arrays.asList(lines[0].split(config.getDelimiter().substring(0,1)));
+                    for (int i = 1; i < lines.length; i++) {
+                        final MappingIterator<List<String>> messageIterator = mapper.readerFor(List.class).with(schema).readValues(lines[i]);
+                        if (messageIterator.hasNextValue()) {
+                            Event clonedEvent = JacksonEvent.fromEvent(event);
+                            final List<String> row = messageIterator.nextValue();
+                            putDataInEvent(clonedEvent, header, row);
+                            addToAcknowledgementSetFromOriginEvent(clonedEvent, event);
+                            recordsOut.add(new Record<Event>(clonedEvent));
+                        }
+                    }
+                    continue;
+                }
+
 
                 final boolean userDidSpecifyHeaderEventKey = Objects.nonNull(config.getColumnNamesSourceKey());
                 final boolean thisEventHasHeaderSource = userDidSpecifyHeaderEventKey && event.containsKey(config.getColumnNamesSourceKey());
@@ -99,12 +131,29 @@ public class CsvProcessor extends AbstractProcessor<Record<Event>, Record<Event>
                 if (thisEventHasHeaderSource && Boolean.TRUE.equals(config.isDeleteHeader())) {
                     event.delete(config.getColumnNamesSourceKey());
                 }
+
+                if (config.isDeleteSource()) {
+                    event.delete(config.getSource());
+                }
             } catch (final IOException e) {
                 csvInvalidEventsCounter.increment();
-                LOG.error(EVENT, "An exception occurred while reading event [{}]", event, e);
+                LOG.atError()
+                        .addMarker(EVENT)
+                        .addMarker(NOISY)
+                        .setMessage("An exception occurred while reading event [{}]")
+                        .addArgument(event)
+                        .setCause(e)
+                        .log();
             }
         }
-        return records;
+        return (config.isMultiLine()) ? recordsOut : records;
+    }
+
+    protected void addToAcknowledgementSetFromOriginEvent(Event recordEvent, Event originRecordEvent) {
+        DefaultEventHandle eventHandle = (DefaultEventHandle) originRecordEvent.getEventHandle();
+        if (eventHandle != null) {
+            eventHandle.addEventHandle(recordEvent.getEventHandle());
+        }
     }
 
     @Override
@@ -168,7 +217,8 @@ public class CsvProcessor extends AbstractProcessor<Record<Event>, Record<Event>
     private void putDataInEvent(final Event event, final List<String> header, final List<String> data) {
         int providedHeaderColIdx = 0;
         for (; providedHeaderColIdx < header.size() && providedHeaderColIdx < data.size(); providedHeaderColIdx++) {
-            event.put(header.get(providedHeaderColIdx), data.get(providedHeaderColIdx));
+            String key = header.get(providedHeaderColIdx);
+            event.put(key, data.get(providedHeaderColIdx), normalizeKeys);
         }
         for (int remainingColIdx = providedHeaderColIdx; remainingColIdx < data.size(); remainingColIdx++) {
             event.put(generateColumnHeader(remainingColIdx), data.get(remainingColIdx));

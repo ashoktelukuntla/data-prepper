@@ -6,6 +6,7 @@
 package org.opensearch.dataprepper.plugins.source.s3.configuration;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -21,6 +22,7 @@ public class SqsOptions {
     private static final Duration DEFAULT_VISIBILITY_DUPLICATE_PROTECTION_TIMEOUT = Duration.ofHours(2);
     private static final Duration DEFAULT_WAIT_TIME_SECONDS = Duration.ofSeconds(20);
     private static final Duration DEFAULT_POLL_DELAY_SECONDS = Duration.ofSeconds(0);
+    private static final Duration DEFAULT_SHUTDOWN_TIMEOUT = Duration.ofSeconds(30);
 
     @JsonProperty("queue_url")
     @NotBlank(message = "SQS URL cannot be null or empty")
@@ -53,6 +55,15 @@ public class SqsOptions {
     @DurationMin(seconds = 0)
     private Duration pollDelay = DEFAULT_POLL_DELAY_SECONDS;
 
+    @JsonPropertyDescription("Messages that contain an ApproximateReceiveCount greater than this value will be deleted")
+    @JsonProperty("max_receive_attempts")
+    @Min(1)
+    private Integer maxReceiveAttempts;
+
+    @JsonProperty("shutdown_timeout")
+    @DurationMin(seconds = 30)
+    private Duration shutdownTimeout = DEFAULT_SHUTDOWN_TIMEOUT;
+
     public String getSqsUrl() {
         return sqsUrl;
     }
@@ -79,5 +90,13 @@ public class SqsOptions {
 
     public Duration getPollDelay() {
         return pollDelay;
+    }
+
+    public Integer getMaxReceiveAttempts() {
+        return maxReceiveAttempts;
+    }
+
+    public Duration getShutdownTimeout() {
+        return shutdownTimeout;
     }
 }

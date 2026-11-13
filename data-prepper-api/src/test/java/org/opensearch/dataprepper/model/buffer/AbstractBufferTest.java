@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.buffer;
@@ -14,6 +18,9 @@ import org.opensearch.dataprepper.metrics.MetricsTestUtil;
 import org.opensearch.dataprepper.model.CheckpointState;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
@@ -29,6 +36,13 @@ import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 
+import static org.hamcrest.CoreMatchers.equalTo;
+import static org.hamcrest.Matchers.closeTo;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.mockito.Mockito.mock;
+import static org.hamcrest.CoreMatchers.sameInstance;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class AbstractBufferTest {
     private static final String BUFFER_NAME = "testBuffer";
     private static final String PIPELINE_NAME = "pipelineName";
+    private static final String TEST_MESSAGE = "testMessage";
 
     private PluginSetting testPluginSetting;
 
@@ -172,10 +187,47 @@ public class AbstractBufferTest {
     }
 
     @Test
-    public void testWriteBytes() throws TimeoutException {
+    void writeBytes_records_timeElapsed_metrics() throws Exception {
+        final AbstractBuffer<Record<String>> abstractBuffer = new AbstractBufferWithDoWriteBytes(testPluginSetting);
+        final byte[] bytes = new byte[2];
+
+        abstractBuffer.writeBytes(bytes, "", 1_000);
+
+        final List<Measurement> writeTimeMeasurements = MetricsTestUtil.getMeasurementList(
+                new StringJoiner(MetricNames.DELIMITER).add(PIPELINE_NAME).add(BUFFER_NAME).add(MetricNames.WRITE_TIME_ELAPSED).toString());
+        assertThat(MetricsTestUtil.getMeasurementFromList(writeTimeMeasurements, Statistic.COUNT).getValue(), closeTo(1.0, 0));
+        assertThat(MetricsTestUtil.getMeasurementFromList(writeTimeMeasurements, Statistic.TOTAL_TIME).getValue(),
+                greaterThanOrEqualTo(0.05));
+        assertThat(MetricsTestUtil.getMeasurementFromList(writeTimeMeasurements, Statistic.TOTAL_TIME).getValue(),
+                lessThanOrEqualTo(0.25));
+    }
+
+    @Test
+    void writeBytes_records_writeTimeoutCounter_on_timeout() throws Exception {
+        final AbstractBuffer<Record<String>> abstractBuffer = new AbstractBufferWithTimeoutDoWriteBytes(testPluginSetting);
+        final byte[] bytes = new byte[2];
+
+        assertThrows(TimeoutException.class, () -> abstractBuffer.writeBytes(bytes, "", 1));
+
+        final List<Measurement> timeoutMeasurements = MetricsTestUtil.getMeasurementList(
+                new StringJoiner(MetricNames.DELIMITER).add(PIPELINE_NAME).add(BUFFER_NAME).add(MetricNames.WRITE_TIMEOUTS).toString());
+        assertThat(timeoutMeasurements.size(), equalTo(1));
+        assertThat(timeoutMeasurements.get(0).getValue(), equalTo(1.0));
+    }
+
+    @Test
+    void doWriteBytes_throws_by_default() {
         final AbstractBuffer<Record<String>> abstractBuffer = new AbstractBufferTimeoutImpl(testPluginSetting);
         byte[] bytes = new byte[2];
-        assertThrows(RuntimeException.class, () -> abstractBuffer.writeBytes(bytes, "", 10));
+        assertThrows(UnsupportedOperationException.class, () -> abstractBuffer.writeBytes(bytes, "", 10));
+    }
+
+    @Test
+    void testGetAndSetFailurePipeline() {
+        final AbstractBuffer<Record<String>> abstractBuffer = new AbstractBufferTimeoutImpl(testPluginSetting);
+        HeadlessPipeline failurePipeline = mock(HeadlessPipeline.class);
+        abstractBuffer.setFailurePipeline(failurePipeline);
+        assertThat(abstractBuffer.getFailurePipeline(), sameInstance(failurePipeline));
     }
 
     @Test
@@ -220,6 +272,16 @@ public class AbstractBufferTest {
                 new StringJoiner(MetricNames.DELIMITER).add(PIPELINE_NAME).add(BUFFER_NAME).add(MetricNames.WRITE_TIMEOUTS).toString());
         assertEquals(1, timeoutMeasurements.size());
         assertEquals(1.0, timeoutMeasurements.get(0).getValue(), 0);
+    }
+
+    @Test
+    public void testUpdateLatency() {
+        final AbstractBuffer<Record<Event>> abstractBuffer = new AbstractBufferEventImpl(testPluginSetting);
+        final Collection<Record<Event>> testRecords = Arrays.asList(
+                new Record<>(JacksonEvent.fromMessage(TEST_MESSAGE)));
+        abstractBuffer.updateLatency(testRecords);
+        assertEquals(abstractBuffer.getLatencyTimer().count(), 1);
+        
     }
 
     @Test
@@ -345,6 +407,32 @@ public class AbstractBufferTest {
         }
     }
 
+    public static class AbstractBufferWithDoWriteBytes extends AbstractBufferImpl {
+        public AbstractBufferWithDoWriteBytes(PluginSetting pluginSetting) {
+            super(pluginSetting);
+        }
+
+        @Override
+        public void doWriteBytes(byte[] bytes, String key, int timeoutInMillis) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+
+            }
+        }
+    }
+
+    public static class AbstractBufferWithTimeoutDoWriteBytes extends AbstractBufferImpl {
+        public AbstractBufferWithTimeoutDoWriteBytes(PluginSetting pluginSetting) {
+            super(pluginSetting);
+        }
+
+        @Override
+        public void doWriteBytes(byte[] bytes, String key, int timeoutInMillis) throws TimeoutException {
+            throw new TimeoutException();
+        }
+    }
+
     public static class AbstractBufferRuntimeExceptionImpl extends AbstractBufferImpl {
         public AbstractBufferRuntimeExceptionImpl(PluginSetting pluginSetting) {
             super(pluginSetting);
@@ -385,6 +473,35 @@ public class AbstractBufferTest {
         @Override
         public void doWriteAll(Collection<Record<String>> records, int timeoutInMillis) throws Exception {
             throw new NullPointerException();
+        }
+    }
+
+    public static class AbstractBufferEventImpl extends AbstractBuffer<Record<Event>> {
+        public AbstractBufferEventImpl(PluginSetting pluginSetting) {
+            super(pluginSetting);
+        }
+
+        @Override
+        public void doWrite(Record<Event> record, int timeoutInMillis) throws TimeoutException {
+        }
+
+        @Override
+        public void doWriteAll(Collection<Record<Event>> records, int timeoutInMillis) throws Exception {
+        }
+
+        @Override
+        public void doCheckpoint(final CheckpointState checkpointState) {
+
+        }
+
+        @Override
+        public Map.Entry<Collection<Record<Event>>, CheckpointState> doRead(int timeoutInMillis) {
+            return null;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return true;
         }
     }
 }

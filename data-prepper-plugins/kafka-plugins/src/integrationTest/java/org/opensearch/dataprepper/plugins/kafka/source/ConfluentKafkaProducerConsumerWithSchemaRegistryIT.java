@@ -19,11 +19,13 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.PluginConfigObservable;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.TopicConsumerConfig;
@@ -126,6 +128,12 @@ public class ConfluentKafkaProducerConsumerWithSchemaRegistryIT {
     @Mock
     private PlainTextAuthConfig plainTextAuthConfig;
 
+    @Mock
+    private PluginConfigObservable pluginConfigObservable;
+
+    @Mock
+    private AwsCredentialsSupplier awsCredentialsSupplier;
+
     private KafkaSource kafkaSource;
     private TopicConsumerConfig jsonTopicConfig;
     private TopicConsumerConfig avroTopicConfig;
@@ -150,6 +158,7 @@ public class ConfluentKafkaProducerConsumerWithSchemaRegistryIT {
         jsonSourceConfig = mock(KafkaSourceConfig.class);
         avroSourceConfig = mock(KafkaSourceConfig.class);
         pluginMetrics = mock(PluginMetrics.class);
+        pluginConfigObservable = mock(PluginConfigObservable.class);
 	Random random = new Random();
 	testId = random.nextInt();
 	testValue = random.nextDouble();
@@ -162,6 +171,7 @@ public class ConfluentKafkaProducerConsumerWithSchemaRegistryIT {
         receivedRecords = new ArrayList<>();
         acknowledgementSetManager = mock(AcknowledgementSetManager.class);
         pipelineDescription = mock(PipelineDescription.class);
+        awsCredentialsSupplier = mock(AwsCredentialsSupplier.class);
         when(authConfig.getSaslAuthConfig()).thenReturn(saslAuthConfig);
         when(saslAuthConfig.getPlainTextAuthConfig()).thenReturn(plainTextAuthConfig);
         when(schemaConfig.getType()).thenReturn(SchemaRegistryType.CONFLUENT);
@@ -247,16 +257,27 @@ public class ConfluentKafkaProducerConsumerWithSchemaRegistryIT {
     }
 
     @Test
-    public void KafkaJsonProducerConsumerTest() {
+    public void KafkaJsonProducerConsumerTestWithSpecifiedSchemaVersion() {
         when(schemaConfig.getVersion()).thenReturn(2);
-	produceJsonRecords(bootstrapServers,  numRecordsProduced);
-	consumeRecords(bootstrapServers, jsonSourceConfig);
-	await().atMost(Duration.ofSeconds(20)).
-	  untilAsserted(() -> assertThat(numRecordsReceived.get(), equalTo(numRecordsProduced)));
+        produceJsonRecords(bootstrapServers,  numRecordsProduced);
+        consumeRecords(bootstrapServers, jsonSourceConfig);
+        await().atMost(Duration.ofSeconds(20)).
+                untilAsserted(() -> assertThat(numRecordsReceived.get(), equalTo(numRecordsProduced)));
+    }
+
+    @Test
+    public void KafkaJsonProducerConsumerTestWithLatestSchemaVersion() {
+        when(schemaConfig.getVersion()).thenReturn(null);
+        produceJsonRecords(bootstrapServers,  numRecordsProduced);
+        consumeRecords(bootstrapServers, jsonSourceConfig);
+        await().atMost(Duration.ofSeconds(20)).
+                untilAsserted(() -> assertThat(numRecordsReceived.get(), equalTo(numRecordsProduced)));
     }
 
     public void consumeRecords(String servers, KafkaSourceConfig sourceConfig) {
-        kafkaSource = new KafkaSource(sourceConfig, pluginMetrics, acknowledgementSetManager, pipelineDescription, null);
+        kafkaSource = new KafkaSource(
+                sourceConfig, pluginMetrics, acknowledgementSetManager, pipelineDescription,
+                null, pluginConfigObservable, awsCredentialsSupplier);
         kafkaSource.start(buffer);
     }
 
@@ -288,12 +309,21 @@ public class ConfluentKafkaProducerConsumerWithSchemaRegistryIT {
 
 
     @Test
-    public void KafkaAvroProducerConsumerTest() {
+    public void KafkaAvroProducerConsumerTestWithSpecifiedSchemaVersion() {
         when(schemaConfig.getVersion()).thenReturn(1);
 	produceAvroRecords(bootstrapServers,  numRecordsProduced);
 	consumeRecords(bootstrapServers, avroSourceConfig);
 	await().atMost(Duration.ofSeconds(20)).
 	  untilAsserted(() -> assertThat(numRecordsReceived.get(), equalTo(numRecordsProduced)));
+    }
+
+    @Test
+    public void KafkaAvroProducerConsumerTestWithLatestSchemaVersion() {
+        when(schemaConfig.getVersion()).thenReturn(null);
+        produceAvroRecords(bootstrapServers,  numRecordsProduced);
+        consumeRecords(bootstrapServers, avroSourceConfig);
+        await().atMost(Duration.ofSeconds(20)).
+                untilAsserted(() -> assertThat(numRecordsReceived.get(), equalTo(numRecordsProduced)));
     }
 
     public void produceAvroRecords(String servers, int numRecords) throws SerializationException {

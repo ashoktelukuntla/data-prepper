@@ -10,10 +10,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
+import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.model.codec.OutputCodec;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.sink.OutputCodecContext;
@@ -29,6 +31,7 @@ import software.amazon.awssdk.regions.Region;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.UUID;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.instanceOf;
@@ -37,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -58,6 +62,7 @@ class S3SinkTest {
     private PluginFactory pluginFactory;
     private AwsCredentialsSupplier awsCredentialsSupplier;
     private SinkContext sinkContext;
+    private ExpressionEvaluator expressionEvaluator;
     private OutputCodec codec;
 
     @BeforeEach
@@ -73,6 +78,7 @@ class S3SinkTest {
         PluginModel pluginModel = mock(PluginModel.class);
         pluginFactory = mock(PluginFactory.class);
         awsCredentialsSupplier = mock(AwsCredentialsSupplier.class);
+        expressionEvaluator = mock(ExpressionEvaluator.class);
 
         when(s3SinkConfig.getBufferType()).thenReturn(BufferTypeOptions.INMEMORY);
         when(s3SinkConfig.getThresholdOptions()).thenReturn(thresholdOptions);
@@ -89,10 +95,15 @@ class S3SinkTest {
         when(pluginSetting.getName()).thenReturn(SINK_PLUGIN_NAME);
         when(pluginSetting.getPipelineName()).thenReturn(SINK_PIPELINE_NAME);
         when(s3SinkConfig.getBucketName()).thenReturn(BUCKET_NAME);
+        when(objectKeyOptions.getPathPrefix()).thenReturn(UUID.randomUUID().toString());
+        when(objectKeyOptions.getNamePattern()).thenReturn(UUID.randomUUID().toString());
+        when(s3SinkConfig.getObjectKeyOptions()).thenReturn(objectKeyOptions);
+        when(expressionEvaluator.isValidFormatExpression(anyString())).thenReturn(true);
+        when(s3SinkConfig.getDefaultBucketOwner()).thenReturn(UUID.randomUUID().toString());
     }
 
     private S3Sink createObjectUnderTest() {
-        return new S3Sink(pluginSetting, s3SinkConfig, pluginFactory, sinkContext, awsCredentialsSupplier);
+        return new S3Sink(pluginSetting, s3SinkConfig, pluginFactory, sinkContext, awsCredentialsSupplier, expressionEvaluator);
     }
 
     @Test
@@ -140,5 +151,26 @@ class S3SinkTest {
 
         RuntimeException actualException = assertThrows(RuntimeException.class, () -> createObjectUnderTest());
         assertThat(actualException, sameInstance(codecException));
+    }
+
+    @Test
+    void invalid_path_prefix_expression_format_throws_InvalidPluginConfigurationException() {
+        when(expressionEvaluator.isValidFormatExpression(s3SinkConfig.getObjectKeyOptions().getPathPrefix())).thenReturn(false);
+
+        assertThrows(InvalidPluginConfigurationException.class, this::createObjectUnderTest);
+    }
+
+    @Test
+    void invalid_object_name_expression_format_throws_InvalidPluginConfigurationException() {
+        when(expressionEvaluator.isValidFormatExpression(s3SinkConfig.getObjectKeyOptions().getNamePattern())).thenReturn(false);
+
+        assertThrows(InvalidPluginConfigurationException.class, this::createObjectUnderTest);
+    }
+
+    @Test
+    void invalid_bucket_name_expression_format_throws_InvalidPluginConfigurationException() {
+        when(expressionEvaluator.isValidFormatExpression(s3SinkConfig.getBucketName())).thenReturn(false);
+
+        assertThrows(InvalidPluginConfigurationException.class, this::createObjectUnderTest);
     }
 }

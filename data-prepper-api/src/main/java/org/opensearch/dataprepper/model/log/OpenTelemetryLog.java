@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.log;
@@ -112,4 +116,30 @@ public interface OpenTelemetryLog extends Log {
      * @since 2.1
      */
     Object getBody();
+
+    /**
+     * Gets the scope of this log event.
+     *
+     * @return the scope
+     * @since 2.11
+     */
+    Map<String, Object> getScope();
+
+    /**
+     * Gets the resource of this log event.
+     *
+     * @return the resource
+     * @since 2.11
+     */
+    Map<String, Object> getResource();
+
+    /**
+     * Gets the event name of this log event as defined in the OTel LogRecord spec.
+     * Added in OpenTelemetry proto v1.5.0 as a top-level field replacing the {@code event.name} attribute.
+     *
+     * @return the event name, or null if not set
+     * @since 2.17
+     */
+    String getEventName();
+
 }

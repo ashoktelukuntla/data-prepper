@@ -1,10 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
 
+import com.fasterxml.jackson.annotation.JsonClassDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.plugins.processor.aggregate.AggregateAction;
@@ -17,7 +23,8 @@ import org.opensearch.dataprepper.plugins.processor.aggregate.GroupState;
  * that have a non-empty groupState associated with them
  * @since 1.3
  */
-@DataPrepperPlugin(name = "remove_duplicates", pluginType = AggregateAction.class)
+@DataPrepperPlugin(name = "remove_duplicates", pluginType = AggregateAction.class,
+        pluginConfigurationType = RemoveDuplicatesAggregateAction.RemoveDuplicatesAggregateActionConfig.class)
 public class RemoveDuplicatesAggregateAction implements AggregateAction {
     static final String GROUP_STATE_HAS_EVENT = "GROUP_STATE_HAS_EVENT";
 
@@ -30,5 +37,10 @@ public class RemoveDuplicatesAggregateAction implements AggregateAction {
         }
 
         return AggregateActionResponse.nullEventResponse();
+    }
+
+    @JsonPropertyOrder
+    @JsonClassDescription("The <code>remove_duplicates</code> action processes the first event for a group immediately and drops any events that duplicate the first event from the source.")
+    static class RemoveDuplicatesAggregateActionConfig {
     }
 }

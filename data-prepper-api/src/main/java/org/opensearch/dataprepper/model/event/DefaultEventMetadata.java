@@ -1,9 +1,15 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.event;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.Instant;
 import java.util.HashSet;
@@ -23,15 +29,22 @@ import static com.google.common.base.Preconditions.checkNotNull;
  */
 public class DefaultEventMetadata implements EventMetadata {
 
-    private final String eventType;
+    @JsonProperty("event_type")
+    private String eventType;
 
-    private final Instant timeReceived;
+    @JsonProperty("time_received")
+    private Instant timeReceived;
 
+    @JsonProperty("external_origination_time")
     private Instant externalOriginationTime;
 
+    @JsonProperty("attributes")
     private Map<String, Object> attributes;
 
+    @JsonProperty("tags")
     private Set<String> tags;
+
+    private DefaultEventMetadata() {}
 
     private DefaultEventMetadata(final Builder builder) {
 
@@ -45,7 +58,8 @@ public class DefaultEventMetadata implements EventMetadata {
         this.attributes = builder.attributes == null ? new HashMap<>() : new HashMap<>(builder.attributes);
 
         this.tags = builder.tags == null ? new HashSet<>() : new HashSet(builder.tags);
-        this.externalOriginationTime = null;
+
+        this.externalOriginationTime = builder.externalOriginationTime;
     }
 
     private DefaultEventMetadata(final EventMetadata eventMetadata) {
@@ -90,8 +104,19 @@ public class DefaultEventMetadata implements EventMetadata {
     public Object getAttribute(final String attributeKey) {
         String key = (attributeKey.charAt(0) == '/') ? attributeKey.substring(1) : attributeKey;
 
-        // Does not support recursive or inner-object lookups for now.
-        return attributes.get(key);
+        Map<String, Object> mapObject = attributes;
+        if (key.contains("/")) {
+            String[] keys = key.split("/");
+            for (int i = 0; i < keys.length-1; i++) {
+                Object value = mapObject.get(keys[i]);
+                if (value == null || !(value instanceof Map)) {
+                    return null;
+                }
+                mapObject = (Map<String, Object>)value;
+                key = keys[i+1];
+            }
+        }
+        return mapObject.get(key);
     }
 
     @Override
@@ -163,6 +188,7 @@ public class DefaultEventMetadata implements EventMetadata {
     public static class Builder {
         private String eventType;
         private Instant timeReceived;
+        private Instant externalOriginationTime;
         private Map<String, Object> attributes;
         private Set<String> tags;
 
@@ -185,6 +211,17 @@ public class DefaultEventMetadata implements EventMetadata {
          */
         public Builder withTimeReceived(final Instant timeReceived) {
             this.timeReceived = timeReceived;
+            return this;
+        }
+
+        /**
+         * Sets the external origination Time.
+         * @param externalOriginationTime the time an event was received
+         * @return returns the builder
+         * @since 2.8
+         */
+        public Builder withExternalOriginationTime(final Instant externalOriginationTime) {
+            this.externalOriginationTime = externalOriginationTime;
             return this;
         }
 

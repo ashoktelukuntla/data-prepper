@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.metric;
@@ -114,4 +118,29 @@ public interface Metric extends Event {
      * @since 1.4
      */
     Integer getFlags();
+
+    /**
+     * Gets the scope of this metric event.
+     *
+     * @return the scope
+     * @since 2.11
+     */
+    Map<String, Object> getScope();
+
+    /**
+     * Gets the metadata of this metric event.
+     *
+     * @return the metadata
+     * @since 2.11
+     */
+    Map<String, Object> getMetricMetadata();
+
+    /**
+     * Gets the resource of this metric event.
+     *
+     * @return the resource
+     * @since 2.11
+     */
+    Map<String, Object> getResource();
+
 }

@@ -17,14 +17,17 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.source.coordinator.SourcePartitionStatus;
 import org.opensearch.dataprepper.model.source.coordinator.SourcePartitionStoreItem;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughput;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 
+import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -41,6 +44,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 import static org.opensearch.dataprepper.plugins.sourcecoordinator.dynamodb.DynamoDbSourceCoordinationStore.SOURCE_STATUS_COMBINATION_KEY_FORMAT;
 
 @ExtendWith(MockitoExtension.class)
@@ -50,24 +54,35 @@ public class DynamoDbSourceCoordinationStoreTest {
     private DynamoStoreSettings dynamoStoreSettings;
 
     @Mock
+    private DynamoDbClientFactory dynamoDbClientFactory;
+
+    @Mock
     private PluginMetrics pluginMetrics;
+
+    @Mock
+    private DynamoDbClient dynamoDbClient;
 
     @Mock
     private DynamoDbClientWrapper dynamoDbClientWrapper;
 
     @BeforeEach
     void setup() {
-        given(dynamoStoreSettings.getRegion()).willReturn(UUID.randomUUID().toString());
-        given(dynamoStoreSettings.getStsRoleArn()).willReturn(UUID.randomUUID().toString());
-        given(dynamoStoreSettings.getStsExternalId()).willReturn(UUID.randomUUID().toString());
+        final String region = UUID.randomUUID().toString();
+        final String stsRoleArn = UUID.randomUUID().toString();
+        final String stsExternalId = UUID.randomUUID().toString();
+        given(dynamoStoreSettings.getRegion()).willReturn(region);
+        given(dynamoStoreSettings.getStsRoleArn()).willReturn(stsRoleArn);
+        given(dynamoStoreSettings.getStsExternalId()).willReturn(stsExternalId);
+
+        when(dynamoDbClientFactory.provideDynamoDbClient(region, stsRoleArn, stsExternalId))
+                .thenReturn(dynamoDbClient);
     }
 
     private DynamoDbSourceCoordinationStore createObjectUnderTest() {
         try (final MockedStatic<DynamoDbClientWrapper> dynamoDbClientWrapperMockedStatic = mockStatic(DynamoDbClientWrapper.class)) {
-            dynamoDbClientWrapperMockedStatic.when(() -> DynamoDbClientWrapper.create(dynamoStoreSettings.getRegion(),
-                    dynamoStoreSettings.getStsRoleArn(), dynamoStoreSettings.getStsExternalId()))
+            dynamoDbClientWrapperMockedStatic.when(() -> dynamoDbClientWrapper.create(dynamoDbClient))
                 .thenReturn(dynamoDbClientWrapper);
-            return new DynamoDbSourceCoordinationStore(dynamoStoreSettings, pluginMetrics);
+            return new DynamoDbSourceCoordinationStore(dynamoStoreSettings, dynamoDbClientFactory, pluginMetrics);
         }
     }
 
@@ -200,25 +215,66 @@ public class DynamoDbSourceCoordinationStoreTest {
     }
 
     @Test
+    void tryUpdateSourcePartitionItem_calls_dynamoClientWrapper_correctly_for_unassigned_status() {
+        final String sourceIdentifier = UUID.randomUUID().toString();
+
+        final SourcePartitionStoreItem updateItem = mock(DynamoDbSourcePartitionItem.class);
+        given(updateItem.getSourceIdentifier()).willReturn(sourceIdentifier);
+        given(updateItem.getSourcePartitionStatus()).willReturn(SourcePartitionStatus.UNASSIGNED);
+
+        given(dynamoStoreSettings.getTtl()).willReturn(null);
+
+        doNothing().when(dynamoDbClientWrapper).tryUpdatePartitionItem((DynamoDbSourcePartitionItem) updateItem);
+
+        createObjectUnderTest().tryUpdateSourcePartitionItem(updateItem);
+
+        verify((DynamoDbSourcePartitionItem) updateItem, never()).setPartitionPriority(any(String.class));
+
+        verify((DynamoDbSourcePartitionItem) updateItem).setSourceStatusCombinationKey(sourceIdentifier + "|" + SourcePartitionStatus.UNASSIGNED);
+    }
+
+    @Test
+    void tryUpdateSourcePartitionItem_calls_dynamoClientWrapper_correctly_for_unassigned_status_with_priority_override() {
+        final String sourceIdentifier = UUID.randomUUID().toString();
+        final Instant priorityOverride = Instant.now();
+
+        final SourcePartitionStoreItem updateItem = mock(DynamoDbSourcePartitionItem.class);
+        given(updateItem.getSourceIdentifier()).willReturn(sourceIdentifier);
+        given(updateItem.getSourcePartitionStatus()).willReturn(SourcePartitionStatus.UNASSIGNED);
+
+        given(dynamoStoreSettings.getTtl()).willReturn(null);
+
+        doNothing().when(dynamoDbClientWrapper).tryUpdatePartitionItem((DynamoDbSourcePartitionItem) updateItem);
+
+        createObjectUnderTest().tryUpdateSourcePartitionItem(updateItem, priorityOverride);
+
+        verify((DynamoDbSourcePartitionItem) updateItem).setPartitionPriority(priorityOverride.toString());
+
+        verify((DynamoDbSourcePartitionItem) updateItem).setSourceStatusCombinationKey(sourceIdentifier + "|" + SourcePartitionStatus.UNASSIGNED);
+    }
+
+    @Test
     void getAvailablePartition_with_no_item_acquired_returns_empty_optional() {
         final String ownerId = UUID.randomUUID().toString();
         final String sourceIdentifier = UUID.randomUUID().toString();
         final Duration ownershipTimeout = Duration.ofMinutes(2);
+        final Duration ttl = Duration.ofSeconds(new Random().nextInt(5)+10);
 
+        given(dynamoStoreSettings.getTtl()).willReturn(ttl);
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.ASSIGNED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.ASSIGNED),
-                1))
+                1, ttl))
                 .willReturn(Optional.empty());
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.CLOSED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.CLOSED),
-                1))
+                1, ttl))
                 .willReturn(Optional.empty());
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.UNASSIGNED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.UNASSIGNED),
-                5))
+                5, ttl))
                 .willReturn(Optional.empty());
 
         final Optional<SourcePartitionStoreItem> result = createObjectUnderTest().tryAcquireAvailablePartition(sourceIdentifier, ownerId, ownershipTimeout);
@@ -231,13 +287,14 @@ public class DynamoDbSourceCoordinationStoreTest {
         final String ownerId = UUID.randomUUID().toString();
         final String sourceIdentifier = UUID.randomUUID().toString();
         final Duration ownershipTimeout = Duration.ofMinutes(2);
-
+        final Duration ttl = Duration.ofSeconds(new Random().nextInt(5)+10);
+        given(dynamoStoreSettings.getTtl()).willReturn(ttl);
         final DynamoDbSourcePartitionItem acquiredItem = mock(DynamoDbSourcePartitionItem.class);
 
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.ASSIGNED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.ASSIGNED),
-                1))
+                1, ttl))
                 .willReturn(Optional.of(acquiredItem));
 
         final Optional<SourcePartitionStoreItem> result = createObjectUnderTest().tryAcquireAvailablePartition(sourceIdentifier, ownerId, ownershipTimeout);
@@ -253,23 +310,25 @@ public class DynamoDbSourceCoordinationStoreTest {
         final String ownerId = UUID.randomUUID().toString();
         final String sourceIdentifier = UUID.randomUUID().toString();
         final Duration ownershipTimeout = Duration.ofMinutes(2);
+        final Duration ttl = Duration.ofSeconds(new Random().nextInt(5)+10);
 
+        given(dynamoStoreSettings.getTtl()).willReturn(ttl);
         final DynamoDbSourcePartitionItem acquiredItem = mock(DynamoDbSourcePartitionItem.class);
 
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.ASSIGNED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.ASSIGNED),
-                1))
+                1, ttl))
                 .willReturn(Optional.empty());
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.UNASSIGNED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.UNASSIGNED),
-                5))
+                5, ttl))
                 .willReturn(Optional.empty());
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.CLOSED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.CLOSED),
-                1))
+                1, ttl))
                 .willReturn(Optional.of(acquiredItem));
 
         final Optional<SourcePartitionStoreItem> result = createObjectUnderTest().tryAcquireAvailablePartition(sourceIdentifier, ownerId, ownershipTimeout);
@@ -285,18 +344,20 @@ public class DynamoDbSourceCoordinationStoreTest {
         final String ownerId = UUID.randomUUID().toString();
         final String sourceIdentifier = UUID.randomUUID().toString();
         final Duration ownershipTimeout = Duration.ofMinutes(2);
+        final Duration ttl = Duration.ofSeconds(new Random().nextInt(5)+10);
 
+        given(dynamoStoreSettings.getTtl()).willReturn(ttl);
         final DynamoDbSourcePartitionItem acquiredItem = mock(DynamoDbSourcePartitionItem.class);
 
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.ASSIGNED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.ASSIGNED),
-                1))
+                1, ttl))
                 .willReturn(Optional.empty());
         given(dynamoDbClientWrapper.getAvailablePartition(ownerId, ownershipTimeout,
                 SourcePartitionStatus.UNASSIGNED,
                 String.format(SOURCE_STATUS_COMBINATION_KEY_FORMAT, sourceIdentifier, SourcePartitionStatus.UNASSIGNED),
-                5))
+                5, ttl))
                 .willReturn(Optional.of(acquiredItem));
 
         final Optional<SourcePartitionStoreItem> result = createObjectUnderTest().tryAcquireAvailablePartition(sourceIdentifier, ownerId, ownershipTimeout);
@@ -305,5 +366,25 @@ public class DynamoDbSourceCoordinationStoreTest {
         assertThat(result.get(), equalTo(acquiredItem));
 
         verifyNoMoreInteractions(dynamoDbClientWrapper);
+    }
+
+    @Test
+    void queryAllSourcePartitionItems_success() {
+        final String sourceIdentifier = UUID.randomUUID().toString();
+        final SourcePartitionStoreItem sourcePartitionStoreItem = mock(DynamoDbSourcePartitionItem.class);
+        given(dynamoDbClientWrapper.queryAllPartitions(sourceIdentifier)).willReturn(List.of(sourcePartitionStoreItem));
+        List<SourcePartitionStoreItem> sourcePartitionStoreItems = createObjectUnderTest().queryAllSourcePartitionItems(sourceIdentifier);
+        assertThat(sourcePartitionStoreItems, is(List.of(sourcePartitionStoreItem)));
+    }
+
+    @Test
+    void tryDeletePartitionItem_calls_client_wrapper_to_delete_partition() {
+        final DynamoDbSourcePartitionItem sourcePartitionStoreItem = mock(DynamoDbSourcePartitionItem.class);
+        doNothing().when(dynamoDbClientWrapper).tryDeletePartitionItem(sourcePartitionStoreItem);
+
+
+        createObjectUnderTest().tryDeletePartitionItem(sourcePartitionStoreItem);
+
+        verify(dynamoDbClientWrapper).tryDeletePartitionItem(sourcePartitionStoreItem);
     }
 }

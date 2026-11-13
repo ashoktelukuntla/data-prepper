@@ -1,6 +1,11 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ *
  */
 
 package org.opensearch.dataprepper.plugins.processor.oteltrace;
@@ -19,15 +24,18 @@ import org.opensearch.dataprepper.model.trace.Span;
 import io.micrometer.core.instrument.util.StringUtils;
 import org.opensearch.dataprepper.plugins.processor.oteltrace.model.SpanSet;
 import org.opensearch.dataprepper.plugins.processor.oteltrace.model.TraceGroup;
+import org.opensearch.dataprepper.plugins.otel.common.OTelSpanDerivationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -42,12 +50,19 @@ public class OTelTraceRawProcessor extends AbstractProcessor<Record<Span>, Recor
     private static final Logger LOG = LoggerFactory.getLogger(OTelTraceRawProcessor.class);
     public static final String TRACE_GROUP_CACHE_COUNT_METRIC_NAME = "traceGroupCacheCount";
     public static final String SPAN_SET_COUNT_METRIC_NAME = "spanSetCount";
+    public static final String GENAI_COVERAGE_COUNT_METRIC_NAME = "genAiCoverageCount";
+    public static final String GENAI_COVERAGE_SPAN_ID_COUNT_METRIC_NAME = "genAiCoverageSpanIdCount";
 
     private final long traceFlushInterval;
 
     private final Map<String, SpanSet> traceIdSpanSetMap = new ConcurrentHashMap<>();
 
     private final Cache<String, TraceGroup> traceIdTraceGroupCache;
+
+    /** Span ids covered by GenAI spans, per trace, for spans that arrive after their ancestors. */
+    private final GenAiCoverage genAiCoverage;
+    private final GenAiRootPropagation genAiRootPropagation;
+    private final boolean genAiEnrichmentEnabled;
 
     private long lastTraceFlushTime = 0L;
 
@@ -68,10 +83,22 @@ public class OTelTraceRawProcessor extends AbstractProcessor<Record<Span>, Recor
           .build();
 
 
+        genAiEnrichmentEnabled = !otelTraceRawProcessorConfig.isGenAiEnrichmentDisabled();
+        genAiRootPropagation = Objects.requireNonNullElse(
+                otelTraceRawProcessorConfig.getGenAiRootPropagation(), GenAiRootPropagation.AI_ROOT);
+        // Outlives the orphan flush: spans that arrive late are held up to two flush intervals.
+        genAiCoverage = genAiEnrichmentEnabled
+                ? GenAiCoverage.create(otelTraceRawProcessorConfig.getGenAiCoverageCacheMaxSize(),
+                        Duration.ofMillis(2 * traceFlushInterval).plus(otelTraceRawProcessorConfig.getTraceGroupCacheTimeToLive()))
+                : GenAiCoverage.NONE;
+
         pluginMetrics.gauge(TRACE_GROUP_CACHE_COUNT_METRIC_NAME, traceIdTraceGroupCache, cache -> (double) cache.estimatedSize());
         pluginMetrics.gauge(SPAN_SET_COUNT_METRIC_NAME, traceIdSpanSetMap, cache -> (double) cache.size());
+        pluginMetrics.gauge(GENAI_COVERAGE_COUNT_METRIC_NAME, genAiCoverage, coverage -> (double) coverage.estimatedSize());
+        pluginMetrics.gauge(GENAI_COVERAGE_SPAN_ID_COUNT_METRIC_NAME, genAiCoverage, coverage -> (double) coverage.spanIdCount());
 
-        LOG.info("Configured Trace Raw Processor with a trace flush interval of {} ms.", traceFlushInterval);
+        LOG.info("Configured Trace Raw Processor with a trace flush interval of {} ms, GenAI enrichment {}.",
+                traceFlushInterval, genAiEnrichmentEnabled ? "enabled with root propagation " + genAiRootPropagation : "disabled");
     }
 
     /**
@@ -88,9 +115,18 @@ public class OTelTraceRawProcessor extends AbstractProcessor<Record<Span>, Recor
         for (Record<Span> record : records) {
             final Span span = record.getData();
             processSpan(span, processedSpans);
+            fillInServiceName(span);
         }
 
         processedSpans.addAll(getTracesToFlushByGarbageCollection());
+
+        // Enrich GenAI agent traces (normalize attributes, strip conflicting sub-keys, mark agent roots, enrich roots)
+        if (genAiEnrichmentEnabled) {
+            GenAiEnrichmentHelper.enrichBatch(processedSpans, genAiCoverage, genAiRootPropagation);
+        }
+
+        // Derive server span attributes (fault, error, operation, environment)
+        OTelSpanDerivationUtil.deriveServerSpanAttributes(processedSpans);
 
         return processedSpans.stream().map(Record::new).collect(Collectors.toList());
     }
@@ -197,6 +233,7 @@ public class OTelTraceRawProcessor extends AbstractProcessor<Record<Span>, Recor
                             if (traceGroup != null) {
                                 spans.forEach(span -> {
                                     fillInTraceGroupInfo(span, traceGroup);
+                                    fillInServiceName(span);
                                     recordsToFlush.add(span);
                                 });
                             } else {
@@ -224,6 +261,11 @@ public class OTelTraceRawProcessor extends AbstractProcessor<Record<Span>, Recor
     private void fillInTraceGroupInfo(final Span span, final TraceGroup traceGroup) {
         span.setTraceGroup(traceGroup.getTraceGroup());
         span.setTraceGroupFields(traceGroup.getTraceGroupFields());
+    }
+
+    private void fillInServiceName(final Span span) {
+        // For standard OTEL getServiceName() returns service name from metadata
+        span.setServiceName(span.getServiceName());
     }
 
     private boolean shouldGarbageCollect() {

@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.kafka.buffer;
@@ -22,6 +26,8 @@ import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.plugins.buffer.blockingbuffer.BlockingBuffer;
 import org.apache.kafka.common.errors.RecordTooLargeException;
 import org.apache.kafka.common.errors.RecordBatchTooLargeException;
+import org.opensearch.dataprepper.plugins.codec.CompressionOption;
+import org.opensearch.dataprepper.plugins.encryption.EncryptionSupplier;
 import org.opensearch.dataprepper.plugins.kafka.admin.KafkaAdminAccessor;
 import org.opensearch.dataprepper.plugins.kafka.buffer.serialization.BufferSerializationFactory;
 import org.opensearch.dataprepper.plugins.kafka.common.KafkaMdc;
@@ -32,6 +38,7 @@ import org.opensearch.dataprepper.plugins.kafka.consumer.KafkaCustomConsumer;
 import org.opensearch.dataprepper.plugins.kafka.consumer.KafkaCustomConsumerFactory;
 import org.opensearch.dataprepper.plugins.kafka.producer.KafkaCustomProducer;
 import org.opensearch.dataprepper.plugins.kafka.producer.KafkaCustomProducerFactory;
+import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerProperties;
 import org.opensearch.dataprepper.plugins.kafka.service.TopicServiceFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +48,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -52,8 +60,6 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
 
     private static final Logger LOG = LoggerFactory.getLogger(KafkaBuffer.class);
     static final long EXECUTOR_SERVICE_SHUTDOWN_TIMEOUT = 30L;
-    public static final int INNER_BUFFER_CAPACITY = 1000000;
-    public static final int INNER_BUFFER_BATCH_SIZE = 250000;
     static final String WRITE = "Write";
     static final String READ = "Read";
     static final String MDC_KAFKA_PLUGIN_VALUE = "buffer";
@@ -62,36 +68,61 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
     private final AbstractBuffer<Record<Event>> innerBuffer;
     private final ExecutorService executorService;
     private final Duration drainTimeout;
+
+    private final List<KafkaCustomConsumer> consumers;
     private AtomicBoolean shutdownInProgress;
     private ByteDecoder byteDecoder;
+
+    private CompressionOption customCompressionOption;
 
     @DataPrepperPluginConstructor
     public KafkaBuffer(final PluginSetting pluginSetting, final KafkaBufferConfig kafkaBufferConfig,
                        final AcknowledgementSetManager acknowledgementSetManager,
                        final ByteDecoder byteDecoder, final AwsCredentialsSupplier awsCredentialsSupplier,
-                       final CircuitBreaker circuitBreaker) {
-        super(kafkaBufferConfig.getCustomMetricPrefix().orElse(pluginSetting.getName()), pluginSetting.getPipelineName());
-        final SerializationFactory serializationFactory = new BufferSerializationFactory(new CommonSerializationFactory());
+                       final CircuitBreaker circuitBreaker,
+                       final EncryptionSupplier encryptionSupplier) {
+        super(kafkaBufferConfig.getCustomMetricPrefix().orElse(pluginSetting.getName()+"buffer"), pluginSetting.getPipelineName());
+
+        customCompressionOption = CompressionOption.NONE;
+        // If encryption at rest is enabled, disable Kafka built-in compression and do it manually (customCompressionOption)
+        if (kafkaBufferConfig.getTopic().encryptionAtRestEnabled()) {
+            // If the user specifies a CompressionType, we use that type as our customCompressionOption and disable the builtin-Kafka compression by setting compressionType to NONE.
+            if (kafkaBufferConfig.getKafkaProducerProperties() != null && kafkaBufferConfig.getKafkaProducerProperties().getCompressionType() != null) {
+                customCompressionOption = CompressionOption.fromOptionValue(kafkaBufferConfig.getKafkaProducerProperties().getCompressionType());
+                kafkaBufferConfig.getKafkaProducerProperties().setCompressionType(CompressionOption.NONE.name().toLowerCase());
+            }
+        }
+
+        final SerializationFactory serializationFactory = new BufferSerializationFactory(new CommonSerializationFactory(), encryptionSupplier);
         final KafkaCustomProducerFactory kafkaCustomProducerFactory = new KafkaCustomProducerFactory(serializationFactory, awsCredentialsSupplier, new TopicServiceFactory());
         this.byteDecoder = byteDecoder;
         final String metricPrefixName = kafkaBufferConfig.getCustomMetricPrefix().orElse(pluginSetting.getName());
         final PluginMetrics producerMetrics = PluginMetrics.fromNames(metricPrefixName + WRITE, pluginSetting.getPipelineName());
-        producer = kafkaCustomProducerFactory.createProducer(kafkaBufferConfig, null, null, producerMetrics, null, false);
+        producer = kafkaCustomProducerFactory.createProducer(kafkaBufferConfig, null, null, producerMetrics, null, false, customCompressionOption);
         final KafkaCustomConsumerFactory kafkaCustomConsumerFactory = new KafkaCustomConsumerFactory(serializationFactory, awsCredentialsSupplier);
-        innerBuffer = new BlockingBuffer<>(INNER_BUFFER_CAPACITY, INNER_BUFFER_BATCH_SIZE, pluginSetting.getPipelineName());
+        innerBuffer = new BlockingBuffer<>(kafkaBufferConfig.getBoundedBufferSize(), kafkaBufferConfig.getBoundedBatchSize(), pluginSetting.getPipelineName());
         this.shutdownInProgress = new AtomicBoolean(false);
         final PluginMetrics consumerMetrics = PluginMetrics.fromNames(metricPrefixName + READ, pluginSetting.getPipelineName());
-        final List<KafkaCustomConsumer> consumers = kafkaCustomConsumerFactory.createConsumersForTopic(kafkaBufferConfig, kafkaBufferConfig.getTopic(),
-            innerBuffer, consumerMetrics, acknowledgementSetManager, byteDecoder, shutdownInProgress, false, circuitBreaker);
+        this.consumers = kafkaCustomConsumerFactory.createConsumersForTopic(kafkaBufferConfig, kafkaBufferConfig.getTopic(),
+            innerBuffer, consumerMetrics, acknowledgementSetManager, byteDecoder, shutdownInProgress, false, circuitBreaker, customCompressionOption, true);
         this.kafkaAdminAccessor = new KafkaAdminAccessor(kafkaBufferConfig, List.of(kafkaBufferConfig.getTopic().getGroupId()));
         this.executorService = Executors.newFixedThreadPool(consumers.size(), KafkaPluginThreadFactory.defaultExecutorThreadFactory(MDC_KAFKA_PLUGIN_VALUE));
         consumers.forEach(this.executorService::submit);
-
         this.drainTimeout = kafkaBufferConfig.getDrainTimeout();
     }
 
     @Override
-    public void writeBytes(final byte[] bytes, final String key, int timeoutInMillis) throws Exception {
+    public Optional<Integer> getMaxRequestSize() {
+        return Optional.of(producer.getMaxRequestSize());
+    }
+
+    @Override
+    public Optional<Integer> getOptimalRequestSize() {
+        return Optional.of(KafkaProducerProperties.DEFAULT_MAX_REQUEST_SIZE);
+    }
+
+    @Override
+    public void doWriteBytes(final byte[] bytes, final String key, int timeoutInMillis) throws Exception {
         try {
             setMdc();
             producer.produceRawData(bytes, key);
@@ -131,6 +162,11 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
     }
 
     @Override
+    public boolean areAcknowledgementsEnabled() {
+        return true;
+    }
+
+    @Override
     public void doWriteAll(Collection<Record<Event>> records, int timeoutInMillis) throws Exception {
         for (Record<Event> record : records) {
             doWrite(record, timeoutInMillis);
@@ -141,7 +177,11 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
     public Map.Entry<Collection<Record<Event>>, CheckpointState> doRead(int timeoutInMillis) {
         try {
             setMdc();
-            return innerBuffer.read(timeoutInMillis);
+            Map.Entry<Collection<Record<Event>>, CheckpointState> result =  innerBuffer.read(timeoutInMillis);
+            if (result != null) {
+                updateLatency(result.getKey());
+            }
+            return result;
         } finally {
             resetMdc();
         }
@@ -212,6 +252,9 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
                 executorService.shutdownNow();
             }
 
+            LOG.info("Closing {} consumers", consumers.size());
+            consumers.forEach(KafkaCustomConsumer::closeConsumer);
+
             innerBuffer.shutdown();
         } finally {
             resetMdc();
@@ -224,5 +267,9 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
 
     private static void resetMdc() {
         MDC.remove(KafkaMdc.MDC_KAFKA_PLUGIN_KEY);
+    }
+
+    public CompressionOption getCustomCompressionOption() {
+        return customCompressionOption;
     }
 }

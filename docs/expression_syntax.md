@@ -184,6 +184,13 @@ Currently, the following functions are supported
    - takes one String literal as argument. This is the key to lookup in the event's metadata. If the key contains "/", then recursive lookup into the metadata attributes is done.
    - returns the value corresponding to the argument (key) passed. Value can be of any type.
    For example, if metadata contains {"key1": "value2", "key2": 10}, then `getMetadata("key1")` returns "value2", and `getMetadata("key2")` return 10.
+ * `getEventType()`
+   - Takes no arguments.
+   - Returns the event type of the given event as a String.
+   - Throws an error if any arguments are provided.
+   - Event types is useful from routing requests based on type examples: `LOG`, `TRACE` and `METRIC`.
+   For example, if the event has an event type `"LOG"`, `getEventType()` will return `"LOG"`.
+   Example usage in an expression: `getEventType() == "LOG"`.
  * `contains()`
    - takes two String arguments. Both should be either string literals or Json Pointers with String values.
    - returns true if the second argument is a substring of the first argument. Otherwise, return false.
@@ -193,6 +200,22 @@ Currently, the following functions are supported
    - If the IP address is in the range of any given CIDR blocks, the function evaluates to true; otherwise, the function evaluates to false.
    - The function supports both IPv4 and IPv6 addresses.
    For example, `cidrContains(/sourceIp,"192.0.2.0/24","10.0.1.0/16")` evaluates to true if the event has `sourceIp` field with value "192.0.2.5".
+ * `substringAfter()`
+   - takes two String arguments: a source and a delimiter. Both should be either string literals or Json Pointers with String values.
+   - returns the substring of the source that follows the first occurrence of the delimiter. If the delimiter is not found, the original source string is returned. If the source resolves to null, null is returned.
+   For example, `substringAfter("key=a=b", "=")` returns "a=b", and `substringAfter("hello-world", "xyz")` returns "hello-world".
+ * `substringBefore()`
+   - takes two String arguments: a source and a delimiter. Both should be either string literals or Json Pointers with String values.
+   - returns the substring of the source that precedes the first occurrence of the delimiter. If the delimiter is not found, the original source string is returned. If the source resolves to null, null is returned.
+   For example, `substringBefore("key=a=b", "=")` returns "key", and `substringBefore("hello-world", "xyz")` returns "hello-world".
+ * `substringAfterLast()`
+   - takes two String arguments: a source and a delimiter. Both should be either string literals or Json Pointers with String values.
+   - returns the substring of the source that follows the last occurrence of the delimiter. If the delimiter is not found, the original source string is returned. If the source resolves to null, null is returned.
+   For example, `substringAfterLast("/app/src/main.py", "/")` returns "main.py", and `substringAfterLast("hello-world", "xyz")` returns "hello-world".
+ * `substringBeforeLast()`
+   - takes two String arguments: a source and a delimiter. Both should be either string literals or Json Pointers with String values.
+   - returns the substring of the source that precedes the last occurrence of the delimiter. If the delimiter is not found, the original source string is returned. If the source resolves to null, null is returned.
+   For example, `substringBeforeLast("/app/src/main.py", "/")` returns "/app/src", and `substringBeforeLast("hello-world", "xyz")` returns "hello-world".
 
 
 ## White Space

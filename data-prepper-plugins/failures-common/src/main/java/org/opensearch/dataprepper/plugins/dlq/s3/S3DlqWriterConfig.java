@@ -6,15 +6,20 @@
 package org.opensearch.dataprepper.plugins.dlq.s3;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.opensearch.dataprepper.aws.validator.AwsAccountId;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.Size;
 import software.amazon.awssdk.arns.Arn;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
+import software.amazon.awssdk.core.checksums.ResponseChecksumValidation;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
 import software.amazon.awssdk.services.sts.model.AssumeRoleRequest;
@@ -35,6 +40,8 @@ public class S3DlqWriterConfig {
     private static final String AWS_IAM_ROLE = "role";
     private static final String AWS_IAM = "iam";
     private static final String S3_PREFIX = "s3://";
+    private static final boolean FORCE_PATH_STYLE = false;
+    private static final boolean LEGACY_MD5_CHECKSUM = false;
 
     @JsonProperty("bucket")
     @NotEmpty
@@ -49,6 +56,12 @@ public class S3DlqWriterConfig {
     @Size(min = 1, message = "region cannot be empty string")
     private String region = DEFAULT_AWS_REGION;
 
+    @JsonProperty("force_path_style")
+    private boolean forcePathStyle = FORCE_PATH_STYLE;
+
+    @JsonProperty("legacy_md5_checksum")
+    private boolean legacyMd5Checksum = LEGACY_MD5_CHECKSUM;
+
     @JsonProperty("sts_role_arn")
     @Size(min = 20, max = 2048, message = "sts_role_arn length should be between 1 and 2048 characters")
     private String stsRoleArn;
@@ -59,6 +72,13 @@ public class S3DlqWriterConfig {
 
     @JsonProperty("sts_header_overrides")
     private Map<String, String> stsHeaderOverrides;
+
+    @JsonProperty("bucket_owner")
+    @AwsAccountId
+    private String bucketOwner;
+
+    @JsonProperty("codec")
+    private DlqCodec codec = DlqCodec.JSON;
 
     public String getBucket() {
         if (bucket.startsWith(S3_PREFIX)) {
@@ -71,8 +91,22 @@ public class S3DlqWriterConfig {
         return keyPathPrefix;
     }
 
+    public boolean getForcePathStyle() {
+        return forcePathStyle;
+    }
+
+    public boolean getLegacyMd5Checksum() {
+        return legacyMd5Checksum;
+    }
+
     public Region getRegion() {
         return Region.of(region);
+    }
+
+    public String getBucketOwner() { return bucketOwner; }
+
+    public DlqCodec getCodec() {
+        return codec;
     }
 
     private AwsCredentialsProvider getAwsCredentialsProvider() {
@@ -126,12 +160,20 @@ public class S3DlqWriterConfig {
     }
 
     public S3Client getS3Client() {
-        return S3Client.builder()
+        S3ClientBuilder s3ClientBuilder = S3Client.builder()
             .region(this.getRegion())
+            .forcePathStyle(this.getForcePathStyle())
             .credentialsProvider(this.getAwsCredentialsProvider())
             .overrideConfiguration(ClientOverrideConfiguration.builder()
                 .retryPolicy(RetryPolicy.builder().numRetries(MAX_NUMBER_OF_RETRIES).build())
-                .build())
-            .build();
+                .build());
+
+        if (legacyMd5Checksum == true) {
+          s3ClientBuilder.requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
+            .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED)
+            .addPlugin(LegacyMd5Plugin.create());
+        }
+
+        return  s3ClientBuilder.build();
     }
 }

@@ -46,6 +46,9 @@ class AuthConfigTest {
     OAuthConfig testOAuthConfig;
 
     @Mock
+    ScramAuthConfig testScramConfig;
+
+    @Mock
     PlainTextAuthConfig testPlainTextConfig;
 
     @BeforeEach
@@ -79,6 +82,16 @@ class AuthConfigTest {
     }
 
     @Test
+    void testScramAuthConfig() {
+        assertThat(authConfig, notNullValue());
+        assertThat(authConfig.getSaslAuthConfig(), notNullValue());
+        assertThat(authConfig.getSaslAuthConfig().getScramAuthConfig(), notNullValue());
+        assertThat(authConfig.getSaslAuthConfig().getScramAuthConfig(), hasProperty("username"));
+        assertThat(authConfig.getSaslAuthConfig().getScramAuthConfig(), hasProperty("password"));
+        assertThat(authConfig.getSaslAuthConfig().getScramAuthConfig(), hasProperty("mechanism"));
+    }
+
+    @Test
     void testSaslAuthConfigWithPlainText() throws NoSuchFieldException, IllegalAccessException {
         saslAuthConfig = mock(AuthConfig.SaslAuthConfig.class);
         testPlainTextConfig = mock(PlainTextAuthConfig.class);
@@ -86,6 +99,16 @@ class AuthConfigTest {
         setField(AuthConfig.class, authConfig, "saslAuthConfig", saslAuthConfig);
         assertThat(authConfig.getSaslAuthConfig(), equalTo(saslAuthConfig));
         assertThat(authConfig.getSaslAuthConfig().getPlainTextAuthConfig(), equalTo(testPlainTextConfig));
+    }
+
+    @Test
+    void testSaslAuthConfigWithScram() throws NoSuchFieldException, IllegalAccessException {
+        saslAuthConfig = mock(AuthConfig.SaslAuthConfig.class);
+        testScramConfig = mock(ScramAuthConfig.class);
+        when(saslAuthConfig.getScramAuthConfig()).thenReturn(testScramConfig);
+        setField(AuthConfig.class, authConfig, "saslAuthConfig", saslAuthConfig);
+        assertThat(authConfig.getSaslAuthConfig(), equalTo(saslAuthConfig));
+        assertThat(authConfig.getSaslAuthConfig().getScramAuthConfig(), equalTo(testScramConfig));
     }
 
     @Test
@@ -106,6 +129,36 @@ class AuthConfigTest {
         setField(AuthConfig.class, authConfig, "saslAuthConfig", saslAuthConfig);
         assertThat(authConfig.getSaslAuthConfig(), equalTo(saslAuthConfig));
         assertThat(authConfig.getSaslAuthConfig().getOAuthConfig(), equalTo(testOAuthConfig));
+    }
+
+    @Test
+    void testSaslAuthConfigWithAzureFederated() throws NoSuchFieldException, IllegalAccessException {
+        final AuthConfig.SaslAuthConfig localSaslAuthConfig = new AuthConfig.SaslAuthConfig();
+        final AzureFederatedAuthConfig azureFederatedAuthConfig = new AzureFederatedAuthConfig();
+        setField(AuthConfig.SaslAuthConfig.class, localSaslAuthConfig, "azureFederatedAuthConfig", azureFederatedAuthConfig);
+        setField(AuthConfig.class, authConfig, "saslAuthConfig", localSaslAuthConfig);
+        assertThat(authConfig.getSaslAuthConfig().getAzureFederatedAuthConfig(), equalTo(azureFederatedAuthConfig));
+    }
+
+    @Test
+    void hasOnlyOneConfig_azureFederatedAlone_isTrue() throws NoSuchFieldException, IllegalAccessException {
+        final AuthConfig.SaslAuthConfig localSaslAuthConfig = new AuthConfig.SaslAuthConfig();
+        setField(AuthConfig.SaslAuthConfig.class, localSaslAuthConfig, "azureFederatedAuthConfig", new AzureFederatedAuthConfig());
+        assertThat(localSaslAuthConfig.hasOnlyOneConfig(), equalTo(true));
+    }
+
+    @Test
+    void hasOnlyOneConfig_azureFederatedWithAnotherMechanism_isFalse() throws NoSuchFieldException, IllegalAccessException {
+        final AuthConfig.SaslAuthConfig localSaslAuthConfig = new AuthConfig.SaslAuthConfig();
+        setField(AuthConfig.SaslAuthConfig.class, localSaslAuthConfig, "azureFederatedAuthConfig", new AzureFederatedAuthConfig());
+        setField(AuthConfig.SaslAuthConfig.class, localSaslAuthConfig, "scramAuthConfig", new ScramAuthConfig());
+        assertThat(localSaslAuthConfig.hasOnlyOneConfig(), equalTo(false));
+    }
+
+    @Test
+    void azureFederatedAuthConfigField_hasValidAnnotation_soNestedNotNullsCascade() throws NoSuchFieldException {
+        final java.lang.reflect.Field field = AuthConfig.SaslAuthConfig.class.getDeclaredField("azureFederatedAuthConfig");
+        assertThat(field.getAnnotation(jakarta.validation.Valid.class), notNullValue());
     }
 
 }

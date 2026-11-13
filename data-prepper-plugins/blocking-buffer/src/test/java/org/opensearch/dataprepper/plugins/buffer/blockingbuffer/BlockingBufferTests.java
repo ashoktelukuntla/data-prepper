@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.buffer.blockingbuffer;
@@ -19,8 +23,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.opensearch.dataprepper.metrics.MetricNames;
 import org.opensearch.dataprepper.model.CheckpointState;
 import org.opensearch.dataprepper.model.buffer.SizeOverflowException;
+import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.record.Record;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -43,6 +50,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class BlockingBufferTests {
     private static final String ATTRIBUTE_BATCH_SIZE = "batch_size";
@@ -63,25 +72,32 @@ public class BlockingBufferTests {
     }
 
     @Test
-    public void testCreationUsingPluginSetting() {
-        final PluginSetting completePluginSetting = completePluginSettingForBlockingBuffer();
-        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(completePluginSetting);
+    public void testCreationUsingBlockingBufferConfig() throws JsonProcessingException {
+        final BlockingBufferConfig blockingBufferConfig = completeBlockingBufferConfig();
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
+        when(pipelineDescription.getPipelineName()).thenReturn(TEST_PIPELINE_NAME);
+        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(blockingBufferConfig, pipelineDescription);
         assertThat(blockingBuffer, notNullValue());
     }
 
     @Test
-    public void testCreationUsingNullPluginSetting() {
+    public void testCreationUsingNullBlockingBufferConfig() {
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
         try {
-            new BlockingBuffer<Record<String>>((PluginSetting) null);
+            new BlockingBuffer<Record<String>>(null, pipelineDescription);
         } catch (NullPointerException ex) {
-            assertThat(ex.getMessage(), is(equalTo("PluginSetting cannot be null")));
+            assertThat(ex.getMessage(), is(equalTo("BlockingBufferConfig cannot be null")));
         }
     }
 
     @Test
-    public void testCreationUsingDefaultPluginSettings() {
-        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(
-                BlockingBuffer.getDefaultPluginSettings());
+    public void testCreationUsingDefaultBlockingBufferConfig() throws JsonProcessingException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        String json = "{}";
+        BlockingBufferConfig config = objectMapper.readValue(json, BlockingBufferConfig.class);
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
+        when(pipelineDescription.getPipelineName()).thenReturn(TEST_PIPELINE_NAME);
+        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(config, pipelineDescription);
         assertThat(blockingBuffer, notNullValue());
     }
 
@@ -197,8 +213,10 @@ public class BlockingBufferTests {
     @ParameterizedTest
     @ValueSource(ints = {0, TEST_BATCH_READ_TIMEOUT})
     public void testBatchRead(final int readTimeout) throws Exception {
-        final PluginSetting completePluginSetting = completePluginSettingForBlockingBuffer();
-        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(completePluginSetting);
+        final BlockingBufferConfig blockingBufferConfig = completeBlockingBufferConfig();
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
+        when(pipelineDescription.getPipelineName()).thenReturn(TEST_PIPELINE_NAME);
+        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(blockingBufferConfig, pipelineDescription);
         assertThat(blockingBuffer, notNullValue());
         final int testSize = 5;
         for (int i = 0; i < testSize; i++) {
@@ -209,7 +227,7 @@ public class BlockingBufferTests {
         final Map.Entry<Collection<Record<String>>, CheckpointState> partialReadResult = blockingBuffer.read(readTimeout);
         final Collection<Record<String>> partialRecords = partialReadResult.getKey();
         final CheckpointState partialCheckpointState = partialReadResult.getValue();
-        final int expectedBatchSize = (Integer) completePluginSetting.getAttributeFromSettings(ATTRIBUTE_BATCH_SIZE);
+        final int expectedBatchSize = blockingBufferConfig.getBatchSize();
         assertThat(partialRecords.size(), is(expectedBatchSize));
         assertEquals(expectedBatchSize, partialCheckpointState.getNumRecordsToBeChecked());
         int i = 0;
@@ -235,9 +253,11 @@ public class BlockingBufferTests {
     }
 
     @Test
-    public void testBufferIsEmpty() {
-        final PluginSetting completePluginSetting = completePluginSettingForBlockingBuffer();
-        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(completePluginSetting);
+    public void testBufferIsEmpty() throws JsonProcessingException {
+        final BlockingBufferConfig blockingBufferConfig = completeBlockingBufferConfig();
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
+        when(pipelineDescription.getPipelineName()).thenReturn(TEST_PIPELINE_NAME);
+        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(blockingBufferConfig, pipelineDescription);
 
         assertTrue(blockingBuffer.isEmpty());
         verifyBufferUsageMetric(0);
@@ -245,8 +265,10 @@ public class BlockingBufferTests {
 
     @Test
     public void testBufferIsNotEmpty() throws Exception {
-        final PluginSetting completePluginSetting = completePluginSettingForBlockingBuffer();
-        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(completePluginSetting);
+        final BlockingBufferConfig blockingBufferConfig = completeBlockingBufferConfig();
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
+        when(pipelineDescription.getPipelineName()).thenReturn(TEST_PIPELINE_NAME);
+        final BlockingBuffer<Record<String>> blockingBuffer = new BlockingBuffer<>(blockingBufferConfig, pipelineDescription);
 
         Record<String> record = new Record<>("TEST");
         blockingBuffer.write(record, TEST_WRITE_TIMEOUT);
@@ -257,8 +279,10 @@ public class BlockingBufferTests {
 
     @Test
     void testNonZeroBatchDelayReturnsAllRecords() throws Exception {
-        final PluginSetting completePluginSetting = completePluginSettingForBlockingBuffer();
-        final BlockingBuffer<Record<String>> buffer = new BlockingBuffer<>(completePluginSetting);
+        final BlockingBufferConfig blockingBufferConfig = completeBlockingBufferConfig();
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
+        when(pipelineDescription.getPipelineName()).thenReturn(TEST_PIPELINE_NAME);
+        final BlockingBuffer<Record<String>> buffer = new BlockingBuffer<>(blockingBufferConfig, pipelineDescription);
         assertThat(buffer, notNullValue());
 
         final Collection<Record<String>> testRecords = generateBatchRecords(1);
@@ -283,8 +307,10 @@ public class BlockingBufferTests {
 
     @Test
     void testZeroBatchDelayReturnsAvailableRecords() throws Exception {
-        final PluginSetting completePluginSetting = completePluginSettingForBlockingBuffer();
-        final BlockingBuffer<Record<String>> buffer = new BlockingBuffer<>(completePluginSetting);
+        final BlockingBufferConfig blockingBufferConfig = completeBlockingBufferConfig();
+        PipelineDescription pipelineDescription = mock(PipelineDescription.class);
+        when(pipelineDescription.getPipelineName()).thenReturn(TEST_PIPELINE_NAME);
+        final BlockingBuffer<Record<String>> buffer = new BlockingBuffer<>(blockingBufferConfig, pipelineDescription);
         assertThat(buffer, notNullValue());
 
         final Collection<Record<String>> testRecords = generateBatchRecords(1);
@@ -328,7 +354,7 @@ public class BlockingBufferTests {
             return Stream.of(
                     Arguments.of(0, randomInt + 1, 0.0),
                     Arguments.of(1, 100, 1.0),
-                    Arguments.of(randomInt, randomInt, 100.0),
+                    Arguments.of(randomInt + 1, randomInt + 1, 100.0),
                     Arguments.of(randomInt, randomInt + 250, ((double) randomInt / (randomInt + 250)) * 100),
                     Arguments.of(6, 9, 66.66666666666666),
                     Arguments.of(531, 1000, 53.1),
@@ -344,6 +370,16 @@ public class BlockingBufferTests {
         final PluginSetting testSettings = new PluginSetting(PLUGIN_NAME, settings);
         testSettings.setPipelineName(TEST_PIPELINE_NAME);
         return testSettings;
+    }
+
+    private BlockingBufferConfig completeBlockingBufferConfig() throws JsonProcessingException {
+        final Map<String, Object> settings = new HashMap<>();
+        settings.put(ATTRIBUTE_BUFFER_SIZE, TEST_BUFFER_SIZE);
+        settings.put(ATTRIBUTE_BATCH_SIZE, TEST_BATCH_SIZE);
+        ObjectMapper objectMapper = new ObjectMapper();
+        String json = objectMapper.writeValueAsString(settings);
+        BlockingBufferConfig blockingBufferConfig = objectMapper.readValue(json, BlockingBufferConfig.class);
+        return blockingBufferConfig;
     }
 
     private Collection<Record<String>> generateBatchRecords(final int numRecords) {

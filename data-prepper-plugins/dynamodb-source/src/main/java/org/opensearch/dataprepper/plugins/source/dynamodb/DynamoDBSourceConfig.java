@@ -8,6 +8,7 @@ package org.opensearch.dataprepper.plugins.source.dynamodb;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.AwsAuthenticationConfig;
 import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.TableConfig;
@@ -22,6 +23,9 @@ import java.util.List;
 public class DynamoDBSourceConfig {
 
     @JsonProperty("tables")
+    @NotEmpty
+    @NotNull
+    @Valid
     private List<TableConfig> tableConfigs = Collections.emptyList();
 
     @JsonProperty("aws")
@@ -33,10 +37,10 @@ public class DynamoDBSourceConfig {
     private boolean acknowledgments = false;
 
     @JsonProperty("shard_acknowledgment_timeout")
-    private Duration shardAcknowledgmentTimeout = Duration.ofMinutes(10);
+    private Duration shardAcknowledgmentTimeout = Duration.ofMinutes(30);
 
     @JsonProperty("s3_data_file_acknowledgment_timeout")
-    private Duration dataFileAcknowledgmentTimeout = Duration.ofMinutes(5);
+    private Duration dataFileAcknowledgmentTimeout = Duration.ofMinutes(15);
 
     public DynamoDBSourceConfig() {
     }

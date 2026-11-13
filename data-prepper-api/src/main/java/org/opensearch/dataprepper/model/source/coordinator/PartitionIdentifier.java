@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.source.coordinator;
@@ -41,5 +45,18 @@ public class PartitionIdentifier {
         public PartitionIdentifier build() {
             return new PartitionIdentifier(this);
         }
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        PartitionIdentifier that = (PartitionIdentifier) o;
+        return Objects.equals(partitionKey, that.partitionKey);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(partitionKey);
     }
 }

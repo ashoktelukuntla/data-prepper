@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.buffer;
@@ -182,6 +186,15 @@ class DelegatingBufferTest {
 
         assertThat(createObjectUnderTest().isByteBuffer(),
                 equalTo(isByteBuffer));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void areAcksEnabled_returns_inner_areAcksEnabled(final boolean ackEnabled) {
+        when(innerBuffer.areAcknowledgementsEnabled()).thenReturn(ackEnabled);
+
+        assertThat(createObjectUnderTest().areAcknowledgementsEnabled(),
+                equalTo(ackEnabled));
     }
 
     @Test

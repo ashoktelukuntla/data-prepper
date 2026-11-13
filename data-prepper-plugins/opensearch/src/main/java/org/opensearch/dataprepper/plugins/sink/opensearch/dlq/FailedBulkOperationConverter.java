@@ -3,6 +3,7 @@ package org.opensearch.dataprepper.plugins.sink.opensearch.dlq;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import org.opensearch.client.opensearch.core.bulk.BulkResponseItem;
+import org.opensearch.dataprepper.model.codec.JsonFactories;
 import org.opensearch.dataprepper.model.failures.DlqObject;
 import org.opensearch.dataprepper.plugins.sink.opensearch.bulk.SerializedJson;
 import org.opensearch.dataprepper.plugins.sink.opensearch.BulkOperationWrapper;
@@ -15,19 +16,16 @@ import static org.opensearch.dataprepper.plugins.sink.opensearch.ErrorCauseStrin
 
 public class FailedBulkOperationConverter {
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper(JsonFactories.defaultJsonFactory());
 
     private final String pluginName;
     private final String pipelineName;
-    private final String pluginId;
 
-    public FailedBulkOperationConverter(final String pipelineName, final String pluginName, final String pluginId) {
+    public FailedBulkOperationConverter(final String pipelineName, final String pluginName) {
         Objects.requireNonNull(pipelineName);
-        Objects.requireNonNull(pluginId);
         Objects.requireNonNull(pluginName);
         this.pluginName = pluginName;
         this.pipelineName = pipelineName;
-        this.pluginId = pluginId;
     }
 
     public DlqObject convertToDlqObject(final FailedBulkOperation failedBulkOperation) {
@@ -50,17 +48,27 @@ public class FailedBulkOperationConverter {
             failedDlqDataBuilder.withMessage(failedBulkOperation.getFailure().getMessage());
         }
 
-        return DlqObject.builder()
+        DlqObject.Builder builder = DlqObject.builder()
             .withFailedData(failedDlqDataBuilder.build())
             .withPluginName(pluginName)
             .withPipelineName(pipelineName)
-            .withPluginId(pluginId)
-            .withEventHandle(bulkOperationWithHandle.getEventHandle())
-            .build();
+            .withPluginId(pluginName);
+        if (bulkOperationWithHandle.getEvent() != null) {
+            builder.withEvent(bulkOperationWithHandle.getEvent());
+        } else {
+            builder.withEventHandle(bulkOperationWithHandle.getEventHandle());
+        }
+
+        return builder.build();
     }
 
     private Object convertDocumentToGenericMap(final BulkOperationWrapper bulkOperation) {
         final SerializedJson document = (SerializedJson) bulkOperation.getDocument();
+
+        if (document == null) {
+            return ImmutableMap.of();
+        }
+
         final byte[] documentBytes = document.getSerializedJson();
         final String jsonString = new String(documentBytes, StandardCharsets.UTF_8);
 

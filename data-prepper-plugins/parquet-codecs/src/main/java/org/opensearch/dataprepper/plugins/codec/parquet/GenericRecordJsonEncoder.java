@@ -4,19 +4,24 @@
  */
 package org.opensearch.dataprepper.plugins.codec.parquet;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 
 import org.apache.avro.LogicalType;
+import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericContainer;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericEnumSymbol;
+import org.apache.avro.generic.GenericFixed;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.apache.commons.text.StringEscapeUtils;
@@ -48,7 +53,7 @@ public class GenericRecordJsonEncoder {
 
     public String serialize(GenericRecord value) {
         StringBuilder buffer = new StringBuilder();
-        serialize(value, buffer, new IdentityHashMap<>(128) );
+        serialize(value, buffer, new IdentityHashMap<>(128), null);
         String result = buffer.toString();
         return result;
     }
@@ -57,7 +62,9 @@ public class GenericRecordJsonEncoder {
             " \">>> CIRCULAR REFERENCE CANNOT BE PUT IN JSON STRING, ABORTING RECURSION <<<\" ";
 
     /** Renders a Java datum as <a href="http://www.json.org/">JSON</a>. */
-    private void serialize(final Object datum, final StringBuilder buffer, final IdentityHashMap<Object, Object> seenObjects) {
+    private void serialize(final Object datum, final StringBuilder buffer,
+                           final IdentityHashMap<Object, Object> seenObjects,
+                           final Integer decimalScale) {
         if (isRecord(datum)) {
             if (seenObjects.containsKey(datum)) {
                 buffer.append(TOSTRING_CIRCULAR_REFERENCE_ERROR_TEXT);
@@ -68,10 +75,32 @@ public class GenericRecordJsonEncoder {
             int count = 0;
             Schema schema = getRecordSchema(datum);
             for (Schema.Field f : schema.getFields()) {
-                serialize(f.name(), buffer, seenObjects);
+                serialize(f.name(), buffer, seenObjects, null); // field name
                 buffer.append(": ");
+
                 Function<Object, Object> logicalTypeConverter = getLogicalTypeConverter(f);
-                serialize(logicalTypeConverter.apply(getField(datum, f.name(), f.pos())), buffer, seenObjects);
+
+                boolean serializedDecimal = false;
+                Schema fieldSchema = f.schema();
+                if (fieldSchema.getType() == Schema.Type.UNION) {
+                    for (Schema s : fieldSchema.getTypes()) {
+                        if (s.getType() != Schema.Type.NULL) {
+                            if ((s.getType() == Schema.Type.BYTES || s.getType() == Schema.Type.FIXED)
+                                    && s.getLogicalType() instanceof LogicalTypes.Decimal) {
+                                serialize(logicalTypeConverter.apply(getField(datum, f.name(), f.pos())), buffer, seenObjects, ((LogicalTypes.Decimal) s.getLogicalType()).getScale());
+                                serializedDecimal = true;
+                                break;
+                            }
+                        }
+                    }
+                } else if (fieldSchema.getLogicalType() instanceof LogicalTypes.Decimal) {
+                    serialize(logicalTypeConverter.apply(getField(datum, f.name(), f.pos())), buffer, seenObjects, ((LogicalTypes.Decimal) fieldSchema.getLogicalType()).getScale());
+                    serializedDecimal = true;
+                }
+
+                if (!serializedDecimal) {
+                    serialize(logicalTypeConverter.apply(getField(datum, f.name(), f.pos())), buffer, seenObjects, null);
+                }
                 if (++count < schema.getFields().size())
                     buffer.append(", ");
             }
@@ -88,7 +117,7 @@ public class GenericRecordJsonEncoder {
             long last = array.size()-1;
             int i = 0;
             for (Object element : array) {
-                serialize(element, buffer, seenObjects);
+                serialize(element, buffer, seenObjects, null);
                 if (i++ < last)
                     buffer.append(", ");
             }
@@ -105,9 +134,9 @@ public class GenericRecordJsonEncoder {
             @SuppressWarnings(value="unchecked")
             Map<Object,Object> map = (Map<Object,Object>)datum;
             for (Map.Entry<Object,Object> entry : map.entrySet()) {
-                serialize(entry.getKey(), buffer, seenObjects);
+                serialize(entry.getKey(), buffer, seenObjects, null);
                 buffer.append(": ");
-                serialize(entry.getValue(), buffer, seenObjects);
+                serialize(entry.getValue(), buffer, seenObjects, null);
                 if (++count < map.size())
                     buffer.append(", ");
             }
@@ -118,10 +147,25 @@ public class GenericRecordJsonEncoder {
             writeEscapedString(datum.toString(), buffer);
             buffer.append("\"");
         } else if (isBytes(datum)) {
-            buffer.append("{\"bytes\": \"");
-            ByteBuffer bytes = ((ByteBuffer) datum).duplicate();
-            writeEscapedString(new String(bytes.array(), StandardCharsets.ISO_8859_1), buffer);
-            buffer.append("\"}");
+            if (decimalScale != null) {
+                ByteBuffer sourceBuffer = (ByteBuffer) datum;
+                byte[] bytesArray = new byte[sourceBuffer.remaining()];
+                sourceBuffer.duplicate().get(bytesArray);
+                BigInteger unscaledValue = new BigInteger(bytesArray);
+                BigDecimal decimal = new BigDecimal(unscaledValue, decimalScale);
+                buffer.append(decimal.doubleValue());
+            } else {
+                final String bytesAsString = StandardCharsets.UTF_8.decode((ByteBuffer) datum).toString();
+                final Optional<BigDecimal> bytesAsBigDecimal = getBigDecimal(bytesAsString);
+                if (bytesAsBigDecimal.isPresent()) {
+                    buffer.append(bytesAsBigDecimal.get().doubleValue());
+                } else {
+                    buffer.append("{\"bytes\": \"");
+                    ByteBuffer bytes = ((ByteBuffer) datum).duplicate();
+                    writeEscapedString(new String(bytes.array(), StandardCharsets.ISO_8859_1), buffer);
+                    buffer.append("\"}");
+                }
+            }
         } else if (((datum instanceof Float) &&       // quote Nan & Infinity
                 (((Float)datum).isInfinite() || ((Float)datum).isNaN()))
                 || ((datum instanceof Double) &&
@@ -129,13 +173,28 @@ public class GenericRecordJsonEncoder {
             buffer.append("\"");
             buffer.append(datum);
             buffer.append("\"");
-        } else if (datum instanceof GenericData) {
+        } else if (datum instanceof GenericFixed ) {
+            GenericFixed fixed = (GenericFixed) datum;
+            byte[] bytes = fixed.bytes();
+            if (decimalScale != null) {
+                BigInteger unscaledValue = new BigInteger(bytes);
+                BigDecimal decimal = new BigDecimal(unscaledValue, decimalScale);
+                buffer.append(decimal.toString());
+            }
+            //Fallback mechanism
+            else {
+                buffer.append("{\"bytes\": \"");
+                writeEscapedString(new String(bytes, StandardCharsets.ISO_8859_1), buffer);
+                buffer.append("\"}");
+            }
+        }
+        else if (datum instanceof GenericData) {
             if (seenObjects.containsKey(datum)) {
                 buffer.append(TOSTRING_CIRCULAR_REFERENCE_ERROR_TEXT);
                 return;
             }
             seenObjects.put(datum, datum);
-            serialize(datum, buffer, seenObjects);
+            serialize(datum, buffer, seenObjects, null);
             seenObjects.remove(datum);
         } else {
             // This fallback is the reason why GenericRecord toString does not
@@ -184,5 +243,13 @@ public class GenericRecordJsonEncoder {
 
     private void writeEscapedString(String string, StringBuilder builder) {
         builder.append(StringEscapeUtils.escapeJava(string));
+    }
+
+    private Optional<BigDecimal> getBigDecimal(String decimalString) {
+        try {
+            return Optional.of(new BigDecimal(decimalString));
+        } catch (final Exception e) {
+            return Optional.empty();
+        }
     }
 }

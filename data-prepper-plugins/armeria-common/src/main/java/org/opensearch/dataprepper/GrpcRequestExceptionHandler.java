@@ -1,17 +1,24 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper;
 
+import com.google.protobuf.Any;
 import com.linecorp.armeria.common.RequestContext;
 import com.linecorp.armeria.common.annotation.Nullable;
-import com.linecorp.armeria.common.grpc.GrpcStatusFunction;
+import com.linecorp.armeria.common.grpc.GoogleGrpcExceptionHandlerFunction;
+import com.linecorp.armeria.common.util.Exceptions;
 import com.linecorp.armeria.server.RequestTimeoutException;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.micrometer.core.instrument.Counter;
+
 import org.opensearch.dataprepper.exceptions.BadRequestException;
 import org.opensearch.dataprepper.exceptions.BufferWriteException;
 import org.opensearch.dataprepper.exceptions.RequestCancelledException;
@@ -20,9 +27,10 @@ import org.opensearch.dataprepper.model.buffer.SizeOverflowException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.concurrent.TimeoutException;
 
-public class GrpcRequestExceptionHandler implements GrpcStatusFunction {
+public class GrpcRequestExceptionHandler implements GoogleGrpcExceptionHandlerFunction {
     private static final Logger LOG = LoggerFactory.getLogger(GrpcRequestExceptionHandler.class);
     static final String ARMERIA_REQUEST_TIMEOUT_MESSAGE = "Timeout waiting for request to be served. This is usually due to the buffer being full.";
 
@@ -35,49 +43,79 @@ public class GrpcRequestExceptionHandler implements GrpcStatusFunction {
     private final Counter badRequestsCounter;
     private final Counter requestsTooLargeCounter;
     private final Counter internalServerErrorCounter;
+    private final RetryInfoCalculator retryInfoCalculator;
 
-    public GrpcRequestExceptionHandler(final PluginMetrics pluginMetrics) {
+    public GrpcRequestExceptionHandler(final PluginMetrics pluginMetrics, Duration retryInfoMinDelay, Duration retryInfoMaxDelay) {
         requestTimeoutsCounter = pluginMetrics.counter(REQUEST_TIMEOUTS);
         badRequestsCounter = pluginMetrics.counter(BAD_REQUESTS);
         requestsTooLargeCounter = pluginMetrics.counter(REQUESTS_TOO_LARGE);
         internalServerErrorCounter = pluginMetrics.counter(INTERNAL_SERVER_ERROR);
+        retryInfoCalculator = new RetryInfoCalculator(retryInfoMinDelay, retryInfoMaxDelay);
     }
 
     @Override
-    public @Nullable Status apply(final RequestContext context, final Throwable exception, final Metadata metadata) {
-        final Throwable exceptionCause = exception instanceof BufferWriteException ? exception.getCause() : exception;
+    public Status apply(final RequestContext ctx, final Status status, final Throwable throwable, final Metadata metadata) {
+        // Armeria's GoogleGrpcExceptionHandlerFunction returns the Status of any StatusRuntimeException/
+        // StatusException verbatim and never invokes applyStatusProto(...) for it. Protobuf deserialization
+        // failures surface as StatusRuntimeException(INTERNAL, ...) wrapping an InvalidProtocolBufferException,
+        // so without this interception the client receives an opaque HTTP 500 for what is actually a client-side
+        // data problem. Remap these to an informative INVALID_ARGUMENT (HTTP 400) before delegating to the default.
+        final Throwable cause = Exceptions.peel(throwable);
+        if (InvalidRequestExceptions.isInvalidProtobuf(cause)) {
+            badRequestsCounter.increment();
+            return Status.INVALID_ARGUMENT.withDescription(InvalidRequestExceptions.INVALID_PROTOBUF_MESSAGE).withCause(cause);
+        }
+        if (InvalidRequestExceptions.isUndecodableCompressedFrame(cause)) {
+            badRequestsCounter.increment();
+            return Status.INVALID_ARGUMENT.withDescription(InvalidRequestExceptions.COMPRESSED_FRAME_MESSAGE).withCause(cause);
+        }
+        return GoogleGrpcExceptionHandlerFunction.super.apply(ctx, status, throwable, metadata);
+    }
 
+    @Override
+    public com.google.rpc.@Nullable Status applyStatusProto(RequestContext ctx, Throwable throwable,
+                                                            Metadata metadata) {
+        final Throwable exceptionCause = throwable instanceof BufferWriteException ? throwable.getCause() : throwable;
         return handleExceptions(exceptionCause);
     }
 
-    private Status handleExceptions(final Throwable e) {
+    private com.google.rpc.Status handleExceptions(final Throwable e) {
         if (e instanceof RequestTimeoutException || e instanceof TimeoutException) {
             requestTimeoutsCounter.increment();
-            return createStatus(e, Status.RESOURCE_EXHAUSTED);
+            return createStatus(e, Status.Code.RESOURCE_EXHAUSTED);
         } else if (e instanceof SizeOverflowException) {
             requestsTooLargeCounter.increment();
-            return createStatus(e, Status.RESOURCE_EXHAUSTED);
+            return createStatus(e, Status.Code.RESOURCE_EXHAUSTED);
         } else if (e instanceof BadRequestException) {
             badRequestsCounter.increment();
-            return createStatus(e, Status.INVALID_ARGUMENT);
+            return createStatus(e, Status.Code.INVALID_ARGUMENT);
         } else if (e instanceof RequestCancelledException) {
             requestTimeoutsCounter.increment();
-            return createStatus(e, Status.CANCELLED);
+            return createStatus(e, Status.Code.CANCELLED);
         }
 
         internalServerErrorCounter.increment();
         LOG.error("Unexpected exception handling gRPC request", e);
-        return createStatus(e, Status.INTERNAL);
+        return createStatus(e, Status.Code.INTERNAL);
     }
 
-    private Status createStatus(final Throwable e, final Status status) {
+    private com.google.rpc.Status createStatus(final Throwable e, final Status.Code code) {
         final String message;
         if (e instanceof RequestTimeoutException) {
             message = ARMERIA_REQUEST_TIMEOUT_MESSAGE;
         } else {
-            message = e.getMessage() == null ? status.getCode().name() : e.getMessage();
+            message = e.getMessage() == null ? code.name() : e.getMessage();
         }
+        return createStatus(code, message);
+    }
 
-        return status.withDescription(message);
+    private com.google.rpc.Status createStatus(final Status.Code code, final String message) {
+        com.google.rpc.Status.Builder builder = com.google.rpc.Status.newBuilder()
+                .setCode(code.value())
+                .setMessage(message);
+        if (code == Status.Code.RESOURCE_EXHAUSTED) {
+            builder.addDetails(Any.pack(retryInfoCalculator.createRetryInfo()));
+        }
+        return builder.build();
     }
 }

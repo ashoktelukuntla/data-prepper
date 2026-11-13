@@ -5,8 +5,12 @@ import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -204,6 +208,26 @@ class GenericRecordJsonEncoderTest {
         assertEquals(expectedJson, json);
     }
 
+    @ParameterizedTest
+    @ValueSource(doubles = { 3.2, 5.0, 7.8})
+    void serialize_WithBytes_that_can_be_converted_to_big_decimal_Returns_expected_Json(
+            final Double decimalValue
+    ) {
+        // Test for serializing bytes with special characters
+        GenericRecord record = new GenericData.Record(SCHEMA);
+
+        final ByteBuffer buffer = StandardCharsets.UTF_8.encode(decimalValue.toString());
+        record.put("rawData", buffer);
+
+        String expectedJson = "{\"nested\": null, \"id\": null, \"value\": null, \"floatValue\": null, \"alternateIds\": null, \"metadata\": null, \"lastUpdated\": null, \"rawData\": " +
+                decimalValue + "," +
+                " \"suit\": null}";
+
+        String json = encoder.serialize(record);
+
+        assertEquals(expectedJson, json);
+    }
+
     @Test
     void registerLogicalTypeConverter_WithLogicalType_ConvertsValueUsingConverter() {
         GenericRecord record = new GenericData.Record(SCHEMA);
@@ -216,4 +240,145 @@ class GenericRecordJsonEncoderTest {
         assertEquals(expectedJson, json);
     }
 
+    @Test
+    void serialize_WithDecimalLogicalType_UsesScaleFromSchema() {
+        Schema decimalSchema = new Schema.Parser().parse(
+                "{ \"type\": \"record\", \"name\": \"DecimalRecord\", \"fields\": [" +
+                        "{\"name\": \"amount\", \"type\": [\"null\", {\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":4,\"scale\":2}]}" +
+                        "] }"
+        );
+
+        GenericRecord record = new GenericData.Record(decimalSchema);
+
+        BigDecimal value = new BigDecimal("12.34").setScale(2);
+        byte[] decimalBytes = value.unscaledValue().toByteArray();
+        record.put("amount", ByteBuffer.wrap(decimalBytes));
+
+        String json = encoder.serialize(record);
+
+        // Should output the scaled decimal number (double form) from schema
+        assertEquals("{\"amount\": 12.34}", json);
+    }
+
+    @Test
+    void serialize_WithNonNullableDecimalLogicalType_UsesScaleFromSchema() {
+        Schema decimalSchema = new Schema.Parser().parse(
+                "{ \"type\": \"record\", \"name\": \"DecimalRecord\", \"fields\": [" +
+                        "{\"name\": \"amount\", \"type\": {\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":4,\"scale\":2}}" +
+                        "] }"
+        );
+
+        GenericRecord record = new GenericData.Record(decimalSchema);
+
+        BigDecimal value = new BigDecimal("12.34").setScale(2);
+        byte[] decimalBytes = value.unscaledValue().toByteArray();
+        record.put("amount", ByteBuffer.wrap(decimalBytes));
+
+        String json = encoder.serialize(record);
+
+        // Should output the scaled decimal number (double form) from schema
+        assertEquals("{\"amount\": 12.34}", json);
+    }
+
+    @Test
+    void serialize_WithDecimalLogicalType_UsesScaleFromSchema_with_scale_three() {
+        Schema decimalSchema = new Schema.Parser().parse(
+                "{ \"type\": \"record\", \"name\": \"DecimalRecord\", \"fields\": [" +
+                        "{\"name\": \"amount\", \"type\": [\"null\", {\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":4,\"scale\":3}]}" +
+                        "] }"
+        );
+
+        GenericRecord record = new GenericData.Record(decimalSchema);
+
+        BigDecimal value = new BigDecimal("12.345").setScale(3);
+        byte[] decimalBytes = value.unscaledValue().toByteArray();
+        record.put("amount", ByteBuffer.wrap(decimalBytes));
+
+        String json = encoder.serialize(record);
+
+        // Should output the scaled decimal number (double form) from schema
+        assertEquals("{\"amount\": 12.345}", json);
+    }
+
+    @Test
+    void serialize_WithNullDecimalLogicalType_ReturnsNull() {
+        Schema decimalSchema = new Schema.Parser().parse(
+                "{ \"type\": \"record\", \"name\": \"DecimalRecord\", \"fields\": [" +
+                        "{\"name\": \"amount\", \"type\": [\"null\", {\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":4,\"scale\":2}]}" +
+                        "] }"
+        );
+
+        GenericRecord record = new GenericData.Record(decimalSchema);
+        record.put("amount", null);
+
+        String json = encoder.serialize(record);
+
+        assertEquals("{\"amount\": null}", json);
+    }
+
+    @Test
+    void serialize_WithFixedDecimalLogicalType_UsesScaleFromSchema() {
+        BigDecimal value = new BigDecimal("12.34").setScale(2);
+        byte[] decimalBytes = value.unscaledValue().toByteArray();
+        
+        Schema decimalSchema = new Schema.Parser().parse(
+                "{ \"type\": \"record\", \"name\": \"DecimalRecord\", \"fields\": [" +
+                        "{\"name\": \"amount\", \"type\": [\"null\", {\"type\":\"fixed\",\"size\":" + decimalBytes.length +
+                        ",\"name\":\"DecimalFixed\",\"logicalType\":\"decimal\",\"precision\":4,\"scale\":2}]}" +
+                        "] }"
+        );
+
+        GenericRecord record = new GenericData.Record(decimalSchema);
+        
+        Schema fixedSchema = decimalSchema.getField("amount").schema().getTypes().get(1);
+        GenericData.Fixed fixedValue = new GenericData.Fixed(fixedSchema, decimalBytes);
+        record.put("amount", fixedValue);
+
+        String json = encoder.serialize(record);
+
+        assertEquals("{\"amount\": 12.34}", json);
+    }
+
+    @Test
+    void serialize_WithNonNullableFixedDecimalLogicalType_UsesScaleFromSchema() {
+        BigDecimal value = new BigDecimal("12.3456").setScale(4);
+        byte[] decimalBytes = value.unscaledValue().toByteArray();
+        
+        Schema decimalSchema = new Schema.Parser().parse(
+                "{ \"type\": \"record\", \"name\": \"DecimalRecord\", \"fields\": [" +
+                        "{\"name\": \"amount\", \"type\": {\"type\":\"fixed\",\"size\":" + decimalBytes.length +
+                        ",\"name\":\"DecimalFixed\",\"logicalType\":\"decimal\",\"precision\":6,\"scale\":4}}" +
+                        "] }"
+        );
+
+        GenericRecord record = new GenericData.Record(decimalSchema);
+        
+        Schema fixedSchema = decimalSchema.getField("amount").schema();
+        GenericData.Fixed fixedValue = new GenericData.Fixed(fixedSchema, decimalBytes);
+        record.put("amount", fixedValue);
+
+        String json = encoder.serialize(record);
+
+        assertEquals("{\"amount\": 12.3456}", json);
+    }
+
+    @Test
+    void serialize_WithNonDecimalFixedType_ReturnsEscapedString() {
+        byte[] tokenBytes = new byte[] { 34, 92, 13, 10, 9};
+        Schema tokenSchema = new Schema.Parser().parse(
+                "{ \"type\": \"record\", \"name\": \"MyRecord\", \"fields\": [" +
+                        "{\"name\": \"token\", \"type\": {\"type\":\"fixed\",\"name\":\"TokenFixed\",\"size\":5}}" +
+                        "] }"
+        );
+
+        GenericRecord record = new GenericData.Record(tokenSchema);
+
+        Schema fixedSchema = tokenSchema.getField("token").schema();
+        GenericData.Fixed fixedValue = new GenericData.Fixed(fixedSchema, tokenBytes);
+        record.put("token", fixedValue);
+
+        String json = encoder.serialize(record);
+
+        assertEquals("{\"token\": {\"bytes\": \"\\\"\\\\\\r\\n\\t\"}}", json);
+    }
 }

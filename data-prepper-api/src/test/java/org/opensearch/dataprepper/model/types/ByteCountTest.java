@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.types;
@@ -9,8 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
-
-import java.util.Random;
 
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -21,8 +23,6 @@ import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ByteCountTest {
-    private final Random random = new Random();
-
     @ParameterizedTest
     @ValueSource(strings = {
             ".1b",
@@ -261,5 +261,25 @@ class ByteCountTest {
         final ByteCount parsedByteCount = ByteCount.parse(objectUnderTest.toString());
         assertThat(parsedByteCount, equalTo(objectUnderTest));
         assertThat(parsedByteCount.hashCode(), equalTo(objectUnderTest.hashCode()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "0b, 0b, 0",
+            "1b, 1b, 0",
+            "0b, 1b, -1",
+            "1b, 0b, 1",
+            "1kb, 1024b, 0",
+            "512b, 1kb, -1",
+            "2kb, 1kb, 1",
+            "1mb, 1kb, 1",
+            "1kb, 1mb, -1",
+            "1gb, 1mb, 1",
+            "500mb, 1gb, -1"
+    })
+    void compareTo_returns_expected_comparison_result(final String firstByteString, final String secondByteString, final int expectedResult) {
+        final ByteCount first = ByteCount.parse(firstByteString);
+        final ByteCount second = ByteCount.parse(secondByteString);
+        assertThat(first.compareTo(second), equalTo(expectedResult));
     }
 }

@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.acknowledgements;
@@ -9,6 +13,7 @@ import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.EventHandle;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.function.Consumer;
 
 /**
@@ -21,6 +26,14 @@ import java.util.function.Consumer;
  * dropped, etc)
  */
 public interface AcknowledgementSet {
+    /**
+     * Adds an event handle to the acknowledgement set. Assigns initial reference
+     * count of 1.
+     *
+     * @param eventHandle event handle to be added
+     * @since 2.11
+     */
+    void add(EventHandle eventHandle);
 
     /**
      * Adds an event to the acknowledgement set. Assigns initial reference
@@ -29,7 +42,9 @@ public interface AcknowledgementSet {
      * @param event event to be added
      * @since 2.2
      */
-    public void add(Event event);
+    default void add(Event event) {
+        add(event.getEventHandle());
+    }
 
     /**
      * Aquires a reference to the event by incrementing the reference
@@ -73,4 +88,10 @@ public interface AcknowledgementSet {
      * @since 2.6
      */
     public void addProgressCheck(final Consumer<ProgressCheck> progressCheckCallback, final Duration progressCheckInterval);
+
+    void increaseExpiry(final Duration expiryIncreaseTime);
+
+    Instant getExpirationTime();
+
+    void cancel();
 }

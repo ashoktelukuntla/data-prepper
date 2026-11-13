@@ -16,11 +16,13 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.PluginConfigObservable;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.TopicConsumerConfig;
@@ -84,6 +86,12 @@ public class KafkaSourceMultipleAuthTypeIT {
     @Mock
     private KafkaClusterConfigSupplier kafkaClusterConfigSupplier;
 
+    @Mock
+    private PluginConfigObservable pluginConfigObservable;
+
+    @Mock
+    private AwsCredentialsSupplier awsCredentialsSupplier;
+
     private TopicConfig jsonTopic;
     private TopicConfig avroTopic;
 
@@ -101,7 +109,9 @@ public class KafkaSourceMultipleAuthTypeIT {
     private String kafkaPassword;
 
     public KafkaSource createObjectUnderTest() {
-        return new KafkaSource(sourceConfig, pluginMetrics, acknowledgementSetManager, pipelineDescription, kafkaClusterConfigSupplier);
+        return new KafkaSource(
+                sourceConfig, pluginMetrics, acknowledgementSetManager, pipelineDescription,
+                kafkaClusterConfigSupplier, pluginConfigObservable, awsCredentialsSupplier);
     }
 
     @BeforeEach
@@ -114,6 +124,7 @@ public class KafkaSourceMultipleAuthTypeIT {
         receivedRecords = new ArrayList<>();
         acknowledgementSetManager = mock(AcknowledgementSetManager.class);
         pipelineDescription = mock(PipelineDescription.class);
+        awsCredentialsSupplier = mock(AwsCredentialsSupplier.class);
         when(sourceConfig.getAcknowledgementsEnabled()).thenReturn(false);
         when(sourceConfig.getSchemaConfig()).thenReturn(null);
         when(pluginMetrics.counter(anyString())).thenReturn(counter);

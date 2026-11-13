@@ -1,0 +1,669 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+package org.opensearch.dataprepper.pipeline.parser.transformer;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.Option;
+import com.jayway.jsonpath.PathNotFoundException;
+import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
+import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
+import static java.lang.String.format;
+
+import org.opensearch.dataprepper.model.configuration.PipelineModel;
+import org.opensearch.dataprepper.model.configuration.PipelinesDataFlowModel;
+import org.opensearch.dataprepper.model.configuration.SinkModel;
+import org.opensearch.dataprepper.pipeline.parser.rule.RuleEvaluator;
+import org.opensearch.dataprepper.pipeline.parser.rule.RuleEvaluatorResult;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.opensearch.dataprepper.model.annotations.TransformationFunction;
+import org.opensearch.dataprepper.model.plugin.PipelineTransformFunctionProvider;
+import javax.xml.transform.TransformerException;
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class DynamicConfigTransformer implements PipelineConfigurationTransformer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DynamicConfigTransformer.class);
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final RuleEvaluator ruleEvaluator;
+
+    /**
+     * Placeholder will look like "<<placeholderValue>>"
+     */
+    private final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\<\\<\\s*(.+?)\\s*>>");
+    /**
+     * Placeholder used to find "<<pipeline-name>>"
+     */
+    private static final String PIPELINE_NAME_PLACEHOLDER_REGEX = "\\<\\<\\s*" + Pattern.quote("pipeline-name") + "\\s*\\>\\>";
+
+    /**
+     * This is the root node of the template json. This is got when converting template model to
+     * corresponding json and will always be a constant
+     */
+    private static final String TEMPLATE_PIPELINE_ROOT_STRING = "templatePipelines";
+
+    /**
+     * placeholder for executing functions runtime based on template parameter
+     * Example: <<FUNCTION_NAME:print, PARAMETER:helloWorld>>
+     */
+    private static final String FUNCTION_CALL_PLACEHOLDER_REGEX = "FUNCTION_NAME:(.*?),PARAMETER:(.*)";
+    private final Pattern FUNCTION_CALL_PLACEHOLDER_PATTERN = Pattern.compile(FUNCTION_CALL_PLACEHOLDER_REGEX);
+
+    /**
+     * Json Path expression like "?(@.<node>)" seem to always return arrayNode even if it is an ObjectNode.
+     * JSON_PATH_ARRAY_DISAMBIGUATOR_PATTERN is a way used to detect and disambiguate the path.
+     */
+    private static final String JSON_PATH_ARRAY_DISAMBIGUATOR_PATTERN = "[?(@.";
+    private static final String RECURSIVE_JSON_PATH_PATH = "$..";
+    private static final String JSON_PATH_IDENTIFIER = "$.";
+    private static final String ARRAY_NODE_PATTERN = "([^\\[]+)\\[(\\d+)\\]$";
+    private static final String SINK_SUBPIPELINE_PLUGIN_NAME = "pipeline";
+    private static final String SUBPIPELINE_PATH = "$.source.pipeline";
+
+    /**
+     * Pattern to match overlay directives like "<<overlay sink[*].opensearch>>"
+     * The captured group is the target path (e.g., "sink[*].opensearch")
+     */
+    private static final Pattern OVERLAY_PATTERN = Pattern.compile("^<<overlay\\s+(.+?)>>$");
+
+
+    Configuration parseConfigWithJsonNode = Configuration.builder()
+            .jsonProvider(new JacksonJsonNodeJsonProvider())
+            .mappingProvider(new JacksonMappingProvider())
+            .options(Option.SUPPRESS_EXCEPTIONS)
+            .build();
+
+    public DynamicConfigTransformer(RuleEvaluator ruleEvaluator) {
+        this.ruleEvaluator = ruleEvaluator;
+    }
+
+    /**
+     * High Level Explanation:
+     * Step1: Evaluate if transformation is needed
+     * Step2: Create a Map(placeholdersMap) with key as placeholder and value as List of JsonPath
+     * in templateJson. It is populated by recursively by tracking the placeholder and along the way,
+     * store the paths.
+     * Step3: Create a Map(pipelineExactPathMap) with exact path for the placeholder value in the
+     * original pipelineJson.
+     * Step4: For every placeholder, replace the template in the corresponding template json path with
+     * node from the original pipelineJson.
+     * Step5: Convert result to PipelinesDataFlowModel.
+     *
+     * @param preTransformedPipelinesDataFlowModel - represents the pre-transformed pipeline data flow model
+     * @return PipelinesDataFlowModel - Transformed PipelinesDataFlowModel.
+     */
+    @Override
+    public PipelinesDataFlowModel transformConfiguration(PipelinesDataFlowModel preTransformedPipelinesDataFlowModel) {
+        RuleEvaluatorResult ruleEvaluatorResult = ruleEvaluator.isTransformationNeeded(preTransformedPipelinesDataFlowModel);
+
+        if (!ruleEvaluatorResult.isEvaluatedResult() ||
+                ruleEvaluatorResult.getPipelineName() == null) {
+            LOG.info("No transformation needed");
+            return preTransformedPipelinesDataFlowModel;
+        }
+
+        //To differentiate between sub-pipelines that dont need transformation.
+        String pipelineNameThatNeedsTransformation = ruleEvaluatorResult.getPipelineName();
+        PipelineTemplateModel templateModel = ruleEvaluatorResult.getPipelineTemplateModel();
+        List<String> functionProviders = ruleEvaluatorResult.getFunctionProviders();
+        LOG.info("Transforming pipeline config for pipeline {}",pipelineNameThatNeedsTransformation);
+        try {
+
+            Map<String, PipelineModel> pipelines = preTransformedPipelinesDataFlowModel.getPipelines();
+            List<String> subPipelineNames = new ArrayList<>();
+            checkForSubPipelines(preTransformedPipelinesDataFlowModel, pipelineNameThatNeedsTransformation, subPipelineNames);
+            Map<String, PipelineModel> pipelineMap = new HashMap<>();
+            pipelineMap.put(pipelineNameThatNeedsTransformation,
+                    pipelines.get(pipelineNameThatNeedsTransformation));
+            String pipelineJson = objectMapper.writeValueAsString(pipelineMap);
+
+            String templateJsonStringWithPipelinePlaceholder = objectMapper.writeValueAsString(templateModel);
+
+            //Replace pipeline name placeholder with pipelineNameThatNeedsTransformation
+            String templateJsonString = replaceTemplatePipelineName(templateJsonStringWithPipelinePlaceholder,
+                    pipelineNameThatNeedsTransformation);
+            LOG.info("Template - {}",templateJsonString);
+
+            // Find all PLACEHOLDER_PATTERN in template json string
+            Map<String, List<String>> placeholdersMap = findPlaceholdersWithPathsRecursively(templateJsonString);
+            JsonNode templateRootNode = objectMapper.readTree(templateJsonString);
+
+            // get exact path in pipelineJson
+            Map<String, String> pipelineExactPathMap = findExactPath(placeholdersMap, pipelineJson, functionProviders);
+
+            //replace placeholder with actual value in the template context
+            placeholdersMap.forEach((placeholder, templateJsonPathList) -> {
+                for (String templateJsonPath : templateJsonPathList) {
+                    String pipelineExactJsonPath = pipelineExactPathMap.get(placeholder);
+
+                    if(isJsonPath(pipelineExactJsonPath)) {
+                        JsonNode pipelineNode = JsonPath.using(parseConfigWithJsonNode).parse(pipelineJson).read(pipelineExactJsonPath);
+                        // Json Path expression like "?(@.<node>)" seem to always return arrayNode even if it is an Object.
+                        // example: $.pipeline.sink[?(@.opensearch)].opensearch.aws expression will always return array
+                        if (pipelineExactJsonPath.contains(JSON_PATH_ARRAY_DISAMBIGUATOR_PATTERN) &&
+                                pipelineNode.isArray() && pipelineNode.size() == 1) {
+                            pipelineNode = pipelineNode.get(0);
+                        }
+                        replaceNode(templateRootNode, templateJsonPath, pipelineNode);
+                    }else{ //in case it was a function call
+                        JsonNode pipelineNode = objectMapper.valueToTree(pipelineExactJsonPath);
+                        replaceNode(templateRootNode, templateJsonPath, pipelineNode);
+                    }
+                }
+            });
+
+            // Process <<overlay>> directives — merge overlay fields into resolved config
+            processOverlayDirectives(templateRootNode, pipelineJson, functionProviders);
+
+            PipelinesDataFlowModel transformedPipelinesDataFlowModel = getTransformedPipelinesDataFlowModel(pipelineNameThatNeedsTransformation,
+                    preTransformedPipelinesDataFlowModel,
+                    templateRootNode,
+                    subPipelineNames);
+            return transformedPipelinesDataFlowModel;
+        } catch (JsonProcessingException | TransformerException e) {
+            throw new RuntimeException(e);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void checkForSubPipelines(PipelinesDataFlowModel preTransformedPipelinesDataFlowModel,
+                                      String pipelineNameThatNeedsTransformation,
+                                      List<String> subPipelineNames) {
+        Map<String, PipelineModel> pipelines = preTransformedPipelinesDataFlowModel.getPipelines();
+        PipelineModel transformationPipeline = pipelines.get(pipelineNameThatNeedsTransformation);
+
+        List<SinkModel> sinks = transformationPipeline.getSinks();
+        for(SinkModel sink : sinks){
+            String pluginName = sink.getPluginName();
+            if (pluginName.equals(SINK_SUBPIPELINE_PLUGIN_NAME)) {
+                String subPipelineName = sink.getPluginSettings().get("name").toString();
+                subPipelineNames.add(subPipelineName);
+            }
+        }
+    }
+
+    /**
+     * Convert templateRootNode which contains the transformedJson to PipelinesDataFlowModel
+     *
+     * @param pipelineNameThatNeedsTransformation
+     * @param preTransformedPipelinesDataFlowModel
+     * @param templateRootNode                     - transformedJson Node.
+     * @param subPipelineNames
+     * @return PipelinesDataFlowModel - transformed model.
+     * @throws JsonProcessingException
+     */
+    private PipelinesDataFlowModel getTransformedPipelinesDataFlowModel(String pipelineNameThatNeedsTransformation,
+                                                                        PipelinesDataFlowModel preTransformedPipelinesDataFlowModel,
+                                                                        JsonNode templateRootNode,
+                                                                        List<String> subPipelineNames) throws JsonProcessingException {
+
+        //update template json
+        JsonNode transformedJsonNode = templateRootNode.get(TEMPLATE_PIPELINE_ROOT_STRING);
+        String transformedJson = objectMapper.writeValueAsString(transformedJsonNode);
+        LOG.info("{} pipeline has been transformed to :{}", pipelineNameThatNeedsTransformation, transformedJson);
+
+        //convert TransformedJson to PipelineModel with the data from preTransformedDataFlowModel.
+        //transform transformedJson to Map
+        PipelinesDataFlowModel transformedSinglePipelineDataFlowModel = objectMapper.readValue(transformedJson, PipelinesDataFlowModel.class);
+        Map<String, PipelineModel> transformedPipelines = transformedSinglePipelineDataFlowModel.getPipelines();
+
+        Map<String, PipelineModel> pipelines = preTransformedPipelinesDataFlowModel.getPipelines();
+        pipelines.forEach((pipelineName, pipeline) -> {
+            if (!pipelineName.equals(pipelineNameThatNeedsTransformation)) {
+                if(subPipelineNames.size()>0 && subPipelineNames.contains(pipelineName)){ //if there are subpipelines
+                    try {
+                        PipelineModel subPipeline = getSubModifiedPipeline(pipeline, pipelineNameThatNeedsTransformation);
+                        transformedPipelines.put(pipelineName, subPipeline);
+                    } catch (JsonProcessingException e) {
+                        throw new RuntimeException(e);
+                    }
+                }else {
+                    transformedPipelines.put(pipelineName, pipeline);
+                }
+            }
+        });
+
+        // version is not required here as it is already handled in parseStreamToPipelineDataFlowModel
+        PipelinesDataFlowModel transformedPipelinesDataFlowModel = new PipelinesDataFlowModel(
+                preTransformedPipelinesDataFlowModel.getPipelineExtensions(),
+                transformedPipelines
+        );
+        String transformedPipelinesDataFlowModelJson = objectMapper.writeValueAsString(transformedPipelinesDataFlowModel);
+        LOG.info("Transformed PipelinesDataFlowModel: {}", transformedPipelinesDataFlowModelJson);
+
+        return transformedPipelinesDataFlowModel;
+    }
+
+    private PipelineModel getSubModifiedPipeline(PipelineModel pipeline,
+                                         String pipelineNameThatNeedsTransformation) throws JsonProcessingException {
+        String pipelineJson = objectMapper.writeValueAsString(pipeline);
+        JsonNode pipelineNode = objectMapper.readTree(pipelineJson);
+        JsonNode parentNode = JsonPath.using(parseConfigWithJsonNode).parse(pipelineNode).read(SUBPIPELINE_PATH);
+
+        //TODO - Dynamically detect the 2nd pipeline in the template of the transformed pipeline
+        JsonNode newNode = new TextNode(pipelineNameThatNeedsTransformation +"-s3");
+        ((ObjectNode) parentNode).replace("name", newNode);
+        String subPipelineJson = objectMapper.writeValueAsString(pipelineNode);
+        PipelineModel subPipeline = objectMapper.readValue(subPipelineJson, PipelineModel.class);
+
+        return subPipeline;
+    }
+
+    private String replaceTemplatePipelineName(String templateJsonStringWithPipelinePlaceholder, String pipelineName) {
+        return templateJsonStringWithPipelinePlaceholder.replaceAll(PIPELINE_NAME_PLACEHOLDER_REGEX, pipelineName);
+    }
+
+    /**
+     * Recursively walks through the json to find the placeholder with a certain regEx pattern,
+     * along the way keeps track of the path.
+     *
+     * @param json
+     * @return Map<String, List < String>> , K:placeholder, V: list of jsonPath in templateJson
+     * @throws IOException
+     */
+    private Map<String, List<String>> findPlaceholdersWithPathsRecursively(String json) throws IOException {
+
+        JsonNode rootNode = objectMapper.readTree(json);
+        Map<String, List<String>> placeholdersWithPaths = new HashMap<>();
+        populateMapWithPlaceholderPaths(rootNode, "", placeholdersWithPaths);
+        return placeholdersWithPaths;
+    }
+
+    private void populateMapWithPlaceholderPaths(JsonNode currentNode, String currentPath, Map<String, List<String>> placeholdersWithPaths) {
+        if (currentNode.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = currentNode.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                // Skip overlay directive keys — they are processed separately
+                if (OVERLAY_PATTERN.matcher(entry.getKey()).matches()) {
+                    continue;
+                }
+                String path = currentPath.isEmpty() ? entry.getKey() : currentPath + "." + entry.getKey();
+                populateMapWithPlaceholderPaths(entry.getValue(), path, placeholdersWithPaths);
+            }
+        } else if (currentNode.isArray()) {
+            for (int i = 0; i < currentNode.size(); i++) {
+                String path = currentPath + "[" + i + "]";
+                populateMapWithPlaceholderPaths(currentNode.get(i), path, placeholdersWithPaths);
+            }
+        } else if (currentNode.isValueNode()) {
+            String placeHolderValue = currentNode.asText();
+            Matcher matcher = PLACEHOLDER_PATTERN.matcher(placeHolderValue);
+            if (matcher.find()) {
+                if (!placeholdersWithPaths.containsKey(placeHolderValue)) {
+                    List<String> paths = new ArrayList<>();
+                    paths.add(currentPath);
+                    placeholdersWithPaths.put(placeHolderValue, paths);
+                } else {
+                    List<String> existingPaths = placeholdersWithPaths.get(placeHolderValue);
+                    existingPaths.add(currentPath);
+                    placeholdersWithPaths.put(placeHolderValue, existingPaths);
+                }
+            }
+        }
+    }
+
+    /**
+     * Gets exact path - this is to avoid
+     * getting array values(even though it might not be an array) given
+     * a recursive expression like "$..<>"
+     *
+     * @param placeholdersMap
+     * @return Map<String, String> K:jsonPath, V:exactPath
+     * @throws IOException
+     */
+    private Map<String, String> findExactPath(Map<String, List<String>> placeholdersMap, String pipelineJson, final List<String> functionProviders) throws IOException, TransformerException {
+        Map<String, String> mapWithPaths = new HashMap<>();
+        for (String genericPathPlaceholder : placeholdersMap.keySet()) {
+            String placeHolderValue = getValueFromPlaceHolder(genericPathPlaceholder);
+
+            String value = executeFunctionPlaceholder(placeHolderValue, pipelineJson, functionProviders);
+
+        // Recursive pattern in json path is NOT allowed
+            if (value!=null && value.contains(RECURSIVE_JSON_PATH_PATH)) {
+                throw new TransformerException(format("Json path {} is not supported", value));
+            }
+            mapWithPaths.put(genericPathPlaceholder, value);
+        }
+        return mapWithPaths;
+    }
+
+    /**
+     * Get value from the placeholder field.
+     * Removes the brackets surrounding the value.
+     *
+     * @param placeholder
+     * @return String - placeholder value.
+     */
+    private String getValueFromPlaceHolder(String placeholder) {
+        // placeholder should be valid here as it is regEx matched in populateMapWithPlaceholderPaths
+        return placeholder.substring(2, placeholder.length() - 2);
+    }
+
+    /**
+     *
+     * @param functionPlaceholderValue
+     * @return String - value of the function executed
+     */
+    private String executeFunctionPlaceholder(String functionPlaceholderValue, String pipelineJson, final List<String> functionProviders){
+        Matcher functionMatcher = FUNCTION_CALL_PLACEHOLDER_PATTERN.matcher(functionPlaceholderValue);
+        if (functionMatcher.find()) {
+            String functionName = functionMatcher.group(1);
+            String parameter = functionMatcher.group(2);
+            try {
+                String parameterValue = (String)parseParameter(parameter, pipelineJson);
+                String value = (String) invokeMethod(functionProviders, functionName, String.class, parameterValue);
+                return value;
+            } catch (ReflectiveOperationException e) {
+                throw new RuntimeException(e);
+            }
+        } else {
+            return functionPlaceholderValue;
+        }
+    }
+
+    private Object parseParameter(String parameter, String pipelineJson) {
+        if(isJsonPath(parameter)){
+            JsonNode pipelineNode = JsonPath.using(parseConfigWithJsonNode).parse(pipelineJson).read(parameter);
+            if(pipelineNode==null){
+                return null;
+            }
+            if(!pipelineNode.isValueNode()){
+                throw new RuntimeException("parameter has to be a value node");
+            }
+            String nodeValue = pipelineNode.asText();
+            return nodeValue;
+        }
+        return parameter;
+    }
+
+    /**
+     * Check if the parameter passed is a json path or not.
+     * @param parameter
+     * @return boolean
+     */
+    private boolean isJsonPath(String parameter) {
+        try {
+            if (parameter == null){
+                return false;
+            }
+            if(parameter.contains(JSON_PATH_IDENTIFIER)){
+                JsonPath.compile(parameter);
+                return true;
+            }
+            return false;
+        } catch (IllegalArgumentException | PathNotFoundException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Invokes a method dynamically on a given object.
+     *
+     * @param functionProviders list of fully qualified class names to search
+     * @param methodName    the name of the method to be invoked
+     * @param parameterType the Class object representing the parameter type
+     * @param arg           the parameter to be passed to the method
+     * @return the result of the method invocation
+     * @throws ReflectiveOperationException if the method cannot be invoked
+     */
+    Object invokeMethod(final List<String> functionProviders, String methodName, Class<?> parameterType, Object arg) throws ReflectiveOperationException {
+        if (functionProviders == null || functionProviders.isEmpty()) {
+            throw new RuntimeException("function_providers cannot be empty");
+        }
+
+        Method method = resolveMethod(functionProviders, methodName, parameterType);
+
+        if (!method.isAnnotationPresent(TransformationFunction.class)) {
+            throw new RuntimeException("Method '" + methodName + "' in class '" + method.getDeclaringClass().getName() +
+                    "' is not annotated with @TransformationFunction");
+        }
+
+        return method.invoke(null, arg);
+    }
+
+    private Method resolveMethod(final List<String> functionProviders, String methodName, Class<?> parameterType) throws ReflectiveOperationException {
+        for (final String functionProvider : functionProviders) {
+            try {
+                // Load class without running static initializers
+                Class<?> candidate = Class.forName(functionProvider, false, this.getClass().getClassLoader());
+
+
+                // Validate interface before calling getMethod
+                if (!PipelineTransformFunctionProvider.class.isAssignableFrom(candidate)) {
+                    throw new RuntimeException("Class '" + candidate.getName() +
+                            "' does not implement PipelineTransformFunctionProvider");
+                }
+
+                return candidate.getMethod(methodName, parameterType);
+            } catch (NoSuchMethodException e) {
+                continue;
+            }
+        }
+
+        throw new RuntimeException("Could not find a class with method '" + methodName + "' in function_providers: " + functionProviders);
+    }
+
+    /**
+     * Processes <<overlay path>> directives in the template.
+     * For each overlay directive found as a key in any object node, merges the overlay
+     * value into the target path. Supports [*] wildcard to apply to all array elements
+     * matching a specific key.
+     *
+     * Example: <<overlay sink[*].opensearch>> with value {action: "upsert", script: {...}}
+     * will merge those fields into every opensearch sink entry.
+     */
+    private void processOverlayDirectives(JsonNode rootNode, String pipelineJson, List<String> functionProviders) {
+        processOverlayDirectivesRecursive(rootNode, pipelineJson, functionProviders);
+    }
+
+    private void processOverlayDirectivesRecursive(JsonNode node, String pipelineJson, List<String> functionProviders) {
+        if (node.isObject()) {
+            ObjectNode objectNode = (ObjectNode) node;
+            List<String> overlayKeys = new ArrayList<>();
+
+            // First pass: collect overlay keys
+            Iterator<String> fieldNames = objectNode.fieldNames();
+            while (fieldNames.hasNext()) {
+                String fieldName = fieldNames.next();
+                Matcher matcher = OVERLAY_PATTERN.matcher(fieldName);
+                if (matcher.matches()) {
+                    overlayKeys.add(fieldName);
+                }
+            }
+
+            // Second pass: apply overlays
+            for (String overlayKey : overlayKeys) {
+                Matcher matcher = OVERLAY_PATTERN.matcher(overlayKey);
+                if (matcher.matches()) {
+                    String targetPath = matcher.group(1);
+                    JsonNode overlayValue = objectNode.get(overlayKey);
+                    // Resolve any <<...>> placeholders inside overlay values
+                    resolveOverlayPlaceholders(overlayValue, pipelineJson, functionProviders);
+                    applyOverlay(objectNode, targetPath, overlayValue);
+                    objectNode.remove(overlayKey);
+                }
+            }
+
+            // Recurse into remaining children
+            Iterator<Map.Entry<String, JsonNode>> fields = objectNode.fields();
+            while (fields.hasNext()) {
+                processOverlayDirectivesRecursive(fields.next().getValue(), pipelineJson, functionProviders);
+            }
+        } else if (node.isArray()) {
+            for (JsonNode element : node) {
+                processOverlayDirectivesRecursive(element, pipelineJson, functionProviders);
+            }
+        }
+    }
+
+    /**
+     * Resolves <<...>> placeholders in overlay value nodes using the pipeline config.
+     */
+    private void resolveOverlayPlaceholders(JsonNode node, String pipelineJson, List<String> functionProviders) {
+        if (node.isObject()) {
+            ObjectNode objectNode = (ObjectNode) node;
+            List<Map.Entry<String, JsonNode>> entries = new ArrayList<>();
+            objectNode.fields().forEachRemaining(entries::add);
+            for (Map.Entry<String, JsonNode> entry : entries) {
+                if (entry.getValue().isValueNode()) {
+                    String text = entry.getValue().asText();
+                    Matcher matcher = PLACEHOLDER_PATTERN.matcher(text);
+                    if (matcher.find()) {
+                        String placeholder = getValueFromPlaceHolder(text);
+                        String resolved = executeFunctionPlaceholder(placeholder, pipelineJson, functionProviders);
+                        if (isJsonPath(resolved)) {
+                            JsonNode resolvedNode = JsonPath.using(parseConfigWithJsonNode)
+                                    .parse(pipelineJson).read(resolved);
+                            if (resolvedNode != null && resolvedNode.isArray() && resolvedNode.size() == 1
+                                    && resolved.contains(JSON_PATH_ARRAY_DISAMBIGUATOR_PATTERN)) {
+                                resolvedNode = resolvedNode.get(0);
+                            }
+                            objectNode.set(entry.getKey(), resolvedNode);
+                        } else if (resolved != null) {
+                            objectNode.set(entry.getKey(), objectMapper.valueToTree(resolved));
+                        }
+                    }
+                } else {
+                    resolveOverlayPlaceholders(entry.getValue(), pipelineJson, functionProviders);
+                }
+            }
+        } else if (node.isArray()) {
+            for (JsonNode element : node) {
+                resolveOverlayPlaceholders(element, pipelineJson, functionProviders);
+            }
+        }
+    }
+
+    /**
+     * Applies overlay to the target path within the parent node.
+     * Supports paths like "sink[*].opensearch" where [*] means all array elements.
+     */
+    private void applyOverlay(ObjectNode parentNode, String targetPath, JsonNode overlayValue) {
+        // Split path into segments: e.g., "sink[*].opensearch" -> ["sink[*]", "opensearch"]
+        String[] segments = targetPath.split("\\.");
+        applyOverlayAtPath(parentNode, segments, 0, overlayValue);
+    }
+
+    private void applyOverlayAtPath(JsonNode currentNode, String[] segments, int index, JsonNode overlayValue) {
+        if (index >= segments.length) {
+            // Reached the target — deep merge overlay into current node
+            if (currentNode.isObject() && overlayValue.isObject()) {
+                deepMerge((ObjectNode) currentNode, (ObjectNode) overlayValue);
+            }
+            return;
+        }
+
+        String segment = segments[index];
+
+        if (segment.endsWith("[*]")) {
+            // Wildcard array segment: apply to all matching elements
+            String fieldName = segment.substring(0, segment.length() - 3);
+            JsonNode arrayNode = currentNode.get(fieldName);
+            if (arrayNode != null && arrayNode.isArray()) {
+                String nextSegment = (index + 1 < segments.length) ? segments[index + 1] : null;
+                for (JsonNode element : arrayNode) {
+                    if (nextSegment != null && element.isObject() && element.has(nextSegment)) {
+                        // Apply to the nested object (e.g., the "opensearch" object within each sink entry)
+                        applyOverlayAtPath(element.get(nextSegment), segments, index + 2, overlayValue);
+                    } else if (nextSegment == null) {
+                        applyOverlayAtPath(element, segments, index + 1, overlayValue);
+                    }
+                }
+            }
+        } else {
+            // Regular field traversal
+            JsonNode childNode = currentNode.get(segment);
+            if (childNode != null) {
+                applyOverlayAtPath(childNode, segments, index + 1, overlayValue);
+            }
+        }
+    }
+
+    /**
+     * Deep merges source into target. Source values override target values.
+     */
+    private void deepMerge(ObjectNode target, ObjectNode source) {
+        Iterator<Map.Entry<String, JsonNode>> fields = source.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            String fieldName = entry.getKey();
+            JsonNode sourceValue = entry.getValue();
+
+            target.set(fieldName, sourceValue);
+        }
+    }
+
+    /**
+     * Replaces template node in the jsonPath with the node from
+     * original json.
+     *
+     * @param root json root node
+     * @param jsonPath json path
+     * @param newNode new node to be repalces with
+     */
+    public void replaceNode(JsonNode root, String jsonPath, JsonNode newNode) {
+        try {
+            if (newNode == null) {
+                LOG.info("Did not find jsonPath {}",jsonPath);
+            }
+            // Read the parent path of the target node
+            String parentPath = jsonPath.substring(0, jsonPath.lastIndexOf('.'));
+            String fieldName = jsonPath.substring(jsonPath.lastIndexOf('.') + 1);
+
+            //Handle if fieldName is an array
+            Pattern pattern = Pattern.compile(ARRAY_NODE_PATTERN);
+            Matcher matcher = pattern.matcher(fieldName);
+
+            // Find the parent node
+            JsonNode parentNode = JsonPath.using(parseConfigWithJsonNode).parse(root).read(parentPath);
+
+            // Replace the target field in the parent node
+            if(matcher.find()){
+                //Handle array
+                String field = matcher.group(1);
+                int index = Integer.parseInt(matcher.group(2));
+                JsonNode arrayNodeResult = JsonPath.using(parseConfigWithJsonNode).parse(root).read(parentPath+"."+field);
+                if (!(arrayNodeResult instanceof ArrayNode)){
+                    throw new RuntimeException("Json path is of array type, but parsed result is not arrayNode");
+                }
+                ArrayNode arrayNode = (ArrayNode) arrayNodeResult;
+                // Replace the element in the array
+                arrayNode.set(index, newNode);
+            } else if (parentNode != null && parentNode instanceof ObjectNode) {
+                ((ObjectNode) parentNode).replace(fieldName, newNode);
+            } else {
+                LOG.error("Path does not point to object node");
+                throw new IllegalArgumentException("Path does not point to object node");
+            }
+        } catch (PathNotFoundException e) {
+            LOG.error("JsonPath {} not found", jsonPath);
+            throw new PathNotFoundException(format("JsonPath {} not found", jsonPath));
+        }
+    }
+}

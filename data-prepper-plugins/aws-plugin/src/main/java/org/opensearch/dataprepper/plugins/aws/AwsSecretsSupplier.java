@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.aws;
@@ -8,21 +12,27 @@ package org.opensearch.dataprepper.plugins.aws;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
+import org.opensearch.dataprepper.model.plugin.FailedToUpdatePluginConfigValueException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
+import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueResponse;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
 public class AwsSecretsSupplier implements SecretsSupplier {
-    private static final Logger LOG = LoggerFactory.getLogger(AwsSecretsSupplier.class);
     static final TypeReference<Map<String, String>> MAP_TYPE_REFERENCE = new TypeReference<>() {
     };
-
+    private static final Logger LOG = LoggerFactory.getLogger(AwsSecretsSupplier.class);
+    private static final Object NOT_LOADED_SENTINEL = new Object(); // Sentinel to indicate secret not loaded yet
+    
     private final SecretValueDecoder secretValueDecoder;
     private final ObjectMapper objectMapper;
     private final Map<String, AwsSecretManagerConfiguration> awsSecretManagerConfigurationMap;
@@ -31,12 +41,14 @@ public class AwsSecretsSupplier implements SecretsSupplier {
 
     public AwsSecretsSupplier(
             final SecretValueDecoder secretValueDecoder,
-            final AwsSecretPluginConfig awsSecretPluginConfig, final ObjectMapper objectMapper) {
+            final AwsSecretPluginConfig awsSecretPluginConfig,
+            final ObjectMapper objectMapper,
+            final AwsCredentialsSupplier awsCredentialsSupplier) {
         this.secretValueDecoder = secretValueDecoder;
         this.objectMapper = objectMapper;
         awsSecretManagerConfigurationMap = awsSecretPluginConfig
                 .getAwsSecretManagerConfigurationMap();
-        secretsManagerClientMap = toSecretsManagerClientMap(awsSecretPluginConfig);
+        secretsManagerClientMap = toSecretsManagerClientMap(awsSecretPluginConfig, awsCredentialsSupplier);
         secretIdToValue = toSecretMap(awsSecretManagerConfigurationMap);
     }
 
@@ -48,16 +60,25 @@ public class AwsSecretsSupplier implements SecretsSupplier {
                     final AwsSecretManagerConfiguration awsSecretManagerConfiguration =
                             awsSecretManagerConfigurationMap.get(secretConfigurationId);
                     final SecretsManagerClient secretsManagerClient = entry.getValue();
+                    
+                    // Check if validation on start is skipped for this secret
+                    if (awsSecretManagerConfiguration.isSkipValidationOnStart()) {
+                        LOG.info("Skipping secret retrieval on start for secret: {} (skip_validation_on_start=true)", 
+                            awsSecretManagerConfiguration.getAwsSecretId());
+                        return NOT_LOADED_SENTINEL; // Mark as not loaded, will be loaded on first access
+                    }
+                    
                     return retrieveSecretsFromSecretManager(awsSecretManagerConfiguration, secretsManagerClient);
                 }));
     }
 
     private Map<String, SecretsManagerClient> toSecretsManagerClientMap(
-            final AwsSecretPluginConfig awsSecretPluginConfig) {
+            final AwsSecretPluginConfig awsSecretPluginConfig,
+            final AwsCredentialsSupplier  awsCredentialsSupplier) {
         return awsSecretPluginConfig.getAwsSecretManagerConfigurationMap().entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getKey, entry -> {
                     final AwsSecretManagerConfiguration awsSecretManagerConfiguration = entry.getValue();
-                    return awsSecretManagerConfiguration.createSecretManagerClient();
+                    return awsSecretManagerConfiguration.createSecretManagerClient(awsCredentialsSupplier);
                 }));
     }
 
@@ -66,7 +87,10 @@ public class AwsSecretsSupplier implements SecretsSupplier {
         if (!secretIdToValue.containsKey(secretId)) {
             throw new IllegalArgumentException(String.format("Unable to find secretId: %s", secretId));
         }
-        final Object keyValuePairs = secretIdToValue.get(secretId);
+        
+        // Load secret if it was skipped on start
+        final Object keyValuePairs = loadSecretIfNeeded(secretId);
+        
         if (!(keyValuePairs instanceof Map)) {
             throw new IllegalArgumentException(String.format("The value under secretId: %s is not a valid json.",
                     secretId));
@@ -84,8 +108,11 @@ public class AwsSecretsSupplier implements SecretsSupplier {
         if (!secretIdToValue.containsKey(secretId)) {
             throw new IllegalArgumentException(String.format("Unable to find secretId: %s", secretId));
         }
+        
+        // Load secret if it was skipped on start
+        final Object secretValue = loadSecretIfNeeded(secretId);
+        
         try {
-            final Object secretValue = secretIdToValue.get(secretId);
             return secretValue instanceof Map ? objectMapper.writeValueAsString(secretValue) :
                     secretValue;
         } catch (JsonProcessingException e) {
@@ -93,6 +120,26 @@ public class AwsSecretsSupplier implements SecretsSupplier {
                     secretId));
         }
     }
+
+    /**
+     * Loads a secret if it was skipped on start (lazy-loading).
+     * Uses {@link ConcurrentMap#compute} to ensure atomicity of the sentinel check and refresh.
+     *
+     * @param secretId The secret configuration ID
+     * @return The loaded secret value
+     */
+    private Object loadSecretIfNeeded(String secretId) {
+        return secretIdToValue.compute(secretId, (key, currentValue) -> {
+            if (currentValue == NOT_LOADED_SENTINEL) {
+                LOG.info("Secret {} was not loaded on start, loading now on first access.", key);
+                final AwsSecretManagerConfiguration config = awsSecretManagerConfigurationMap.get(key);
+                final SecretsManagerClient client = secretsManagerClientMap.get(key);
+                return retrieveSecretsFromSecretManager(config, client);
+            }
+            return currentValue;
+        });
+    }
+
 
     @Override
     public void refresh(String secretConfigId) {
@@ -114,16 +161,63 @@ public class AwsSecretsSupplier implements SecretsSupplier {
         final GetSecretValueResponse getSecretValueResponse;
         try {
             getSecretValueResponse = secretsManagerClient.getSecretValue(getSecretValueRequest);
-        } catch (Exception e) {
+        } catch (final AwsServiceException e) {
+            LOG.error("Unable to retrieve secret {}: {}", getSecretValueRequest.secretId(), e.getMessage());
             throw new RuntimeException(
                     String.format("Unable to retrieve secret: %s",
                             awsSecretManagerConfiguration.getAwsSecretId()), e);
+        } catch (final Exception ex) {
+            LOG.error("Unable to retrieve secret {} due to unexpected error", getSecretValueRequest.secretId(), ex);
+            throw new RuntimeException(
+                    String.format("Unable to retrieve secret: %s",
+                            awsSecretManagerConfiguration.getAwsSecretId()), ex);
         }
 
         try {
             return objectMapper.readValue(secretValueDecoder.decode(getSecretValueResponse), MAP_TYPE_REFERENCE);
         } catch (JsonProcessingException e) {
             return secretValueDecoder.decode(getSecretValueResponse);
+        }
+    }
+
+    @Override
+    public String updateValue(String secretId, Object newValue) {
+        return updateValue(secretId, null, newValue);
+    }
+
+    @Override
+    public String updateValue(String secretId, String keyToUpdate, Object newValue) {
+        // Ensure the secret is loaded before attempting to update
+        loadSecretIfNeeded(secretId);
+        Object currentSecretStore = secretIdToValue.get(secretId);
+        if (currentSecretStore instanceof Map) {
+            if (keyToUpdate == null) {
+                throw new IllegalArgumentException(
+                        String.format("Key to update cannot be null for a key value based secret. secretId: %s", secretId));
+            }
+            final Map<String, Object> keyValuePairs = (Map<String, Object>) currentSecretStore;
+            keyValuePairs.put(keyToUpdate, newValue);
+        } else {
+            //This store is not a key value pair store. It is just a value store.
+            //If we are here, either KeyToUpdate passed is null or we simply ignore it and just put value in the store
+            secretIdToValue.put(secretId, newValue);
+        }
+        // assuming all the secrets are string based (not binary)
+        String secretKeyValueMapAsString = (String) retrieveValue(secretId);
+        AwsSecretManagerConfiguration awsSecretManagerConfiguration = awsSecretManagerConfigurationMap.get(secretId);
+        PutSecretValueRequest putSecretValueRequest =
+                awsSecretManagerConfiguration.putSecretValueRequest(secretKeyValueMapAsString);
+        SecretsManagerClient secretsManagerClient = secretsManagerClientMap.get(secretId);
+
+        try {
+            final PutSecretValueResponse putSecretValueResponse = secretsManagerClient.putSecretValue(putSecretValueRequest);
+            LOG.info("Updated key: {} in the secret {}. New version of the store is {}",
+                    keyToUpdate, secretId, putSecretValueResponse.versionId());
+            return putSecretValueResponse.versionId();
+        } catch (Exception e) {
+            throw new FailedToUpdatePluginConfigValueException(
+                    String.format("Failed to update the secret: %s to put a new value for the key: %s",
+                            awsSecretManagerConfiguration.getAwsSecretId(), keyToUpdate), e);
         }
     }
 }

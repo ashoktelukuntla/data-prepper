@@ -10,26 +10,26 @@ import io.micrometer.core.instrument.DistributionSummary;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.codec.OutputCodec;
 import org.opensearch.dataprepper.model.event.Event;
-import org.opensearch.dataprepper.model.event.EventHandle;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.sink.OutputCodecContext;
 import org.opensearch.dataprepper.model.types.ByteCount;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.Buffer;
-import org.opensearch.dataprepper.plugins.sink.s3.accumulator.BufferFactory;
+import org.opensearch.dataprepper.plugins.sink.s3.grouping.S3Group;
+import org.opensearch.dataprepper.plugins.sink.s3.grouping.S3GroupManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import software.amazon.awssdk.awscore.exception.AwsServiceException;
-import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 /**
  * Class responsible for create {@link S3Client} object, check thresholds,
@@ -42,54 +42,50 @@ public class S3SinkService {
     public static final String OBJECTS_FAILED = "s3SinkObjectsFailed";
     public static final String NUMBER_OF_RECORDS_FLUSHED_TO_S3_SUCCESS = "s3SinkObjectsEventsSucceeded";
     public static final String NUMBER_OF_RECORDS_FLUSHED_TO_S3_FAILED = "s3SinkObjectsEventsFailed";
+
+    private static final String CURRENT_S3_GROUPS = "s3SinkNumberOfGroups";
+
+    static final String NUMBER_OF_GROUPS_FORCE_FLUSHED = "s3SinkObjectsForceFlushed";
     static final String S3_OBJECTS_SIZE = "s3SinkObjectSizeBytes";
     private final S3SinkConfig s3SinkConfig;
     private final Lock reentrantLock;
-    private final BufferFactory bufferFactory;
-    private final Collection<EventHandle> bufferedEventHandles;
-    private final OutputCodec codec;
-    private final S3Client s3Client;
-    private Buffer currentBuffer;
     private final int maxEvents;
     private final ByteCount maxBytes;
     private final Duration maxCollectionDuration;
-    private final String bucket;
     private final int maxRetries;
     private final Counter objectsSucceededCounter;
     private final Counter objectsFailedCounter;
     private final Counter numberOfRecordsSuccessCounter;
     private final Counter numberOfRecordsFailedCounter;
     private final DistributionSummary s3ObjectSizeSummary;
+
+    private final Counter numberOfObjectsForceFlushed;
     private final OutputCodecContext codecContext;
-    private final KeyGenerator keyGenerator;
     private final Duration retrySleepTime;
+
+    private final S3GroupManager s3GroupManager;
 
     /**
      * @param s3SinkConfig  s3 sink related configuration.
-     * @param bufferFactory factory of buffer.
-     * @param codec         parser.
-     * @param s3Client
-     * @param pluginMetrics metrics.
+     * @param codecContext codecContext.
+     * @param retrySleepTime retrySleepTime
+     * @param pluginMetrics pluginMetrics
+     * @param s3GroupManager s3GroupManager
      */
-    public S3SinkService(final S3SinkConfig s3SinkConfig, final BufferFactory bufferFactory,
-                         final OutputCodec codec, final OutputCodecContext codecContext, final S3Client s3Client, final KeyGenerator keyGenerator,
-                         final Duration retrySleepTime, final PluginMetrics pluginMetrics) {
+    public S3SinkService(final S3SinkConfig s3SinkConfig,
+                         final OutputCodecContext codecContext,
+                         final Duration retrySleepTime,
+                         final PluginMetrics pluginMetrics,
+                         final S3GroupManager s3GroupManager) {
         this.s3SinkConfig = s3SinkConfig;
-        this.bufferFactory = bufferFactory;
-        this.codec = codec;
-        this.s3Client = s3Client;
         this.codecContext = codecContext;
-        this.keyGenerator = keyGenerator;
         this.retrySleepTime = retrySleepTime;
         reentrantLock = new ReentrantLock();
-
-        bufferedEventHandles = new LinkedList<>();
 
         maxEvents = s3SinkConfig.getThresholdOptions().getEventCount();
         maxBytes = s3SinkConfig.getThresholdOptions().getMaximumSize();
         maxCollectionDuration = s3SinkConfig.getThresholdOptions().getEventCollectTimeOut();
 
-        bucket = s3SinkConfig.getBucketName();
         maxRetries = s3SinkConfig.getMaxUploadRetries();
 
         objectsSucceededCounter = pluginMetrics.counter(OBJECTS_SUCCEEDED);
@@ -97,8 +93,11 @@ public class S3SinkService {
         numberOfRecordsSuccessCounter = pluginMetrics.counter(NUMBER_OF_RECORDS_FLUSHED_TO_S3_SUCCESS);
         numberOfRecordsFailedCounter = pluginMetrics.counter(NUMBER_OF_RECORDS_FLUSHED_TO_S3_FAILED);
         s3ObjectSizeSummary = pluginMetrics.summary(S3_OBJECTS_SIZE);
+        numberOfObjectsForceFlushed = pluginMetrics.counter(NUMBER_OF_GROUPS_FORCE_FLUSHED);
+        pluginMetrics.gauge(CURRENT_S3_GROUPS, s3GroupManager, S3GroupManager::getNumberOfGroups);
 
-        currentBuffer = bufferFactory.getBuffer(s3Client, () -> bucket, keyGenerator::generateKey);
+
+        this.s3GroupManager = s3GroupManager;
     }
 
     /**
@@ -106,7 +105,7 @@ public class S3SinkService {
      */
     void output(Collection<Record<Event>> records) {
         // Don't acquire the lock if there's no work to be done
-        if (records.isEmpty() && currentBuffer.getEventCount() == 0) {
+        if (records.isEmpty() && s3GroupManager.hasNoGroups()) {
             return;
         }
 
@@ -114,10 +113,14 @@ public class S3SinkService {
         Exception sampleException = null;
         reentrantLock.lock();
         try {
+            final List<CompletableFuture<?>> completableFutures = new ArrayList<>();
             for (Record<Event> record : records) {
-
                 final Event event = record.getData();
                 try {
+                    final S3Group s3Group = s3GroupManager.getOrCreateGroupForEvent(event);
+                    final Buffer currentBuffer = s3Group.getBuffer();
+                    final OutputCodec codec = s3Group.getOutputCodec();
+
                     if (currentBuffer.getEventCount() == 0) {
                         codec.start(currentBuffer.getOutputStream(), event, codecContext);
                     }
@@ -125,8 +128,9 @@ public class S3SinkService {
                     codec.writeEvent(event, currentBuffer.getOutputStream());
                     int count = currentBuffer.getEventCount() + 1;
                     currentBuffer.setEventCount(count);
+                    s3Group.addEventHandle(event.getEventHandle());
 
-                    bufferedEventHandles.add(event.getEventHandle());
+                    flushToS3IfNeeded(completableFutures, s3Group, false);
                 } catch (Exception ex) {
                     if(sampleException == null) {
                         sampleException = ex;
@@ -134,10 +138,26 @@ public class S3SinkService {
 
                     failedEvents.add(event);
                 }
-
-                flushToS3IfNeeded();
             }
-            flushToS3IfNeeded();
+
+            for (final S3Group s3Group : s3GroupManager.getS3GroupEntries()) {
+                flushToS3IfNeeded(completableFutures, s3Group, false);
+            }
+
+            if (s3SinkConfig.getAggregateThresholdOptions() != null) {
+                checkAggregateThresholdsAndFlushIfNeeded(completableFutures);
+            }
+
+            if (!completableFutures.isEmpty()) {
+                try {
+                    CompletableFuture.allOf(completableFutures.toArray(new CompletableFuture[0]))
+                            .thenRun(() -> LOG.debug("All {} requests to S3 have completed", completableFutures.size()))
+                            .join();
+                } catch (final Exception e) {
+                    LOG.warn("There was an exception while waiting for all requests to complete", e);
+                }
+
+            }
         } finally {
             reentrantLock.unlock();
         }
@@ -151,73 +171,121 @@ public class S3SinkService {
         }
     }
 
-    private void releaseEventHandles(final boolean result) {
-        for (EventHandle eventHandle : bufferedEventHandles) {
-            eventHandle.release(result);
-        }
-
-        bufferedEventHandles.clear();
-    }
-
-    private void flushToS3IfNeeded() {
+    /**
+     * @param completableFutures completableFutures
+     * @param s3Group s3 group
+     * @param forceFlush force flush flag
+     * @return whether the flush was attempted
+     */
+    private boolean flushToS3IfNeeded(final List<CompletableFuture<?>> completableFutures, final S3Group s3Group, final boolean forceFlush) {
         LOG.trace("Flush to S3 check: currentBuffer.size={}, currentBuffer.events={}, currentBuffer.duration={}",
-                currentBuffer.getSize(), currentBuffer.getEventCount(), currentBuffer.getDuration());
-        if (ThresholdCheck.checkThresholdExceed(currentBuffer, maxEvents, maxBytes, maxCollectionDuration)) {
+                s3Group.getBuffer().getSize(), s3Group.getBuffer().getEventCount(), s3Group.getBuffer().getDuration());
+        if (forceFlush || ThresholdCheck.checkThresholdExceed(s3Group.getBuffer(), maxEvents, maxBytes, maxCollectionDuration)) {
+
+            s3GroupManager.removeGroup(s3Group);
             try {
-                codec.complete(currentBuffer.getOutputStream());
-                String s3Key = currentBuffer.getKey();
+
+                s3Group.getOutputCodec().complete(s3Group.getBuffer().getOutputStream());
+                String s3Key = s3Group.getBuffer().getKey();
                 LOG.info("Writing {} to S3 with {} events and size of {} bytes.",
-                        s3Key, currentBuffer.getEventCount(), currentBuffer.getSize());
-                final boolean isFlushToS3 = retryFlushToS3(currentBuffer, s3Key);
-                if (isFlushToS3) {
-                    LOG.info("Successfully saved {} to S3.", s3Key);
-                    numberOfRecordsSuccessCounter.increment(currentBuffer.getEventCount());
-                    objectsSucceededCounter.increment();
-                    s3ObjectSizeSummary.record(currentBuffer.getSize());
-                    releaseEventHandles(true);
-                } else {
-                    LOG.error("Failed to save {} to S3.", s3Key);
-                    numberOfRecordsFailedCounter.increment(currentBuffer.getEventCount());
-                    objectsFailedCounter.increment();
-                    releaseEventHandles(false);
-                }
-                currentBuffer = bufferFactory.getBuffer(s3Client, () -> bucket, keyGenerator::generateKey);
+                        s3Key, s3Group.getBuffer().getEventCount(), s3Group.getBuffer().getSize());
+
+                final Consumer<Boolean> consumeOnGroupCompletion = (success) -> {
+                    if (success) {
+
+                        LOG.info("Successfully saved {} to S3.", s3Key);
+                        numberOfRecordsSuccessCounter.increment(s3Group.getBuffer().getEventCount());
+                        objectsSucceededCounter.increment();
+                        s3ObjectSizeSummary.record(s3Group.getBuffer().getSize());
+                        s3Group.releaseEventHandles(true);
+                    } else {
+                        LOG.error("Failed to save {} to S3.", s3Key);
+                        numberOfRecordsFailedCounter.increment(s3Group.getBuffer().getEventCount());
+                        objectsFailedCounter.increment();
+                        s3Group.releaseEventHandles(false);
+                    }
+                };
+
+                final Optional<CompletableFuture<?>> completableFuture = s3Group.getBuffer().flushToS3(consumeOnGroupCompletion, this::handleFailures);
+                completableFuture.ifPresent(completableFutures::add);
+
+                return true;
             } catch (final IOException e) {
                 LOG.error("Exception while completing codec", e);
+            }
+        }
+
+        return false;
+    }
+
+    private void handleFailures(final Throwable e) {
+        LOG.error("Exception occurred while uploading records to s3 bucket: {}", e.getMessage());
+    }
+
+    private void checkAggregateThresholdsAndFlushIfNeeded(final List<CompletableFuture<?>> completableFutures) {
+        long currentTotalGroupSize = s3GroupManager.recalculateAndGetGroupSize();
+        LOG.debug("Total groups size is {} bytes", currentTotalGroupSize);
+
+        final long aggregateThresholdBytes = s3SinkConfig.getAggregateThresholdOptions().getMaximumSize().getBytes();
+        final double aggregateThresholdFlushRatio = s3SinkConfig.getAggregateThresholdOptions().getFlushCapacityRatio();
+
+        if (currentTotalGroupSize >= aggregateThresholdBytes) {
+            LOG.info("aggregate_threshold reached, the largest groups will be flushed until {} percent of the maximum size {} is remaining", aggregateThresholdFlushRatio * 100, aggregateThresholdBytes);
+
+            for (final S3Group s3Group : s3GroupManager.getS3GroupsSortedBySize()) {
+                LOG.info("Forcing a flush of object with key {} due to aggregate_threshold of {} bytes being reached", s3Group.getBuffer().getKey(), aggregateThresholdBytes);
+
+                final boolean flushed = flushToS3IfNeeded(completableFutures, s3Group, true);
+                numberOfObjectsForceFlushed.increment();
+
+                if (flushed) {
+                    currentTotalGroupSize -= s3Group.getBuffer().getSize();
+                }
+
+                if (currentTotalGroupSize <= aggregateThresholdBytes * aggregateThresholdFlushRatio) {
+                    break;
+                }
             }
         }
     }
 
     /**
-     * perform retry in-case any issue occurred, based on max_upload_retries configuration.
-     *
-     * @param currentBuffer current buffer.
-     * @param s3Key
-     * @return boolean based on object upload status.
+     * Force flush all remaining S3 groups to S3. This is called during shutdown
+     * to ensure all buffered data is uploaded before the sink shuts down.
      */
-    protected boolean retryFlushToS3(final Buffer currentBuffer, final String s3Key) {
-        boolean isUploadedToS3 = Boolean.FALSE;
-        int retryCount = maxRetries;
-        do {
-            try {
-                currentBuffer.flushToS3();
-                isUploadedToS3 = Boolean.TRUE;
-            } catch (AwsServiceException | SdkClientException e) {
-                LOG.error("Exception occurred while uploading records to s3 bucket. Retry countdown  : {} | exception:",
-                        retryCount, e);
-                LOG.info("Error Message {}", e.getMessage());
-                --retryCount;
-                if (retryCount == 0) {
-                    return isUploadedToS3;
-                }
+    void flushAllRemainingGroups() {
+        if (s3GroupManager.hasNoGroups()) {
+            LOG.debug("No remaining groups to flush during shutdown");
+            return;
+        }
 
+        LOG.info("Shutdown initiated. Flushing {} remaining S3 groups to S3.", s3GroupManager.getNumberOfGroups());
+        reentrantLock.lock();
+        try {
+            final List<CompletableFuture<?>> completableFutures = new ArrayList<>();
+
+            // Force flush all remaining groups
+            for (final S3Group s3Group : s3GroupManager.getS3GroupEntries()) {
+                LOG.info("Force flushing group with key {} containing {} events and {} bytes during shutdown",
+                        s3Group.getBuffer().getKey(), s3Group.getBuffer().getEventCount(), s3Group.getBuffer().getSize());
+                flushToS3IfNeeded(completableFutures, s3Group, true);
+                numberOfObjectsForceFlushed.increment();
+            }
+
+            // Wait for all uploads to complete
+            if (!completableFutures.isEmpty()) {
                 try {
-                    Thread.sleep(retrySleepTime.toMillis());
-                } catch (final InterruptedException ex) {
-                    LOG.warn("Interrupted while backing off before retrying S3 upload", ex);
+                    LOG.info("Waiting for {} uploads to complete during shutdown", completableFutures.size());
+                    CompletableFuture.allOf(completableFutures.toArray(new CompletableFuture[0]))
+                            .thenRun(() -> LOG.info("All {} uploads completed during shutdown", completableFutures.size()))
+                            .join();
+                    LOG.info("All remaining groups have been flushed to S3 during shutdown");
+                } catch (final Exception e) {
+                    LOG.error("Exception occurred while waiting for uploads to complete during shutdown", e);
                 }
             }
-        } while (!isUploadedToS3);
-        return isUploadedToS3;
+        } finally {
+            reentrantLock.unlock();
+        }
     }
 }

@@ -1,11 +1,14 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.sink.opensearch;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequestInterceptor;
 import org.apache.http.auth.AuthScope;
@@ -18,6 +21,10 @@ import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
 import org.apache.http.ssl.SSLContextBuilder;
 import org.apache.http.ssl.SSLContexts;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.openssl.PEMKeyPair;
+import org.bouncycastle.openssl.PEMParser;
+import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.opensearch.client.RestClient;
 import org.opensearch.client.RestClientBuilder;
 import org.opensearch.client.RestHighLevelClient;
@@ -29,8 +36,11 @@ import org.opensearch.client.transport.rest_client.RestClientTransport;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.aws.api.AwsRequestSigningApache4Interceptor;
-import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.plugins.sink.opensearch.bulk.PreSerializedJsonpMapper;
+import org.opensearch.dataprepper.plugins.sink.opensearch.configuration.AuthConfig;
+import org.opensearch.dataprepper.plugins.sink.opensearch.configuration.AwsAuthenticationConfiguration;
+import org.opensearch.dataprepper.plugins.sink.opensearch.configuration.OpenSearchSinkConfig;
+import org.opensearch.dataprepper.plugins.sink.opensearch.configuration.ServerlessOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.arns.Arn;
@@ -41,17 +51,29 @@ import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.http.apache.ProxyConfiguration;
 import software.amazon.awssdk.regions.Region;
 
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.StringReader;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
 import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
+import java.util.Collection;
 import java.time.Duration;
 import java.time.temporal.ValueRange;
 import java.util.List;
@@ -60,36 +82,17 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.DISTRIBUTION_VERSION;
 
 public class ConnectionConfiguration {
-  static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
   private static final Logger LOG = LoggerFactory.getLogger(OpenSearchSink.class);
   private static final String AWS_IAM_ROLE = "role";
   private static final String AWS_IAM = "iam";
   private static final String AOS_SERVICE_NAME = "es";
   private static final String AOSS_SERVICE_NAME = "aoss";
-  private static final String DEFAULT_AWS_REGION = "us-east-1";
 
   public static final String HOSTS = "hosts";
-  public static final String USERNAME = "username";
-  public static final String PASSWORD = "password";
-  public static final String SOCKET_TIMEOUT = "socket_timeout";
-  public static final String CONNECT_TIMEOUT = "connect_timeout";
-  public static final String CERT_PATH = "cert";
-  public static final String INSECURE = "insecure";
-  public static final String AWS_OPTION = "aws";
   public static final String AWS_SIGV4 = "aws_sigv4";
-  public static final String AWS_REGION = "aws_region";
-  public static final String AWS_STS_ROLE_ARN = "aws_sts_role_arn";
-  public static final String AWS_STS_EXTERNAL_ID = "aws_sts_external_id";
-  public static final String AWS_STS_HEADER_OVERRIDES = "aws_sts_header_overrides";
-  public static final String PROXY = "proxy";
   public static final String SERVERLESS = "serverless";
-  public static final String SERVERLESS_OPTIONS = "serverless_options";
-  public static final String COLLECTION_NAME = "collection_name";
-  public static final String NETWORK_POLICY_NAME = "network_policy_name";
-  public static final String VPCE_ID = "vpce_id";
   public static final String REQUEST_COMPRESSION_ENABLED = "enable_request_compression";
 
   /**
@@ -101,6 +104,7 @@ public class ConnectionConfiguration {
   private final List<String> hosts;
   private final String username;
   private final String password;
+  private final String apitoken;
   private final Path certPath;
   private final Integer socketTimeout;
   private final Integer connectTimeout;
@@ -111,14 +115,17 @@ public class ConnectionConfiguration {
   private final String awsStsExternalId;
   private final Map<String, String> awsStsHeaderOverrides;
   private final Optional<String> proxy;
-  private final String pipelineName;
+  private final String pathPrefix;
   private final boolean serverless;
   private final String serverlessNetworkPolicyName;
   private final String serverlessCollectionName;
   private final String serverlessVpceId;
   private final boolean requestCompressionEnabled;
+  private final AuthConfig authConfig;
+  private final byte[] clientCertContent;
+  private final byte[] clientKeyContent;
 
-  List<String> getHosts() {
+  public List<String> getHosts() {
     return hosts;
   }
 
@@ -126,11 +133,15 @@ public class ConnectionConfiguration {
     return username;
   }
 
+  String getApitoken() {
+    return apitoken;
+  }
+  
   String getPassword() {
     return password;
   }
 
-  boolean isAwsSigv4() {
+  public boolean isAwsSigv4() {
     return awsSigv4;
   }
 
@@ -148,6 +159,10 @@ public class ConnectionConfiguration {
 
   Optional<String> getProxy() {
     return proxy;
+  }
+
+  String getPathPrefix() {
+    return pathPrefix;
   }
 
   Integer getSocketTimeout() {
@@ -178,10 +193,27 @@ public class ConnectionConfiguration {
     return requestCompressionEnabled;
   }
 
+  public AuthConfig getAuthConfig() {
+    return authConfig;
+  }
+
+  byte[] getClientCertContent() {
+    return clientCertContent != null ? clientCertContent.clone() : null;
+  }
+
+  byte[] getClientKeyContent() {
+    return clientKeyContent != null ? clientKeyContent.clone() : null;
+  }
+
+  boolean hasClientCertificate() {
+    return clientCertContent != null && clientKeyContent != null;
+  }
+
   private ConnectionConfiguration(final Builder builder) {
     this.hosts = builder.hosts;
     this.username = builder.username;
     this.password = builder.password;
+    this.apitoken = builder.apitoken;
     this.socketTimeout = builder.socketTimeout;
     this.connectTimeout = builder.connectTimeout;
     this.certPath = builder.certPath;
@@ -192,95 +224,111 @@ public class ConnectionConfiguration {
     this.awsStsExternalId = builder.awsStsExternalId;
     this.awsStsHeaderOverrides = builder.awsStsHeaderOverrides;
     this.proxy = builder.proxy;
+    this.pathPrefix = builder.pathPrefix;
     this.serverless = builder.serverless;
     this.serverlessNetworkPolicyName = builder.serverlessNetworkPolicyName;
     this.serverlessCollectionName = builder.serverlessCollectionName;
     this.serverlessVpceId = builder.serverlessVpceId;
     this.requestCompressionEnabled = builder.requestCompressionEnabled;
-    this.pipelineName = builder.pipelineName;
+    this.authConfig = builder.authConfig;
+    this.clientCertContent = builder.clientCertContent;
+    this.clientKeyContent = builder.clientKeyContent;
   }
 
-  public static ConnectionConfiguration readConnectionConfiguration(final PluginSetting pluginSetting){
-    @SuppressWarnings("unchecked")
-    final List<String> hosts = (List<String>) pluginSetting.getAttributeFromSettings(HOSTS);
+  public static ConnectionConfiguration readConnectionConfiguration(final OpenSearchSinkConfig openSearchSinkConfig){
+    final List<String> hosts = openSearchSinkConfig.getHosts();
     ConnectionConfiguration.Builder builder = new ConnectionConfiguration.Builder(hosts);
-    final String username = (String) pluginSetting.getAttributeFromSettings(USERNAME);
-    builder.withPipelineName(pluginSetting.getPipelineName());
-    if (username != null) {
-      builder = builder.withUsername(username);
+    final String username = openSearchSinkConfig.getUsername();
+    final String password = openSearchSinkConfig.getPassword();
+    final String apitoken = openSearchSinkConfig.getApitoken();
+    final AuthConfig authConfig = openSearchSinkConfig.getAuthConfig();
+    if (authConfig != null) {
+      builder = builder.withAuthConfig(authConfig);
+      if (authConfig.getClientCertificate() != null) {
+        builder = builder.withClientCert(authConfig.getClientCertificate());
+      }
+      if (authConfig.getClientKey() != null) {
+        builder = builder.withClientKey(authConfig.getClientKey());
+      }
+    } else {
+      if (username != null) {
+        builder = builder.withUsername(username);
+      }
+      if (password != null) {
+        builder = builder.withPassword(password);
+      }
+      if (apitoken != null) {
+        builder = builder.withApitoken(apitoken);
+      }
     }
-    final String password = (String) pluginSetting.getAttributeFromSettings(PASSWORD);
-    if (password != null) {
-      builder = builder.withPassword(password);
-    }
-    final Integer socketTimeout = pluginSetting.getIntegerOrDefault(SOCKET_TIMEOUT, null);
+    final Integer socketTimeout = openSearchSinkConfig.getSocketTimeout();
     if (socketTimeout != null) {
       builder = builder.withSocketTimeout(socketTimeout);
     }
-    final Integer connectTimeout = pluginSetting.getIntegerOrDefault(CONNECT_TIMEOUT, null);
+    final Integer connectTimeout = openSearchSinkConfig.getConnectTimeout();
     if (connectTimeout != null) {
       builder = builder.withConnectTimeout(connectTimeout);
     }
 
-    Map<String, Object> awsOption = pluginSetting.getTypedMap(AWS_OPTION, String.class, Object.class);
-    boolean awsOptionUsed = false;
     builder.withAwsSigv4(false);
-    if (awsOption != null && !awsOption.isEmpty()) {
-        awsOptionUsed = true;
-        builder.withAwsSigv4(true);
-        builder.withAwsRegion((String)(awsOption.getOrDefault(AWS_REGION.substring(4), DEFAULT_AWS_REGION)));
-        builder.withAWSStsRoleArn((String)(awsOption.getOrDefault(AWS_STS_ROLE_ARN.substring(4), null)));
-        builder.withAWSStsExternalId((String)(awsOption.getOrDefault(AWS_STS_EXTERNAL_ID.substring(4), null)));
-        builder.withAwsStsHeaderOverrides((Map<String, String>)awsOption.get(AWS_STS_HEADER_OVERRIDES.substring(4)));
-        builder.withServerless(OBJECT_MAPPER.convertValue(
-                awsOption.getOrDefault(SERVERLESS, false), Boolean.class));
+    final AwsAuthenticationConfiguration awsAuthenticationConfiguration = openSearchSinkConfig.getAwsAuthenticationOptions();
+    boolean awsSigv4 = openSearchSinkConfig.isAwsSigv4();
+    if (awsAuthenticationConfiguration != null) {
+      builder = builder.withAwsSigv4(true)
+              .withAwsRegion(awsAuthenticationConfiguration.getAwsRegion().toString())
+              .withAWSStsRoleArn(awsAuthenticationConfiguration.getAwsStsRoleArn())
+              .withAWSStsExternalId(awsAuthenticationConfiguration.getAwsStsExternalId())
+              .withAwsStsHeaderOverrides(awsAuthenticationConfiguration.getAwsStsHeaderOverrides())
+              .withServerless(awsAuthenticationConfiguration.isServerlessCollection());
 
-        Map<String, String> serverlessOptions = (Map<String, String>) awsOption.get(SERVERLESS_OPTIONS);
-        if (serverlessOptions != null && !serverlessOptions.isEmpty()) {
-          builder.withServerlessNetworkPolicyName((String)(serverlessOptions.getOrDefault(NETWORK_POLICY_NAME, null)));
-          builder.withServerlessCollectionName((String)(serverlessOptions.getOrDefault(COLLECTION_NAME, null)));
-          builder.withServerlessVpceId((String)(serverlessOptions.getOrDefault(VPCE_ID, null)));
-        }
-    } else {
+      final ServerlessOptions serverlessOptions = awsAuthenticationConfiguration.getServerlessOptions();
+      if (serverlessOptions != null) {
+        builder = builder.withServerlessNetworkPolicyName(serverlessOptions.getNetworkPolicyName())
+                .withServerlessCollectionName(serverlessOptions.getCollectionName())
+                .withServerlessVpceId(serverlessOptions.getVpceId());
+      }
+    } else if (awsSigv4) {
+      builder = builder.withAwsSigv4(awsSigv4)
+              .withAwsRegion(openSearchSinkConfig.getAwsRegion())
+              .withAWSStsRoleArn(openSearchSinkConfig.getAwsStsRoleArn())
+              .withAWSStsExternalId(openSearchSinkConfig.getAwsStsExternalId())
+              .withAwsStsHeaderOverrides(openSearchSinkConfig.getAwsStsHeaderOverrides());
+
+      final ServerlessOptions serverlessOptions = openSearchSinkConfig.getServerlessOptions();
+      if (serverlessOptions != null) {
+        builder = builder.withServerlessNetworkPolicyName(serverlessOptions.getNetworkPolicyName())
+                .withServerlessCollectionName(serverlessOptions.getCollectionName())
+                .withServerlessVpceId(serverlessOptions.getVpceId());
+      }
+    }  else {
       builder.withServerless(false);
     }
-    boolean awsSigv4 = pluginSetting.getBooleanOrDefault(AWS_SIGV4, false);
-    final String awsOptionConflictMessage = String.format("%s option cannot be used along with %s option", AWS_SIGV4, AWS_OPTION);
-    if (awsSigv4) {
-      if (awsOptionUsed) {
-        throw new RuntimeException(awsOptionConflictMessage);
-      }
-      builder.withAwsSigv4(true);
-      builder.withAwsRegion(pluginSetting.getStringOrDefault(AWS_REGION, DEFAULT_AWS_REGION));
-      builder.withAWSStsRoleArn(pluginSetting.getStringOrDefault(AWS_STS_ROLE_ARN, null));
-      builder.withAWSStsExternalId(pluginSetting.getStringOrDefault(AWS_STS_EXTERNAL_ID, null));
-      builder.withAwsStsHeaderOverrides(pluginSetting.getTypedMap(AWS_STS_HEADER_OVERRIDES, String.class, String.class));
+
+    final String certPath = openSearchSinkConfig.getCertPath();
+    final boolean insecure = openSearchSinkConfig.isInsecure();
+    // Insecure == true will override configured certPath
+    if (insecure) {
+      builder.withInsecure(insecure);
+    } else if (certPath != null) {
+      builder.withCert(certPath);
     }
 
-    final String certPath = pluginSetting.getStringOrDefault(CERT_PATH, null);
-    final boolean insecure = pluginSetting.getBooleanOrDefault(INSECURE, false);
-    if (certPath != null) {
-      builder = builder.withCert(certPath);
-    } else {
-      //We will set insecure flag only if certPath is null
-      builder = builder.withInsecure(insecure);
+    final String proxy = openSearchSinkConfig.getProxy();
+    if (proxy != null) {
+      builder = builder.withProxy(proxy);
     }
-    final String proxy = pluginSetting.getStringOrDefault(PROXY, null);
-    builder = builder.withProxy(proxy);
 
-    final String distributionVersionName = pluginSetting.getStringOrDefault(DISTRIBUTION_VERSION,
-            DistributionVersion.DEFAULT.getVersion());
-    final DistributionVersion distributionVersion = DistributionVersion.fromTypeName(distributionVersionName);
-    final boolean requestCompressionEnabled = pluginSetting.getBooleanOrDefault(
-            REQUEST_COMPRESSION_ENABLED, !DistributionVersion.ES6.equals(distributionVersion));
+    final String pathPrefix = openSearchSinkConfig.getPathPrefix();
+    if (pathPrefix != null) {
+      builder = builder.withPathPrefix(pathPrefix);
+    }
+
+    final boolean requestCompressionEnabled = openSearchSinkConfig.getEnableRequestCompression();
     builder = builder.withRequestCompressionEnabled(requestCompressionEnabled);
 
     return builder.build();
   }
 
-  public String getPipelineName() {
-    return pipelineName;
-  }
 
   public RestHighLevelClient createClient(AwsCredentialsSupplier awsCredentialsSupplier) {
     final HttpHost[] httpHosts = new HttpHost[hosts.size()];
@@ -290,6 +338,9 @@ public class ConnectionConfiguration {
       i++;
     }
     final RestClientBuilder restClientBuilder = RestClient.builder(httpHosts);
+    if (pathPrefix != null) {
+      restClientBuilder.setPathPrefix(pathPrefix);
+    }
     /*
      * Given that this is a patch release, we will support only the IAM based access policy AES domains.
      * We will not support FGAC and Custom endpoint domains. This will be followed in the next version.
@@ -341,14 +392,30 @@ public class ConnectionConfiguration {
 
   private void attachUserCredentials(final RestClientBuilder restClientBuilder) {
     final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-    if (username != null) {
-      LOG.info("Using the username provided in the config.");
-      credentialsProvider.setCredentials(
-              AuthScope.ANY, new UsernamePasswordCredentials(username, password));
+    if (authConfig != null) {
+      if (authConfig.getUsername() != null) {
+        LOG.info("Using the authentication provided in the config.");
+        credentialsProvider.setCredentials(
+                AuthScope.ANY, new UsernamePasswordCredentials(authConfig.getUsername(), authConfig.getPassword()));
+      }
+    } else {
+      if (username != null) {
+        LOG.info("Using the username provided in the config.");
+        credentialsProvider.setCredentials(
+                AuthScope.ANY, new UsernamePasswordCredentials(username, password));
+      }
     }
     restClientBuilder.setHttpClientConfigCallback(
             httpClientBuilder -> {
               httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
+              // Add authorization header if configured
+              if (apitoken != null) {
+                LOG.info("Adding authorization header from auth config.");
+                httpClientBuilder.addInterceptorLast((HttpRequestInterceptor) (request, context) -> {
+                  request.addHeader("Authorization", "bearer " + apitoken);
+                });
+              }
+
               attachSSLContext(httpClientBuilder);
               setHttpProxyIfApplicable(httpClientBuilder);
               return httpClientBuilder;
@@ -373,26 +440,107 @@ public class ConnectionConfiguration {
   }
 
   private void attachSSLContext(final HttpAsyncClientBuilder httpClientBuilder) {
-    final SSLContext sslContext = certPath != null ? getCAStrategy(certPath) : getTrustAllStrategy();
-    httpClientBuilder.setSSLContext(sslContext);
+    final SSLContext sslContext;
+    if (hasClientCertificate()) {
+      sslContext = getSSLContextWithClientCert();
+    } else if(certPath != null) {
+      sslContext = getCAStrategy(certPath);
+    } else if(this.insecure) {
+      sslContext = getTrustAllStrategy();
+    } else {
+      sslContext = null;
+    }
+    if(sslContext != null) {
+      httpClientBuilder.setSSLContext(sslContext);
+    }
+
     if (this.insecure) {
       httpClientBuilder.setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
+    }
+  }
+
+  private SSLContext getSSLContextWithClientCert() {
+    LOG.info("Using client certificate authentication.");
+    try {
+      final SSLContextBuilder sslContextBuilder = SSLContexts.custom();
+
+      if (certPath != null) {
+        sslContextBuilder.loadTrustMaterial(loadTrustStore(certPath), null);
+      } else if (insecure) {
+        sslContextBuilder.loadTrustMaterial(null, new TrustAllStrategy());
+      }
+
+      final KeyStore keyStore = loadClientKeyStore(clientCertContent, clientKeyContent);
+      sslContextBuilder.loadKeyMaterial(keyStore, "".toCharArray());
+
+      return sslContextBuilder.build();
+    } catch (GeneralSecurityException ex) {
+      throw new RuntimeException("Failed to create SSL context with client certificate", ex);
+    }
+  }
+
+  private static KeyStore loadTrustStore(final Path caCertPath) {
+    try {
+      final CertificateFactory factory = CertificateFactory.getInstance("X.509");
+      final Collection<? extends Certificate> certs;
+      try (InputStream is = Files.newInputStream(caCertPath)) {
+        certs = factory.generateCertificates(is);
+      }
+      final KeyStore trustStore = KeyStore.getInstance("pkcs12");
+      trustStore.load(null, null);
+      int idx = 0;
+      for (final Certificate ca : certs) {
+        trustStore.setCertificateEntry("ca-" + idx++, ca);
+      }
+      return trustStore;
+    } catch (CertificateException | KeyStoreException | IOException | NoSuchAlgorithmException ex) {
+      throw new RuntimeException("Failed to load trust store", ex);
+    }
+  }
+
+  private static KeyStore loadClientKeyStore(final byte[] certContent, final byte[] keyContent) {
+    try {
+      final CertificateFactory factory = CertificateFactory.getInstance("X.509");
+      final Collection<? extends Certificate> certs;
+      try (InputStream is = new ByteArrayInputStream(certContent)) {
+        certs = factory.generateCertificates(is);
+      }
+
+      final PrivateKey privateKey = loadPrivateKey(new String(keyContent, StandardCharsets.UTF_8));
+
+      final KeyStore keyStore = KeyStore.getInstance("pkcs12");
+      keyStore.load(null, null);
+      keyStore.setKeyEntry("client", privateKey, "".toCharArray(), certs.toArray(new Certificate[0]));
+
+      return keyStore;
+    } catch (GeneralSecurityException | IOException ex) {
+      throw new RuntimeException("Failed to load client certificate and key", ex);
+    }
+  }
+
+  private static PrivateKey loadPrivateKey(final String keyContent) throws IOException {
+    try (final PEMParser pemParser = new PEMParser(new StringReader(keyContent))) {
+      final Object object = pemParser.readObject();
+      if (object == null) {
+        throw new RuntimeException("Failed to parse PEM content");
+      }
+      final JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
+
+      if (object instanceof PEMKeyPair) {
+        return converter.getPrivateKey(((PEMKeyPair) object).getPrivateKeyInfo());
+      } else if (object instanceof PrivateKeyInfo) {
+        return converter.getPrivateKey((PrivateKeyInfo) object);
+      } else {
+        throw new RuntimeException("Unsupported PEM object type: " + object.getClass().getName());
+      }
     }
   }
 
   private SSLContext getCAStrategy(Path certPath) {
     LOG.info("Using the cert provided in the config.");
     try {
-      CertificateFactory factory = CertificateFactory.getInstance("X.509");
-      Certificate trustedCa;
-      try (InputStream is = Files.newInputStream(certPath)) {
-        trustedCa = factory.generateCertificate(is);
-      }
-      KeyStore trustStore = KeyStore.getInstance("pkcs12");
-      trustStore.load(null, null);
-      trustStore.setCertificateEntry("ca", trustedCa);
       SSLContextBuilder sslContextBuilder = SSLContexts.custom()
-              .loadTrustMaterial(trustStore, null);
+              .loadTrustMaterial(loadTrustStore(certPath), null);
       return sslContextBuilder.build();
     } catch (Exception ex) {
       throw new RuntimeException(ex.getMessage(), ex);
@@ -428,7 +576,7 @@ public class ConnectionConfiguration {
         transportOptions.setRequestCompressionSize(Integer.MAX_VALUE);
       }
 
-      return new AwsSdk2Transport(createSdkHttpClient(), HttpHost.create(hosts.get(0)).getHostName(),
+      return new AwsSdk2Transport(createSdkHttpClient(), HttpHost.create(hosts.get(0)).toHostString(),
               serviceName, Region.of(awsRegion), transportOptions.build());
     } else {
       return new RestClientTransport(
@@ -450,11 +598,25 @@ public class ConnectionConfiguration {
   }
 
   private void attachSSLContext(final ApacheHttpClient.Builder apacheHttpClientBuilder) {
-    TrustManager[] trustManagers = createTrustManagers(certPath);
-    apacheHttpClientBuilder.tlsTrustManagersProvider(() -> trustManagers);
+    final TrustManager[] trustManagers = createTrustManagers(certPath, insecure);
+    if(trustManagers.length > 0) {
+      apacheHttpClientBuilder.tlsTrustManagersProvider(() -> trustManagers);
+    }
+    if (hasClientCertificate()) {
+      final KeyStore keyStore = loadClientKeyStore(clientCertContent, clientKeyContent);
+      try {
+        final KeyManagerFactory keyManagerFactory =
+                KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        keyManagerFactory.init(keyStore, "".toCharArray());
+        final KeyManager[] keyManagers = keyManagerFactory.getKeyManagers();
+        apacheHttpClientBuilder.tlsKeyManagersProvider(() -> keyManagers);
+      } catch (GeneralSecurityException ex) {
+        throw new RuntimeException("Failed to create key managers for client certificate", ex);
+      }
+    }
   }
 
-  private static TrustManager[] createTrustManagers(final Path certPath) {
+  private static TrustManager[] createTrustManagers(final Path certPath, final boolean insecure) {
     if (certPath != null) {
       LOG.info("Using the cert provided in the config.");
       try (InputStream certificateInputStream = Files.newInputStream(certPath)) {
@@ -470,8 +632,11 @@ public class ConnectionConfiguration {
       } catch (Exception ex) {
         throw new RuntimeException(ex.getMessage(), ex);
       }
-    } else {
+    } else if(insecure) {
+      LOG.info("Using the trust all strategy");
       return new TrustManager[] { new X509TrustAllManager() };
+    } else {
+      return new TrustManager[0];
     }
   }
 
@@ -492,6 +657,7 @@ public class ConnectionConfiguration {
     private final List<String> hosts;
     private String username;
     private String password;
+    private String apitoken;
     private Integer socketTimeout;
     private Integer connectTimeout;
     private Path certPath;
@@ -502,12 +668,16 @@ public class ConnectionConfiguration {
     private String awsStsExternalId;
     private Map<String, String> awsStsHeaderOverrides;
     private Optional<String> proxy = Optional.empty();
+    private String pathPrefix;
     private String pipelineName;
     private boolean serverless;
     private String serverlessNetworkPolicyName;
     private String serverlessCollectionName;
     private String serverlessVpceId;
     private boolean requestCompressionEnabled;
+    private AuthConfig authConfig;
+    private byte[] clientCertContent;
+    private byte[] clientKeyContent;
 
     private void validateStsRoleArn(final String awsStsRoleArn) {
       final Arn arn = getArn(awsStsRoleArn);
@@ -546,6 +716,12 @@ public class ConnectionConfiguration {
       return this;
     }
 
+    public Builder withApitoken(final String apitoken) {
+      checkArgument(apitoken != null, "apitoken cannot be null");
+      this.apitoken = apitoken;
+      return this;
+    }
+
     public Builder withSocketTimeout(final Integer socketTimeout) {
       checkArgument(socketTimeout != null, "socketTimeout cannot be null");
       this.socketTimeout = socketTimeout;
@@ -567,6 +743,29 @@ public class ConnectionConfiguration {
     public Builder withInsecure(final boolean insecure) {
       this.insecure = insecure;
       return this;
+    }
+
+    public Builder withClientCert(final String clientCertificate) {
+      checkArgument(clientCertificate != null, "client_certificate cannot be null");
+      this.clientCertContent = resolvePemContent(clientCertificate);
+      return this;
+    }
+
+    public Builder withClientKey(final String clientKey) {
+      checkArgument(clientKey != null, "client_key cannot be null");
+      this.clientKeyContent = resolvePemContent(clientKey);
+      return this;
+    }
+
+    private static byte[] resolvePemContent(final String content) {
+      if (content.startsWith("-----BEGIN")) {
+        return content.getBytes(StandardCharsets.UTF_8);
+      }
+      try {
+        return Files.readAllBytes(new File(content).toPath());
+      } catch (IOException ex) {
+        throw new RuntimeException("Failed to read PEM content from file: " + content, ex);
+      }
     }
 
     public Builder withAwsSigv4(final boolean awsSigv4) {
@@ -607,8 +806,8 @@ public class ConnectionConfiguration {
       return this;
     }
 
-    public Builder withPipelineName(final String pipelineName) {
-      this.pipelineName = pipelineName;
+    public Builder withPathPrefix(final String pathPrefix) {
+      this.pathPrefix = pathPrefix;
       return this;
     }
 
@@ -634,6 +833,11 @@ public class ConnectionConfiguration {
 
     public Builder withRequestCompressionEnabled(final boolean requestCompressionEnabled) {
       this.requestCompressionEnabled = requestCompressionEnabled;
+      return this;
+    }
+
+    public Builder withAuthConfig(final AuthConfig authConfig) {
+      this.authConfig = authConfig;
       return this;
     }
 

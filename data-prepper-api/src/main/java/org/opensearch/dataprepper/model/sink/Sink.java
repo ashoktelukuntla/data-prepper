@@ -1,10 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.sink;
 
+import org.opensearch.dataprepper.model.plugin.PluginComponentType;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
 import org.opensearch.dataprepper.model.record.Record;
 
 import java.util.Collection;
@@ -13,6 +19,7 @@ import java.util.Collection;
  * Data Prepper sink interface. Sink may publish records to a disk, a file,
  * to OpenSearch, other pipelines, or other external systems.
  */
+@PluginComponentType("sink")
 public interface Sink<T extends Record<?>> {
 
     /**
@@ -44,6 +51,15 @@ public interface Sink<T extends Record<?>> {
      * @param events list of events used for updating the latency metrics
      */
     default void updateLatencyMetrics(final Collection<T> events) {
+    }
+
+    /**
+     * Sets default failure pipeline of a source
+
+     * @param failurePipeline failure pipeline
+     * @since 2.12
+     */
+    default void setFailurePipeline(final HeadlessPipeline failurePipeline) {
     }
 
 }

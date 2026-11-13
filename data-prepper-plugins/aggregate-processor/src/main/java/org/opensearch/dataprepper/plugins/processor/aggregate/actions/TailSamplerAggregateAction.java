@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
- * SPDX-Limense-Identifier: Apache-2.0
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
@@ -8,6 +12,7 @@ package org.opensearch.dataprepper.plugins.processor.aggregate.actions;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventHandle;
 import org.opensearch.dataprepper.plugins.processor.aggregate.AggregateAction;
 import org.opensearch.dataprepper.plugins.processor.aggregate.AggregateActionInput;
 import org.opensearch.dataprepper.plugins.processor.aggregate.AggregateActionOutput;
@@ -15,8 +20,9 @@ import org.opensearch.dataprepper.plugins.processor.aggregate.AggregateActionRes
 import org.opensearch.dataprepper.plugins.processor.aggregate.GroupState;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 
-import java.util.List;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 import java.time.Duration;
 import java.time.Instant;
@@ -71,13 +77,30 @@ public class TailSamplerAggregateAction implements AggregateAction {
     }
 
     @Override
+    public boolean holdsEvents() {
+        return true;
+    }
+
+    @Override
     public AggregateActionOutput concludeGroup(final AggregateActionInput aggregateActionInput) {
         GroupState groupState = aggregateActionInput.getGroupState();
+        if (groupState.isEmpty()) {
+            return null;
+        }
+
         int randomInt = random.nextInt(100);
+        aggregateActionInput.getEventHandle().release(true);
         if (((groupState.containsKey(ERROR_STATUS_KEY) && (Boolean)groupState.get(ERROR_STATUS_KEY) == true)) || (randomInt < percent)) {
             return new AggregateActionOutput((List)groupState.getOrDefault(EVENTS_KEY, List.of()));
         }
-        return new AggregateActionOutput(List.of());
+        List<Event> events = (List)groupState.getOrDefault(EVENTS_KEY, List.of());
+        for (final Event event : events) {
+            EventHandle eventHandle = event.getEventHandle();
+            if (eventHandle != null) {
+                eventHandle.release(true);
+            }
+        }
+        return new AggregateActionOutput(Collections.emptyList());
     }
 
 }

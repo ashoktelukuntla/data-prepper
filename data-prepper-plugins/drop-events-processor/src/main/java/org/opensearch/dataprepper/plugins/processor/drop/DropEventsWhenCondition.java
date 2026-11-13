@@ -1,16 +1,23 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.drop;
 
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import org.opensearch.dataprepper.model.event.HandleFailedEventsOption;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
+
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
 
 /**
  * @since 1.3
@@ -57,7 +64,10 @@ class DropEventsWhenCondition {
         try {
             return !expressionEvaluator.evaluateConditional(dropWhen, event);
         } catch (final Exception e) {
-            return handleFailedEventsSetting.isDropEventOption(event, e, LOG);
+            if (handleFailedEventsSetting.shouldLog()) {
+                LOG.warn(EVENT, "An exception occurred while processing when expression for event [{}]", event, e);
+            }
+            return handleFailedEventsSetting.shouldDropEvent();
         }
     }
 

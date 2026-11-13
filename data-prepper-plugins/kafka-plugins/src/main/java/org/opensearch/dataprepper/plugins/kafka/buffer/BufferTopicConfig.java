@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.kafka.buffer;
@@ -8,7 +12,9 @@ package org.opensearch.dataprepper.plugins.kafka.buffer;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Size;
+import org.hibernate.validator.constraints.time.DurationMin;
 import org.opensearch.dataprepper.model.types.ByteCount;
 import org.opensearch.dataprepper.plugins.kafka.configuration.CommonTopicConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.TopicConsumerConfig;
@@ -26,8 +32,8 @@ class BufferTopicConfig extends CommonTopicConfig implements TopicProducerConfig
     private static final Long DEFAULT_RETENTION_PERIOD = 604800000L;
     static final boolean DEFAULT_AUTO_COMMIT = false;
     static final ByteCount DEFAULT_FETCH_MAX_BYTES = ByteCount.parse("50mb");
-    static final Duration DEFAULT_FETCH_MAX_WAIT = Duration.ofMillis(500);
-    static final ByteCount DEFAULT_FETCH_MIN_BYTES = ByteCount.parse("1b");
+    static final Duration DEFAULT_FETCH_MAX_WAIT = Duration.ofMillis(1000);
+    static final ByteCount DEFAULT_FETCH_MIN_BYTES = ByteCount.parse("2kb");
     static final ByteCount DEFAULT_MAX_PARTITION_FETCH_BYTES = ByteCount.parse("1mb");
     static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofSeconds(45);
     static final String DEFAULT_AUTO_OFFSET_RESET = "earliest";
@@ -36,6 +42,10 @@ class BufferTopicConfig extends CommonTopicConfig implements TopicProducerConfig
     static final Integer DEFAULT_CONSUMER_MAX_POLL_RECORDS = 500;
     static final Integer DEFAULT_NUM_OF_WORKERS = 2;
     static final Duration DEFAULT_HEART_BEAT_INTERVAL_DURATION = Duration.ofSeconds(5);
+    static final Duration DEFAULT_CONNECTIONS_MAX_IDLE = Duration.ofMillis(540000);
+
+    @JsonProperty("encryption_id")
+    private String encryptionId;
 
     @JsonProperty("encryption_key")
     private String encryptionKey;
@@ -64,6 +74,11 @@ class BufferTopicConfig extends CommonTopicConfig implements TopicProducerConfig
     @Valid
     @Size(min = 1, max = 255, message = "size of group id should be between 1 and 255")
     private String groupId;
+
+    @JsonProperty("client_id")
+    @Valid
+    @Size(min = 1, max = 255, message = "size of client id should be between 1 and 255")
+    private String clientId;
 
     @JsonProperty("workers")
     @Valid
@@ -108,10 +123,19 @@ class BufferTopicConfig extends CommonTopicConfig implements TopicProducerConfig
     @JsonProperty("fetch_min_bytes")
     private ByteCount fetchMinBytes = DEFAULT_FETCH_MIN_BYTES;
 
+    @JsonProperty("connections_max_idle")
+    @DurationMin(seconds = 1)
+    private Duration connectionsMaxIdle = DEFAULT_CONNECTIONS_MAX_IDLE;
+
     @Override
     @JsonIgnore
     public MessageFormat getSerdeFormat() {
         return MessageFormat.BYTES;
+    }
+
+    @Override
+    public String getEncryptionId() {
+        return encryptionId;
     }
 
     @Override
@@ -133,6 +157,11 @@ class BufferTopicConfig extends CommonTopicConfig implements TopicProducerConfig
     @Override
     public String getGroupId() {
         return groupId;
+    }
+
+    @Override
+    public String getClientId() {
+        return clientId;
     }
 
     @Override
@@ -228,5 +257,23 @@ class BufferTopicConfig extends CommonTopicConfig implements TopicProducerConfig
     @Override
     public long getMaxPartitionFetchBytes() {
         return maxPartitionFetchBytes.getBytes();
+    }
+
+    @Override
+    public Duration getConnectionsMaxIdle() {
+        return connectionsMaxIdle;
+    }
+
+    @AssertTrue(message = "Either encryption_id or encryption_key together with kms_config must be specified, " +
+            "and only one of them can be specified")
+    public boolean IsEncryptionAtRestSettingValid() {
+        if (encryptionId != null && (encryptionKey != null || kmsConfig != null)) {
+            return false;
+        }
+        return true;
+    }
+
+    public boolean encryptionAtRestEnabled() {
+        return encryptionId != null || encryptionKey != null || kmsConfig != null;
     }
 }

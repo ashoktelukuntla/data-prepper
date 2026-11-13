@@ -13,17 +13,19 @@ dependencies {
     implementation libs.commons.io
     implementation 'software.amazon.awssdk:s3'
     implementation 'software.amazon.awssdk:acm'
+    implementation 'com.github.luben:zstd-jni:1.5.7-9'
     implementation libs.commons.compress
     implementation libs.commons.lang3
     implementation libs.bouncycastle.bcprov
     implementation libs.bouncycastle.bcpkix
     implementation libs.reflections.core
     implementation 'io.micrometer:micrometer-core'
-    implementation 'org.apache.parquet:parquet-common:1.13.1'
-    implementation 'org.xerial.snappy:snappy-java:1.1.10.5'
+    implementation libs.parquet.common
+    implementation 'org.xerial.snappy:snappy-java:1.1.10.8'
+    implementation libs.armeria.core
     testImplementation project(':data-prepper-plugins:blocking-buffer')
+    testImplementation project(':data-prepper-test:test-event')
     testImplementation libs.commons.io
-    testImplementation testLibs.mockito.inline
 }
 
 jacocoTestCoverageVerification {

@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.expression;
@@ -15,12 +19,17 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.event.TestEventKeyFactory;
 import org.opensearch.dataprepper.expression.antlr.DataPrepperExpressionParser;
 import org.opensearch.dataprepper.expression.util.TestObject;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventKey;
+import org.opensearch.dataprepper.model.event.EventKeyFactory;
 
+import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,14 +38,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
-import static org.hamcrest.CoreMatchers.containsStringIgnoringCase;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -52,11 +59,19 @@ class ParseTreeCoercionServiceTest {
     @Mock
     private Token token;
 
+    private final EventKeyFactory eventKeyFactory = TestEventKeyFactory.getTestEventFactory();
+
     private final LiteralTypeConversionsConfiguration literalTypeConversionsConfiguration =
             new LiteralTypeConversionsConfiguration();
     private final ExpressionFunctionProvider expressionFunctionProvider = mock(ExpressionFunctionProvider.class);
     private final ParseTreeCoercionService objectUnderTest = new ParseTreeCoercionService(
-            literalTypeConversionsConfiguration.literalTypeConversions(), expressionFunctionProvider);
+            literalTypeConversionsConfiguration.literalTypeConversions(), expressionFunctionProvider, eventKeyFactory);
+
+    @Test
+    void testNullNodeThrowsException() {
+        final Event testEvent = createTestEvent(new HashMap<>());
+        assertThrows(NullPointerException.class, () -> objectUnderTest.coercePrimaryTerminalNode(null, testEvent));
+    }
 
     @Test
     void testCoerceTerminalNodeStringType() {
@@ -110,6 +125,31 @@ class ParseTreeCoercionServiceTest {
         final Object result = objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent);
         assertThat(result, instanceOf(Float.class));
         assertThat(result, equalTo(testFloat));
+    }
+
+    @Test
+    void testCoerceTerminalNodeBigDecimalType() {
+        when(token.getType()).thenReturn(DataPrepperExpressionParser.JsonPointer);
+        final BigDecimal testBigDecimal = new BigDecimal(new Random().nextFloat());
+        when(terminalNode.getSymbol()).thenReturn(token);
+        when(terminalNode.getText()).thenReturn("/key");
+
+        final Event testEvent = createTestEvent(Map.of("key", testBigDecimal));
+        final Object result = objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent);
+        assertThat(result, instanceOf(BigDecimal.class));
+        assertThat(result, equalTo(testBigDecimal));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"integer", "boolean", "long", "string", "double", "map", "array"})
+    void testCoerceTerminalNodeDataTypesType(String testString) {
+        when(token.getType()).thenReturn(DataPrepperExpressionParser.DataTypes);
+        when(terminalNode.getSymbol()).thenReturn(token);
+        when(terminalNode.getText()).thenReturn(testString);
+        final Event testEvent = createTestEvent(new HashMap<>());
+        final Object result = objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent);
+        assertThat(result, instanceOf(String.class));
+        assertThat(result, equalTo(testString));
     }
 
     @Test
@@ -199,6 +239,18 @@ class ParseTreeCoercionServiceTest {
         assertThrows(ExpressionCoercionException.class, () -> objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent));
     }
 
+    @ParameterizedTest
+    @MethodSource("provideSupportedJsonPointerValues")
+    void testCoerceTerminalNodeTripleQuoteStringTypeSupportedValues(final Object testValue) {
+        final String testKey = "/testKey";
+        final String testTripleQuoteStringKey = "\"\"\"/testKey\"\"\"";
+        when(token.getType()).thenReturn(DataPrepperExpressionParser.String);
+        when(terminalNode.getSymbol()).thenReturn(token);
+        when(terminalNode.getText()).thenReturn(testTripleQuoteStringKey);
+        final Object result = objectUnderTest.coercePrimaryTerminalNode(terminalNode, null);
+        assertThat(result, equalTo(testKey));
+    }
+
     @Test
     void testCoerceTerminalNodeJsonPointerTypeUnSupportedValues() {
         final String testKey1 = "key1";
@@ -236,95 +288,49 @@ class ParseTreeCoercionServiceTest {
     }
 
     @Test
-    void testCoerceTerminalNodeLengthFunction() {
-        final String key = RandomStringUtils.randomAlphabetic(5);
-        final String value = RandomStringUtils.randomAlphabetic(10);
-        final Event testEvent = createTestEvent(Map.of(key, value));
-        when(terminalNode.getSymbol()).thenReturn(token);
-        when(terminalNode.getText()).thenReturn("length(/"+key+")");
-        when(expressionFunctionProvider.provideFunction(eq("length"), any(List.class), any(Event.class), any(Function.class))).thenReturn(value.length());
-        when(token.getType()).thenReturn(DataPrepperExpressionParser.Function);
-        assertThat(objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent), equalTo(value.length()));
+    void testEvaluateFunctionDelegatesToProvider() {
+        final String functionName = "length";
+        final Event testEvent = mock(Event.class);
+        final List<Object> args = List.of("arg1");
+        when(expressionFunctionProvider.provideFunction(eq(functionName), eq(args), eq(testEvent), any(Function.class)))
+                .thenReturn(5);
+
+        final Object result = objectUnderTest.evaluateFunction(functionName, args, testEvent);
+        assertThat(result, equalTo(5));
     }
 
     @Test
-    void testCoerceTerminalNodeLengthFunctionWithInvalidString() {
-        final String key = RandomStringUtils.randomAlphabetic(5);
-        final String value = RandomStringUtils.randomAlphabetic(10);
-        final Event testEvent = createTestEvent(Map.of(key, value));
-        final String testString = RandomStringUtils.randomAlphabetic(10);
-        when(terminalNode.getSymbol()).thenReturn(token);
-        when(terminalNode.getText()).thenReturn("length(\""+testString+")");
-        when(expressionFunctionProvider.provideFunction(eq("length"), any(List.class), any(Event.class), any(Function.class))).thenReturn(value.length());
-        when(token.getType()).thenReturn(DataPrepperExpressionParser.Function);
-        assertThrows(RuntimeException.class, () -> objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent));
+    void testCreateEventKeyReturnsEventKey() {
+        final String jsonPointer = "/testKey";
+        final EventKey result = objectUnderTest.createEventKey(jsonPointer);
+        assertThat(result, instanceOf(EventKey.class));
+        assertThat(result.getKey(), equalTo(jsonPointer));
     }
 
     @Test
-    void testCoerceTerminalNodeLengthFunctionWithInvalidArgument() {
+    void testResolveJsonPointerValueReturnsConvertedValue() {
         final String key = RandomStringUtils.randomAlphabetic(5);
         final String value = RandomStringUtils.randomAlphabetic(10);
         final Event testEvent = createTestEvent(Map.of(key, value));
-        when(terminalNode.getSymbol()).thenReturn(token);
-        when(terminalNode.getText()).thenReturn("length(10)");
-        when(expressionFunctionProvider.provideFunction(eq("length"), any(List.class), any(Event.class), any(Function.class))).thenReturn(value.length());
-        when(token.getType()).thenReturn(DataPrepperExpressionParser.Function);
-        assertThrows(RuntimeException.class, () -> objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent));
+        final Object result = objectUnderTest.resolveJsonPointerValue("/" + key, testEvent);
+        assertThat(result, equalTo(value));
     }
 
     @Test
-    void testCoerceTerminalNodeLengthFunctionKeyNotInEvent() {
-        final String key = RandomStringUtils.randomAlphabetic(5);
-        final String value = RandomStringUtils.randomAlphabetic(10);
-        final String key2 = RandomStringUtils.randomAlphabetic(5);
-        final Event testEvent = createTestEvent(Map.of(key, value));
-        when(terminalNode.getSymbol()).thenReturn(token);
-        when(terminalNode.getText()).thenReturn("length(/"+key2+")");
-        when(token.getType()).thenReturn(DataPrepperExpressionParser.Function);
-        assertThat(objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent), equalTo(null));
-    }
-
-    @Test
-    void testCoerceTerminalNodeWithUnknownFunction() {
-        when(terminalNode.getSymbol()).thenReturn(token);
-        when(token.getType()).thenReturn(DataPrepperExpressionParser.Function);
-        when(terminalNode.getText()).thenReturn("xyz(arg1)");
-        assertThrows(RuntimeException.class, () -> objectUnderTest.coercePrimaryTerminalNode(terminalNode, null));
-    }
-
-    @Test
-    void testCoerceTerminalNodeFunctionTypeWithUnescapedCommaInArgumentsThrowsException() {
-        final String key = RandomStringUtils.randomAlphabetic(5);
-        final String value = RandomStringUtils.randomAlphabetic(10);
-        final Event testEvent = createTestEvent(Map.of(key, value));
-        when(terminalNode.getSymbol()).thenReturn(token);
-        when(terminalNode.getText()).thenReturn("join(\",\" /" +key+")");
-        when(token.getType()).thenReturn(DataPrepperExpressionParser.Function);
-        Throwable exception = assertThrows(RuntimeException.class, () -> objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent));
-        assertThat(exception.getMessage(), containsStringIgnoringCase("check if any argument is missing a closing double quote or contains comma that's not escaped with `\\`"));
-    }
-
-    @Test
-    void testCoerceTerminalNodeFunctionTypeWithEscapedCommaInArgumentsReturnsExpectedResult() {
-        final String key = RandomStringUtils.randomAlphabetic(5);
-        final String value = RandomStringUtils.randomAlphabetic(10);
-        final String output = RandomStringUtils.randomAlphabetic(10);
-        final Event testEvent = createTestEvent(Map.of(key, value));
-        when(terminalNode.getSymbol()).thenReturn(token);
-        when(terminalNode.getText()).thenReturn("join(\"\\\\,\", /"+key+")");
-        when(expressionFunctionProvider.provideFunction(eq("join"), any(List.class), any(Event.class), any(Function.class))).thenReturn(output);
-        when(token.getType()).thenReturn(DataPrepperExpressionParser.Function);
-        assertThat(objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent), equalTo(output));
+    void testResolveJsonPointerValueReturnsNullForMissingKey() {
+        final Event testEvent = createTestEvent(new HashMap<>());
+        final Object result = objectUnderTest.resolveJsonPointerValue("/nonexistent", testEvent);
+        assertThat(result, equalTo(null));
     }
 
     private Event createTestEvent(final Object data) {
         final Event event = mock(Event.class);
         final JsonNode node = mapper.valueToTree(data);
-        lenient().when(event.get(anyString(), any())).thenAnswer(invocation -> {
+        lenient().when(event.get(any(EventKey.class), any())).thenAnswer(invocation -> {
             Object[] args = invocation.getArguments();
-            final String jsonPointer = (String) args[0];
+            final EventKey eventKey = (EventKey) args[0];
             final Class<?> clazz = (Class<?>) args[1];
-            final JsonNode childNode = node.at(jsonPointer);
+            final JsonNode childNode = node.at(eventKey.getKey());
             if (childNode.isMissingNode()) {
                 return null;
             }
@@ -335,7 +341,7 @@ class ParseTreeCoercionServiceTest {
 
     private Event createInvalidTestEvent(final Object data) {
         final Event event = mock(Event.class);
-        lenient().when(event.get(anyString(), any())).thenReturn(new AtomicBoolean());
+        lenient().when(event.get(any(EventKey.class), any())).thenReturn(new AtomicBoolean());
         return event;
     }
 
@@ -343,7 +349,7 @@ class ParseTreeCoercionServiceTest {
         return Stream.of(
                 Arguments.of("test key", "\"/test key\""),
                 Arguments.of("test/key", "\"/test~1key\""),
-                Arguments.of("test\\key", "\"/test\\key\""),
+                Arguments.of("test/key", "\"/test~1key\""),
                 Arguments.of("test~0key", "\"/test~00key\"")
         );
     }

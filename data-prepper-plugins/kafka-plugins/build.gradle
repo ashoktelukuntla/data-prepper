@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 plugins {
@@ -25,55 +29,61 @@ configurations {
 
 dependencies {
     implementation project(':data-prepper-api')
+    implementation project(':data-prepper-plugins:common')
     implementation project(':data-prepper-plugins:buffer-common')
     implementation project(':data-prepper-plugins:blocking-buffer')
     implementation project(':data-prepper-plugins:aws-plugin-api')
-    implementation 'org.apache.kafka:kafka-clients:3.6.1'
-    implementation 'org.apache.kafka:connect-json:3.6.1'
+    implementation project(':data-prepper-plugins:encryption-plugin')
+    // bump io.confluent:* dependencies correspondingly when bumping org.apache.kafka.*
+    // https://docs.confluent.io/platform/current/release-notes/index.html
+    implementation 'org.apache.kafka:kafka-clients:3.9.1'
+    implementation 'org.apache.kafka:connect-json:3.9.1'
     implementation project(':data-prepper-plugins:http-common')
     implementation libs.avro.core
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'io.micrometer:micrometer-core'
     implementation libs.commons.lang3
-    implementation 'io.confluent:kafka-avro-serializer:7.4.0'
-    implementation 'io.confluent:kafka-json-schema-serializer:7.4.0'
-    implementation 'io.confluent:kafka-schema-registry-client:7.4.0'
+    implementation 'io.confluent:kafka-avro-serializer:7.9.1'
+    implementation 'io.confluent:kafka-json-schema-serializer:7.9.1'
+    implementation 'io.confluent:kafka-schema-registry-client:7.9.1'
     implementation 'software.amazon.awssdk:sts'
     implementation 'software.amazon.awssdk:auth'
     implementation 'software.amazon.awssdk:kafka'
     implementation 'software.amazon.awssdk:kms'
     implementation 'software.amazon.msk:aws-msk-iam-auth:2.0.3'
-    implementation 'software.amazon.glue:schema-registry-serde:1.1.15'
+    implementation 'software.amazon.glue:schema-registry-serde:1.1.24'
     implementation project(':data-prepper-plugins:failures-common')
     implementation 'com.github.java-json-tools:json-schema-validator:2.2.14'
+    implementation 'org.hibernate.validator:hibernate-validator:8.0.1.Final'
     implementation 'commons-collections:commons-collections:3.2.2'
     implementation 'software.amazon.awssdk:s3'
     implementation 'software.amazon.awssdk:apache-client'
+    implementation 'com.github.luben:zstd-jni:1.5.7-4'
 
-    testImplementation testLibs.mockito.inline
     testImplementation 'org.yaml:snakeyaml:2.2'
     testImplementation testLibs.spring.test
     testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
-    testImplementation project(':data-prepper-test-common')
+    testImplementation 'org.hibernate.validator:hibernate-validator:8.0.2.Final'
+    testImplementation project(':data-prepper-test:test-common')
     testImplementation project(':data-prepper-plugins:blocking-buffer')
     testImplementation project(':data-prepper-core')
-    testImplementation testLibs.mockito.inline
+    testImplementation project(':data-prepper-event')
+    testImplementation project(':data-prepper-plugin-framework')
+    testImplementation project(':data-prepper-pipeline-parser')
     testImplementation 'org.apache.kafka:kafka_2.13:3.6.1'
     testImplementation 'org.apache.kafka:kafka_2.13:3.6.1:test'
-    testImplementation 'org.apache.curator:curator-test:5.5.0'
+    testImplementation 'org.apache.curator:curator-test:5.7.1'
     testImplementation('com.kjetland:mbknor-jackson-jsonschema_2.13:1.0.39')
-    testImplementation group: 'org.powermock', name: 'powermock-api-mockito2', version: '2.0.9'
     testImplementation project(':data-prepper-plugins:otel-metrics-source')
     testImplementation project(':data-prepper-plugins:otel-proto-common')
-    testImplementation libs.opentelemetry.proto
     testImplementation libs.protobuf.util
     testImplementation libs.commons.io
     testImplementation libs.armeria.grpc
     testImplementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
 
     integrationTestImplementation testLibs.junit.vintage
-    integrationTestImplementation 'io.confluent:kafka-schema-registry:7.4.0'
-    integrationTestImplementation ('io.confluent:kafka-schema-registry:7.4.0:tests') {
+    integrationTestImplementation 'io.confluent:kafka-schema-registry:7.9.1'
+    integrationTestImplementation ('io.confluent:kafka-schema-registry:7.9.1:tests') {
         exclude group: 'org.glassfish.jersey.containers', module: 'jersey-container-servlet'
         exclude group: 'org.glassfish.jersey.inject', module: 'jersey-hk2'
         exclude group: 'org.glassfish.jersey.ext', module: 'jersey-bean-validation'
@@ -82,9 +92,15 @@ dependencies {
     constraints {
         implementation('org.mozilla:rhino') {
             version {
-                require '1.7.12'
+                require '1.7.15.1'
             }
-            because 'Fixes SNYK-JAVA-ORGMOZILLA-1314295.'
+            because 'Fixes CVE-2025-66453, SNYK-JAVA-ORGMOZILLA-1314295.'
+        }
+        implementation('org.bitbucket.b_c:jose4j') {
+            version {
+                require '0.9.4'
+            }
+            because 'Fixes CVE-2023-51775 and other CVEs from transitive dependencies'
         }
     }
 }
@@ -126,6 +142,7 @@ task integrationTest(type: Test) {
     systemProperty 'tests.kafka.confluent.registry_url', System.getProperty('tests.kafka.confluent.registry_url')
     systemProperty 'tests.kafka.authconfig.username', System.getProperty('tests.kafka.authconfig.username')
     systemProperty 'tests.kafka.authconfig.password', System.getProperty('tests.kafka.authconfig.password')
+    systemProperty 'tests.kafka.authconfig.mechanism', System.getProperty('tests.kafka.authconfig.mechanism')
     systemProperty 'tests.kafka.kms_key', System.getProperty('tests.kafka.kms_key')
 
     filter {

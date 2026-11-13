@@ -14,8 +14,14 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.plugins.source.s3.S3SourceConfig;
-import org.opensearch.dataprepper.plugins.source.s3.configuration.AwsAuthenticationOptions;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.SqsOptions;
+import org.opensearch.dataprepper.plugins.s3.common.ownership.BucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.s3.common.ownership.MappedBucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.s3.common.ownership.NoOwnershipBucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.s3.common.ownership.StaticBucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.s3.common.config.AwsAuthenticationOptions;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 
 import java.util.Map;
 import java.util.Optional;
@@ -36,6 +42,10 @@ class ConfigBucketOwnerProviderFactoryTest {
 
     @Mock
     private S3SourceConfig s3SourceConfig;
+    @Mock
+    private AwsCredentialsProvider defaultAwsCredentialsProvider;
+    @Mock
+    private AwsCredentials awsCredentials;
     private String accountId;
 
     @BeforeEach
@@ -44,7 +54,7 @@ class ConfigBucketOwnerProviderFactoryTest {
     }
 
     private ConfigBucketOwnerProviderFactory createObjectUnderTest() {
-        return new ConfigBucketOwnerProviderFactory();
+        return new ConfigBucketOwnerProviderFactory(defaultAwsCredentialsProvider);
     }
 
     @Test
@@ -93,10 +103,29 @@ class ConfigBucketOwnerProviderFactoryTest {
 
     @Test
     void createBucketOwnerProvider_throws_exception_when_ownership_cannot_be_determined() {
+        when(defaultAwsCredentialsProvider.resolveCredentials()).thenReturn(awsCredentials);
+        when(awsCredentials.accountId()).thenReturn(Optional.empty());
         final ConfigBucketOwnerProviderFactory objectUnderTest = createObjectUnderTest();
         final InvalidPluginConfigurationException actualException = assertThrows(InvalidPluginConfigurationException.class, () -> objectUnderTest.createBucketOwnerProvider(s3SourceConfig));
 
         assertThat(actualException.getMessage(), containsString("default_bucket_owner"));
+    }
+
+    @Test
+    void createBucketOwnerProvider_with_ownership_extracted_from_default_aws_credentials_provider() {
+        when(defaultAwsCredentialsProvider.resolveCredentials()).thenReturn(awsCredentials);
+        when(awsCredentials.accountId()).thenReturn(Optional.of(accountId));
+
+        BucketOwnerProvider bucketOwnerProvider = createObjectUnderTest().createBucketOwnerProvider(s3SourceConfig);
+
+        assertThat(bucketOwnerProvider, notNullValue());
+
+        final String bucket = UUID.randomUUID().toString();
+        final Optional<String> optionalOwner = bucketOwnerProvider.getBucketOwner(bucket);
+
+        assertThat(optionalOwner, notNullValue());
+        assertThat(optionalOwner.isPresent(), equalTo(true));
+        assertThat(optionalOwner.get(), equalTo(accountId));
     }
 
     @Nested

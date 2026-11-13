@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.metrics;
@@ -55,6 +59,19 @@ public class PluginMetricsTest {
     }
 
     @Test
+    public void testCounterWithMetricsPrefixWithCustomMetricsName() {
+        final String customName = PLUGIN_NAME + "_custom";
+        objectUnderTest = PluginMetrics.fromPluginSetting(pluginSetting, customName);
+
+        final Counter counter = objectUnderTest.counter("counter");
+        assertEquals(
+                pluginSetting.getPipelineName() + MetricNames.DELIMITER +
+                        customName + MetricNames.DELIMITER +
+                        "counter",
+                counter.getId().getName());
+    }
+
+    @Test
     public void testCounter() {
         final Counter counter = objectUnderTest.counter("counter");
         assertEquals(
@@ -96,6 +113,16 @@ public class PluginMetricsTest {
     }
 
     @Test
+    public void testTimerWithMetricsPrefix() {
+        final Timer timer = objectUnderTest.timer("timer", PIPELINE_NAME);
+        assertEquals(
+                new StringJoiner(MetricNames.DELIMITER)
+                        .add(PIPELINE_NAME)
+                        .add("timer").toString(),
+                timer.getId().getName());
+    }
+
+    @Test
     public void testTimerWithTags() {
         final Timer timer = objectUnderTest.timerWithTags("timer", TAG_KEY, TAG_VALUE);
         assertEquals(
@@ -113,6 +140,28 @@ public class PluginMetricsTest {
         assertEquals(
                 new StringJoiner(MetricNames.DELIMITER)
                         .add(PIPELINE_NAME).add(PLUGIN_NAME)
+                        .add("summary").toString(),
+                summary.getId().getName());
+    }
+
+    @Test
+    public void testSummaryWithTags() {
+        final DistributionSummary summary = objectUnderTest.summaryWithTags("summary", TAG_KEY, TAG_VALUE);
+        assertEquals(
+                new StringJoiner(MetricNames.DELIMITER)
+                        .add(PIPELINE_NAME).add(PLUGIN_NAME)
+                        .add("summary").toString(),
+                summary.getId().getName());
+
+        assertEquals(TAG_VALUE, summary.getId().getTag(TAG_KEY));
+    }
+
+    @Test
+    public void testSummaryWithMetricsPrefix() {
+        final DistributionSummary summary = objectUnderTest.summary("summary", PIPELINE_NAME);
+        assertEquals(
+                new StringJoiner(MetricNames.DELIMITER)
+                        .add(PIPELINE_NAME)
                         .add("summary").toString(),
                 summary.getId().getName());
     }

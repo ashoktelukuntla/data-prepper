@@ -6,6 +6,8 @@ This source allows Data Prepper to use Kafka as source. This source reads record
 
 For usage and configuration, please refer to the documentation [here] (https://opensearch.org/docs/2.9/data-prepper/pipelines/configuration/sources/sources/kafka-source).
 
+The `azure_federated` SASL/OAUTHBEARER mechanism additionally lets the Kafka source consume from an Azure
+Event Hubs Kafka endpoint using AWS to Azure Entra workload-identity federation, with no stored secret.
 
 ## Developer guide
 
@@ -39,6 +41,27 @@ If you do not have a KMS key, you can skip the KMS tests.
 ./gradlew data-prepper-plugins:kafka-plugins:integrationTest -Dtests.kafka.bootstrap_servers=localhost:9092 -Dtests.kafka.authconfig.username=admin -Dtests.kafka.authconfig.password=admin --tests KafkaSourceJsonTypeIT --tests KafkaBufferIT --tests KafkaBufferOTelIT
 ```
 
+##### Run SASL Plaintext integration tests
+
+First run Kafka with SASL_PLAINTEXT username and password:
+```
+docker compose --project-directory data-prepper-plugins/kafka-plugins/src/integrationTest/resources/kafka/zookeeper/sasl-plaintext --env-file  data-prepper-plugins/kafka-plugins/src/integrationTest/resources/kafka/zookeeper/sasl-plaintext/.env up -d
+```
+Then run
+```
+./gradlew data-prepper-plugins:kafka-plugins:integrationTest -Dtests.kafka.bootstrap_servers=localhost:9092 -Dtests.kafka.authconfig.username=admin -Dtests.kafka.authconfig.password=admin --tests KafkaSourceSaslPlainTextIT
+```
+
+##### Run SASL SCRAM integration tests
+
+First run Kafka with SASL_SCRAM username, password and mechanism:
+```
+docker compose --project-directory data-prepper-plugins/kafka-plugins/src/integrationTest/resources/kafka/kraft/sasl-scram --env-file  data-prepper-plugins/kafka-plugins/src/integrationTest/resources/kafka/kraft/sasl-scram/.env up -d
+```
+Then run
+```
+./gradlew data-prepper-plugins:kafka-plugins:integrationTest -Dtests.kafka.bootstrap_servers=localhost:9092 -Dtests.kafka.authconfig.username=admin -Dtests.kafka.authconfig.password=admin -Dtests.kafka.authconfig.mechanism=SCRAM-SHA-512 --tests KafkaSourceSaslScramIT
+```
 
 See the Old integration tests section to run other tests. However, these are more involved.
 
@@ -108,7 +131,7 @@ bin/kafka-server-start.sh config/server.properties
 Before issuing the command, make sure the `json-topic-name` and `avro-topic-name` are already created on the Confluent cloud and schemas are correctly set
 
 ```
-./gradlew      data-prepper-plugins:kafka-plugins:integrationTest -Dtests.kafka.bootstrap_servers=<confluent-bootstrap-servers> -Dtest.kafka.schema_registry_url=<confluent-schema-reg-url> -Dtest.kafka.schema_registry_userinfo="<confluent-schema-reg-api-key>:<confluent-schema-reg-secret>" -Dtests.kafka.json_topic_name=<json-topic-name> -Dtests.kafka.avro_topic_name=<avro-topic-name> -Dtests.kafka.username=<confluent-cloud-api-key> -Dtests.kafka.password=<confluent-cloud-api-secret> --tests "*ConfluentKafkaProducerConsumerWithSchemaRegistryIT*"
+./gradlew      data-prepper-plugins:kafka-plugins:integrationTest -Dtests.kafka.bootstrap_servers=<confluent-bootstrap-servers> -Dtests.kafka.schema_registry_url=<confluent-schema-reg-url> -Dtests.kafka.schema_registry_userinfo="<confluent-schema-reg-api-key>:<confluent-schema-reg-secret>" -Dtests.kafka.json_topic_name=<json-topic-name> -Dtests.kafka.avro_topic_name=<avro-topic-name> -Dtests.kafka.username=<confluent-cloud-api-key> -Dtests.kafka.password=<confluent-cloud-api-secret> --tests "*ConfluentKafkaProducerConsumerWithSchemaRegistryIT*"
 ```
 
 Schema for `json-topic-name-value` should be

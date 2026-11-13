@@ -9,11 +9,25 @@ package org.opensearch.dataprepper.plugins.source.otellogs;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Size;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+
 import org.apache.commons.lang3.StringUtils;
+import org.hibernate.validator.constraints.time.DurationMax;
+import org.hibernate.validator.constraints.time.DurationMin;
 import org.opensearch.dataprepper.model.types.ByteCount;
 import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
+import org.opensearch.dataprepper.plugins.otel.codec.OTelOutputFormat;
+import org.opensearch.dataprepper.plugins.server.RetryInfoConfig;
 
+import java.time.Duration;
+
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class OTelLogsSourceConfig {
     static final String REQUEST_TIMEOUT = "request_timeout";
     static final String PORT = "port";
@@ -32,6 +46,7 @@ public class OTelLogsSourceConfig {
     static final String MAX_CONNECTION_COUNT = "max_connection_count";
     static final String ENABLE_UNFRAMED_REQUESTS = "unframed_requests";
     static final String COMPRESSION = "compression";
+    static final String RETRY_INFO = "retry_info";
     static final int DEFAULT_REQUEST_TIMEOUT_MS = 10000;
     static final int DEFAULT_PORT = 21892;
     static final int DEFAULT_THREAD_COUNT = 200;
@@ -54,6 +69,11 @@ public class OTelLogsSourceConfig {
     @Size(min = 1, message = "path length should be at least 1")
     private String path;
 
+    @Getter
+    @JsonProperty("http_path")
+    @Size(min = 1, message = "path length should be at least 1")
+    private String httpPath;
+
     @JsonProperty(HEALTH_CHECK_SERVICE)
     private boolean healthCheck = DEFAULT_HEALTH_CHECK;
 
@@ -65,6 +85,9 @@ public class OTelLogsSourceConfig {
 
     @JsonProperty(SSL)
     private boolean ssl = DEFAULT_SSL;
+
+    @JsonProperty("output_format")
+    private OTelOutputFormat outputFormat = OTelOutputFormat.OPENSEARCH;
 
     @JsonProperty(USE_ACM_CERT_FOR_SSL)
     private boolean useAcmCertForSSL = DEFAULT_USE_ACM_CERT_FOR_SSL;
@@ -104,6 +127,19 @@ public class OTelLogsSourceConfig {
     @JsonProperty("max_request_length")
     private ByteCount maxRequestLength;
 
+    @JsonProperty(RETRY_INFO)
+    private RetryInfoConfig retryInfo;
+
+    @JsonProperty("max_connection_age")
+    @DurationMin(seconds = 1)
+    @DurationMax(hours = 24)
+    private Duration maxConnectionAge;
+
+    @JsonProperty("connection_drain_duration")
+    @DurationMin(millis = 0)
+    @DurationMax(hours = 1)
+    private Duration connectionDrainDuration;
+
     @AssertTrue(message = "path should start with /")
     boolean isPathValid() {
         return path == null || path.startsWith("/");
@@ -142,6 +178,10 @@ public class OTelLogsSourceConfig {
 
     public int getRequestTimeoutInMillis() {
         return requestTimeoutInMillis;
+    }
+
+    public OTelOutputFormat getOutputFormat() {
+        return outputFormat;
     }
 
     public int getPort() {
@@ -216,6 +256,22 @@ public class OTelLogsSourceConfig {
 
     public ByteCount getMaxRequestLength() {
         return maxRequestLength;
+    }
+
+    public RetryInfoConfig getRetryInfo() {
+        return retryInfo;
+    }
+
+    public void setRetryInfo(RetryInfoConfig retryInfo) {
+        this.retryInfo = retryInfo;
+    }
+
+    public Duration getMaxConnectionAge() {
+        return maxConnectionAge;
+    }
+
+    public Duration getConnectionDrainDuration() {
+        return connectionDrainDuration;
     }
 }
 

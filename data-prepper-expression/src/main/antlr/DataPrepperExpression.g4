@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 grammar DataPrepperExpression;
@@ -29,7 +33,7 @@ arithmeticExpression
     ;
 
 multiplicativeExpression
-    : multiplicativeExpression (MULTIPLY | DIVIDE) arithmeticTerm
+    : multiplicativeExpression (MULTIPLY | FORWARDSLASH | MOD) arithmeticTerm
     | arithmeticTerm
     ;
 
@@ -78,7 +82,9 @@ regexEqualityOperator
 
 relationalOperatorExpression
     : relationalOperatorExpression relationalOperator setOperatorExpression
+    | relationalOperatorExpression relationalOperator typeOfOperatorExpression
     | setOperatorExpression
+    | typeOfOperatorExpression
     ;
 
 relationalOperator
@@ -88,10 +94,15 @@ relationalOperator
     | GTE
     ;
 
+typeOfOperatorExpression
+    : JsonPointer TYPEOF DataTypes
+    ;
+
 setOperatorExpression
     : setOperatorExpression setOperator setInitializer
     | unaryOperatorExpression
     | arithmeticUnaryExpression
+    | arithmeticExpression
     ;
 
 setOperator
@@ -116,7 +127,11 @@ regexPattern
     ;
 
 setInitializer
-    : LBRACE primary (SET_DELIMITER primary)* RBRACE
+    : LBRACE setMembers RBRACE
+    ;
+
+setMembers
+    : literal (SPACE* COMMA SPACE* literal)*
     ;
 
 unaryOperator
@@ -141,22 +156,19 @@ jsonPointer
     ;
 
 function
-    : Function
+    : Identifier LPAREN functionArgs? RPAREN
     ;
 
-Function
-    : JsonPointerCharacters LPAREN FunctionArgs RPAREN
+functionArgs
+    : functionArg (COMMA functionArg)*
     ;
 
-fragment
-FunctionArgs
-    : (FunctionArg SPACE* COMMA SPACE*)* SPACE* FunctionArg
-    ;
-
-fragment
-FunctionArg
-    : JsonPointer
-    | String
+functionArg
+    : conditionalExpression
+    | arithmeticExpression
+    | stringExpression
+    | jsonPointer
+    | literal
     ;
 
 variableIdentifier
@@ -261,6 +273,7 @@ VariableNameCharacter
 
 String
     : DOUBLEQUOTE StringCharacters? DOUBLEQUOTE
+    | DOUBLEQUOTE DOUBLEQUOTE DOUBLEQUOTE StringCharacters? DOUBLEQUOTE DOUBLEQUOTE DOUBLEQUOTE
     ;
 
 fragment
@@ -279,12 +292,23 @@ EscapeSequence
     : '\\' [btnfr"'\\$]
     ;
 
-SET_DELIMITER
-    : COMMA
+DataTypes
+    : INTEGER
+    | BOOLEAN
+    | BIG_DECIMAL
+    | LONG
+    | MAP
+    | ARRAY
+    | DOUBLE
+    | STRING
     ;
 
-DIVIDE
-    : FORWARDSLASH
+// Identifier MUST be defined after DataTypes (and all other keyword-like
+// lexer rules) because it matches [A-Za-z0-9_.@]+ which would shadow any
+// keyword defined later.  ANTLR resolves same-length lexer ambiguities by
+// choosing the rule that appears first in the grammar.
+Identifier
+    : JsonPointerCharacters
     ;
 
 COMMA : ',';
@@ -298,6 +322,7 @@ MATCH_REGEX_PATTERN : '=~';
 NOT_MATCH_REGEX_PATTERN : '!~';
 IN_SET : SPACE 'in' SPACE;
 NOT_IN_SET : SPACE 'not in' SPACE;
+TYPEOF: SPACE 'typeof' SPACE;
 AND : SPACE 'and' SPACE;
 OR : SPACE 'or' SPACE;
 NOT : 'not' SPACE;
@@ -312,10 +337,20 @@ ZERO : '0';
 PLUS: '+';
 MULTIPLY: '*';
 DOT : '.';
+MOD: '%';
 EXPONENTLETTER
     : 'E'
     | 'e'
     ;
+
+INTEGER: 'integer';
+BIG_DECIMAL: 'big_decimal';
+BOOLEAN: 'boolean';
+LONG   : 'long';
+DOUBLE : 'double';
+STRING : 'string';
+MAP    : 'map';
+ARRAY  : 'array';
 
 fragment
 SPACE : ' ';

@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.date;
@@ -22,6 +26,7 @@ import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.record.Record;
 
 import java.time.Instant;
@@ -44,6 +49,7 @@ import java.util.stream.Stream;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
@@ -106,6 +112,17 @@ class DateProcessorTests {
     }
 
     @Test
+    void invalid_date_when_condition_throws_InvalidPluginConfigurationException() {
+        final String dateWhen = UUID.randomUUID().toString();
+
+        when(mockDateProcessorConfig.getDateWhen()).thenReturn(dateWhen);
+
+        when(expressionEvaluator.isValidExpressionStatement(dateWhen)).thenReturn(false);
+
+        assertThrows(InvalidPluginConfigurationException.class, this::createObjectUnderTest);
+    }
+
+    @Test
     void from_time_received_with_default_destination_test() {
         when(mockDateProcessorConfig.getFromTimeReceived()).thenReturn(true);
         when(mockDateProcessorConfig.getDestinationZoneId()).thenReturn(ZoneId.systemDefault());
@@ -130,7 +147,9 @@ class DateProcessorTests {
 
     @Test
     void date_when_does_not_run_date_processor_for_event_with_date_when_as_false() {
-        when(mockDateProcessorConfig.getDateWhen()).thenReturn(UUID.randomUUID().toString());
+        final String dateWhen = UUID.randomUUID().toString();
+        when(mockDateProcessorConfig.getDateWhen()).thenReturn(dateWhen);
+        when(expressionEvaluator.isValidExpressionStatement(dateWhen)).thenReturn(true);
         dateProcessor = createObjectUnderTest();
 
         Map<String, Object> testData = getTestData();
@@ -524,9 +543,41 @@ class DateProcessorTests {
         verify(dateProcessingMatchSuccessCounter, times(1)).increment();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"hh:mm:ss a", "KK:mm:ss a", "kk:mm:ss", "HH:mm:ss"})
+    void match_with_different_hours_formats(String pattern) {
+        when(mockDateMatch.getKey()).thenReturn("logDate");
+        when(mockDateMatch.getPatterns()).thenReturn(Collections.singletonList(pattern));
+
+        List<DateProcessorConfig.DateMatch> dateMatches = Collections.singletonList(mockDateMatch);
+        when(mockDateProcessorConfig.getMatch()).thenReturn(dateMatches);
+        when(mockDateProcessorConfig.getSourceZoneId()).thenReturn(ZoneId.systemDefault());
+        when(mockDateProcessorConfig.getDestinationZoneId()).thenReturn(ZoneId.systemDefault());
+        when(mockDateProcessorConfig.getSourceLocale()).thenReturn(Locale.ROOT);
+        when(mockDateProcessorConfig.getToOriginationMetadata()).thenReturn(true);
+
+        dateProcessor = createObjectUnderTest();
+
+        Map<String, Object> testData = getTestData();
+        String formattedExpectedTime = expectedDateTime.format(DateTimeFormatter.ofPattern(pattern));
+        testData.put("logDate", formattedExpectedTime);
+
+        final Record<Event> record = buildRecordWithEvent(testData);
+        final List<Record<Event>> processedRecords = (List<Record<Event>>) dateProcessor.doExecute(Collections.singletonList(record));
+
+        Event event = processedRecords.get(0).getData();
+        Assertions.assertNotNull(event.getMetadata().getExternalOriginationTime());
+        Assertions.assertNotNull(event.getEventHandle().getExternalOriginationTime());
+        ZonedDateTime expectedZonedDatetime = expectedDateTime.atZone(mockDateProcessorConfig.getSourceZoneId()).truncatedTo(ChronoUnit.SECONDS);
+        Assertions.assertEquals(expectedZonedDatetime, event.getMetadata().getExternalOriginationTime().atZone(mockDateProcessorConfig.getSourceZoneId()));
+        verify(dateProcessingMatchSuccessCounter, times(1)).increment();
+    }
+
     @Test
     void date_processor_catches_exceptions_instead_of_throwing() {
-        when(mockDateProcessorConfig.getDateWhen()).thenReturn(UUID.randomUUID().toString());
+        final String dateWhen = UUID.randomUUID().toString();
+        when(mockDateProcessorConfig.getDateWhen()).thenReturn(dateWhen);
+        when(expressionEvaluator.isValidExpressionStatement(dateWhen)).thenReturn(true);
         when(expressionEvaluator.evaluateConditional(any(String.class), any(Event.class)))
                 .thenThrow(RuntimeException.class);
 

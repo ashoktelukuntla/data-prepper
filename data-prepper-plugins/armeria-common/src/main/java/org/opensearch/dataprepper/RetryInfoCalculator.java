@@ -1,0 +1,58 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+package org.opensearch.dataprepper;
+
+import com.google.rpc.RetryInfo;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.atomic.AtomicReference;
+
+public class RetryInfoCalculator {
+
+    private final Duration minimumDelay;
+    private final Duration maximumDelay;
+
+    private final AtomicReference<Instant> lastTimeCalled;
+    private final AtomicReference<Duration> nextDelay;
+
+    public RetryInfoCalculator(Duration minimumDelay, Duration maximumDelay) {
+        this.minimumDelay = minimumDelay;
+        this.maximumDelay = maximumDelay;
+        // Create a cushion so that the calculator treats a first quick exception (after prepper startup) as normal request (e.g. does not calculate a backoff)
+        this.lastTimeCalled = new AtomicReference<>(Instant.now().minus(maximumDelay));
+        this.nextDelay = new AtomicReference<>(minimumDelay);
+    }
+
+    private static RetryInfo createProtoResult(Duration delay) {
+        return RetryInfo.newBuilder().setRetryDelay(mapDuration(delay)).build();
+    }
+
+    private static Duration minDuration(Duration left, Duration right) {
+        return left.compareTo(right) <= 0 ? left : right;
+    }
+
+    private static com.google.protobuf.Duration.Builder mapDuration(Duration duration) {
+        return com.google.protobuf.Duration.newBuilder().setSeconds(duration.getSeconds()).setNanos(duration.getNano());
+    }
+
+    public RetryInfo createRetryInfo() {
+        Instant now = Instant.now();
+        // Is the last time we got called longer ago than the next delay?
+        if (lastTimeCalled.getAndSet(now).isBefore(now.minus(nextDelay.get()))) {
+            // Use minimum delay and reset the saved delay
+            nextDelay.set(minimumDelay);
+            return createProtoResult(minimumDelay);
+        }
+        Duration delay = nextDelay.getAndUpdate(d -> minDuration(maximumDelay, d.multipliedBy(2)));
+        return createProtoResult(delay);
+    }
+
+}

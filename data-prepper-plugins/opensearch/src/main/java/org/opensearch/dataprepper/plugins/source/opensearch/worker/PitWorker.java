@@ -27,6 +27,7 @@ import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.
 import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.DeletePointInTimeRequest;
 import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.SearchPointInTimeRequest;
 import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.SearchWithSearchAfterResults;
+import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.SortingOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,6 +41,8 @@ import static org.opensearch.dataprepper.plugins.source.opensearch.worker.Worker
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.calculateExponentialBackoffAndJitter;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.completeIndexPartition;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.createAcknowledgmentSet;
+import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.hasMorePages;
+import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.recordShardFailuresIfAny;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.MetadataKeyAttributes.DOCUMENT_ID_METADATA_ATTRIBUTE_NAME;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.MetadataKeyAttributes.INDEX_METADATA_ATTRIBUTE_NAME;
 
@@ -115,16 +118,16 @@ public class PitWorker implements SearchWorker, Runnable {
                     openSearchSourcePluginMetrics.getIndexProcessingTimeTimer().record(() -> processIndex(indexPartition.get(), acknowledgementSet));
 
                     completeIndexPartition(openSearchSourceConfiguration, acknowledgementSet,
-                            indexPartition.get(), sourceCoordinator);
+                            indexPartition.get(), sourceCoordinator, openSearchSourcePluginMetrics);
 
                     openSearchSourcePluginMetrics.getIndicesProcessedCounter().increment();
                 } catch (final PartitionUpdateException | PartitionNotFoundException | PartitionNotOwnedException e) {
                     LOG.warn("PitWorker received an exception from the source coordinator. There is a potential for duplicate data for index {}, giving up partition and getting next partition: {}", indexPartition.get().getPartitionKey(), e.getMessage());
-                    sourceCoordinator.giveUpPartitions();
+                    sourceCoordinator.giveUpPartition(indexPartition.get().getPartitionKey());
                 } catch (final SearchContextLimitException e) {
                     LOG.warn("Received SearchContextLimitExceeded exception for index {}. Giving up index and waiting {} seconds before retrying: {}",
                             indexPartition.get().getPartitionKey(), BACKOFF_ON_EXCEPTION.getSeconds(), e.getMessage());
-                    sourceCoordinator.giveUpPartitions();
+                    sourceCoordinator.giveUpPartition(indexPartition.get().getPartitionKey());
                     openSearchSourcePluginMetrics.getProcessingErrorsCounter().increment();
                     try {
                         Thread.sleep(BACKOFF_ON_EXCEPTION.toMillis());
@@ -136,7 +139,7 @@ public class PitWorker implements SearchWorker, Runnable {
                     sourceCoordinator.completePartition(indexPartition.get().getPartitionKey(), false);
                 } catch (final RuntimeException e) {
                     LOG.error("Unknown exception while processing index '{}':", indexPartition.get().getPartitionKey(), e);
-                    sourceCoordinator.giveUpPartitions();
+                    sourceCoordinator.giveUpPartition(indexPartition.get().getPartitionKey());
                     openSearchSourcePluginMetrics.getProcessingErrorsCounter().increment();
                 }
             } catch (final Exception e) {
@@ -183,14 +186,15 @@ public class PitWorker implements SearchWorker, Runnable {
 
         final SearchConfiguration searchConfiguration = openSearchSourceConfiguration.getSearchConfiguration();
         SearchWithSearchAfterResults searchWithSearchAfterResults = null;
+        final List<SortingOptions> sortingOptions = SortingOptions.fromSortConfigs(searchConfiguration.getSort());
 
-        // todo: Pass query and sort options from SearchConfiguration to the search request
         do {
             searchWithSearchAfterResults = searchAccessor.searchWithPit(SearchPointInTimeRequest.builder()
                     .withPitId(openSearchIndexProgressState.getPitId())
                     .withKeepAlive(EXTEND_KEEP_ALIVE_TIME)
                     .withPaginationSize(searchConfiguration.getBatchSize())
                     .withSearchAfter(getSearchAfter(openSearchIndexProgressState, searchWithSearchAfterResults))
+                    .withSortOptions(sortingOptions)
                     .build());
 
             searchWithSearchAfterResults.getDocuments().stream().map(Record::new).forEach(record -> {
@@ -214,12 +218,19 @@ public class PitWorker implements SearchWorker, Runnable {
             openSearchIndexProgressState.setSearchAfter(searchWithSearchAfterResults.getNextSearchAfter());
             openSearchIndexProgressState.setKeepAlive(Duration.ofMillis(openSearchIndexProgressState.getKeepAlive()).plus(EXTEND_KEEP_ALIVE_DURATION).toMillis());
 
+            recordShardFailuresIfAny(indexName, searchWithSearchAfterResults.getShardStatistics(), openSearchIndexProgressState, openSearchSourcePluginMetrics);
+
             if (System.currentTimeMillis() - lastCheckpointTime > DEFAULT_CHECKPOINT_INTERVAL_MILLS) {
                 LOG.debug("Renew ownership of index {}", indexName);
                 sourceCoordinator.saveProgressStateForPartition(indexName, openSearchIndexProgressState);
                 lastCheckpointTime = System.currentTimeMillis();
             }
-        } while (searchWithSearchAfterResults.getDocuments().size() == searchConfiguration.getBatchSize());
+        } while (hasMorePages(searchWithSearchAfterResults));
+
+        LOG.info("Reached end of index '{}' (last page returned {} documents, nextSearchAfter present: {}).",
+                indexName,
+                searchWithSearchAfterResults.getDocuments().size(),
+                searchWithSearchAfterResults.getNextSearchAfter() != null);
 
         try {
             bufferAccumulator.flush();

@@ -18,10 +18,13 @@ import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.log.JacksonLog;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.source.coordinator.SourceCoordinator;
+import org.opensearch.dataprepper.plugins.s3.common.ownership.BucketOwnerProvider;
+import org.opensearch.dataprepper.plugins.s3.common.source.S3ObjectPluginMetrics;
+import org.opensearch.dataprepper.plugins.s3.common.source.S3ObjectReference;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.S3SelectCSVOption;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.S3SelectJsonOption;
+import org.opensearch.dataprepper.plugins.source.s3.configuration.S3DataSelection;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.S3SelectSerializationFormatOption;
-import org.opensearch.dataprepper.plugins.source.s3.ownership.BucketOwnerProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
@@ -100,7 +103,8 @@ public class S3SelectObjectWorker implements S3ObjectHandler {
         this.bucketOwnerProvider = s3ObjectRequest.getBucketOwnerProvider();
     }
 
-    public void parseS3Object(final S3ObjectReference s3ObjectReference,
+    public void processS3Object(final S3ObjectReference s3ObjectReference,
+                              final S3DataSelection dataSelection,
                               final AcknowledgementSet acknowledgementSet,
                               final SourceCoordinator<S3SourceProgressState> sourceCoordinator,
                               final String partitionKey) throws IOException {
@@ -112,6 +116,11 @@ public class S3SelectObjectWorker implements S3ObjectHandler {
             s3ObjectPluginMetrics.getS3ObjectsFailedCounter().increment();
             throw new IOException(e);
         }
+    }
+
+    @Override
+    public void deleteS3Object(final S3ObjectReference s3ObjectReference) {
+        throw new UnsupportedOperationException("Deleting S3 objects is not supported with S3 select");
     }
 
     private void selectObject(final S3ObjectReference s3ObjectReference, final AcknowledgementSet acknowledgementSet) throws IOException {

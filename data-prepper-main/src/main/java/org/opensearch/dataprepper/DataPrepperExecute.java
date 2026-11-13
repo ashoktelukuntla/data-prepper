@@ -5,6 +5,8 @@
 
 package org.opensearch.dataprepper;
 
+import org.opensearch.dataprepper.core.DataPrepper;
+import org.opensearch.dataprepper.model.configuration.DataPrepperVersion;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.ComponentScan;
@@ -19,6 +21,7 @@ public class DataPrepperExecute {
     private static final Logger LOG = LoggerFactory.getLogger(DataPrepperExecute.class);
 
     public static void main(final String ... args) {
+        LOG.info("Data Prepper {}", DataPrepperVersion.getCurrentVersion());
         java.security.Security.setProperty("networkaddress.cache.ttl", "60");
         System.setProperty("software.amazon.awssdk.http.service.impl", "software.amazon.awssdk.http.apache.ApacheSdkHttpService");
 

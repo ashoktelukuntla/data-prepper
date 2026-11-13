@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.buffer;
@@ -8,14 +12,18 @@ package org.opensearch.dataprepper.model.buffer;
 import org.junit.jupiter.api.Test;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
 
 import java.time.Duration;
+import java.util.Optional;
 
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.doCallRealMethod;
 
 class BufferTest {
 
@@ -31,6 +39,18 @@ class BufferTest {
     }
 
     @Test
+    void testMaxRequestSize() {
+        final Buffer<Record<Event>> buffer = createObjectUnderTest();
+        assertEquals(buffer.getMaxRequestSize(), Optional.empty());
+    }
+
+    @Test
+    void testOptimalRequestSize() {
+        final Buffer<Record<Event>> buffer = createObjectUnderTest();
+        assertEquals(buffer.getOptimalRequestSize(), Optional.empty());
+    }
+
+    @Test
     void testShutdown() {
         final Buffer<Record<Event>> buffer = createObjectUnderTest();
         buffer.shutdown();
@@ -41,6 +61,7 @@ class BufferTest {
         final Buffer<Record<Event>> buffer = createObjectUnderTest();
 
         assertEquals(false, buffer.isByteBuffer());
+        assertEquals(false, buffer.areAcknowledgementsEnabled());
     }
 
     @Test
@@ -57,4 +78,11 @@ class BufferTest {
 
     }
 
+    @Test
+    void testSetFailurePipeline() {
+        final Buffer<Record<Event>> buffer = createObjectUnderTest();
+        HeadlessPipeline failurePipeline = mock(HeadlessPipeline.class);
+        doCallRealMethod().when(buffer).setFailurePipeline(failurePipeline);
+        buffer.setFailurePipeline(failurePipeline);
+    }
 }

@@ -1,0 +1,551 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.dataprepper.plugins.source.rds.stream;
+
+import com.github.shyiko.mysql.binlog.BinaryLogClient;
+import com.github.shyiko.mysql.binlog.event.EventType;
+import com.github.shyiko.mysql.binlog.event.TableMapEventData;
+import com.github.shyiko.mysql.binlog.event.TableMapEventMetadata;
+import com.github.shyiko.mysql.binlog.event.UpdateRowsEventData;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.Answers;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.metrics.PluginMetrics;
+import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
+import org.opensearch.dataprepper.model.configuration.PipelineDescription;
+import org.opensearch.dataprepper.model.configuration.PluginSetting;
+import org.opensearch.dataprepper.model.pipeline.HeadlessPipeline;
+import org.opensearch.dataprepper.model.buffer.Buffer;
+import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventFailureMetadata;
+import org.opensearch.dataprepper.model.opensearch.OpenSearchBulkActions;
+import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.plugins.source.rds.RdsSourceConfig;
+import org.opensearch.dataprepper.plugins.source.rds.model.DbTableMetadata;
+import org.opensearch.dataprepper.plugins.source.rds.coordination.partition.StreamPartition;
+import org.opensearch.dataprepper.plugins.source.rds.model.StreamEventType;
+import org.opensearch.dataprepper.plugins.source.rds.model.TableMetadata;
+import org.opensearch.dataprepper.plugins.source.rds.resync.CascadingActionDetector;
+
+import java.io.IOException;
+import java.io.Serializable;
+import java.lang.reflect.Field;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.opensearch.dataprepper.plugins.source.rds.stream.BinlogEventListener.REPLICATION_LOG_EVENT_PROCESSING_TIME;
+import static org.opensearch.dataprepper.plugins.source.rds.stream.BinlogEventListener.REPLICATION_LOG_PROCESSING_ERROR_COUNT;
+
+@ExtendWith(MockitoExtension.class)
+class BinlogEventListenerTest {
+
+    @Mock
+    private StreamPartition streamPartition;
+
+    @Mock
+    private Buffer<Record<Event>> buffer;
+
+    @Mock(answer = Answers.RETURNS_DEEP_STUBS)
+    private RdsSourceConfig sourceConfig;
+
+    @Mock
+    private PluginMetrics pluginMetrics;
+
+    @Mock
+    private BinaryLogClient binaryLogClient;
+
+    @Mock
+    private StreamCheckpointer streamCheckpointer;
+
+    @Mock
+    private AcknowledgementSetManager acknowledgementSetManager;
+
+    @Mock
+    private CascadingActionDetector cascadingActionDetector;
+
+    @Mock
+    private PluginSetting pluginSetting;
+
+    @Mock
+    private PipelineDescription pipelineDescription;
+
+    @Mock
+    private HeadlessPipeline failurePipeline;
+
+    @Mock
+    private ExecutorService eventListnerExecutorService;
+
+    @Mock
+    private ExecutorService checkpointManagerExecutorService;
+
+    @Mock
+    private ThreadFactory threadFactory;
+
+    @Mock
+    private DbTableMetadata dbTableMetadata;
+
+    @Mock(answer = Answers.RETURNS_DEEP_STUBS)
+    private com.github.shyiko.mysql.binlog.event.Event binlogEvent;
+
+    private String s3Prefix;
+
+    private BinlogEventListener objectUnderTest;
+
+    private Timer eventProcessingTimer;
+    private Counter eventProcessingErrorCounter;
+    private Counter defaultCounter;
+
+    @BeforeEach
+    void setUp() {
+        s3Prefix = UUID.randomUUID().toString();
+        eventProcessingTimer = Metrics.timer(REPLICATION_LOG_EVENT_PROCESSING_TIME);
+        eventProcessingErrorCounter = Metrics.counter(REPLICATION_LOG_PROCESSING_ERROR_COUNT);
+        defaultCounter = Metrics.counter("default-test-counter");
+        when(pluginMetrics.timer(REPLICATION_LOG_EVENT_PROCESSING_TIME)).thenReturn(eventProcessingTimer);
+        lenient().when(pluginMetrics.counter(REPLICATION_LOG_PROCESSING_ERROR_COUNT)).thenReturn(eventProcessingErrorCounter);
+        lenient().when(pluginMetrics.counter(any())).thenReturn(defaultCounter);
+        when(pipelineDescription.getPipelineName()).thenReturn("test-pipeline");
+        try (final MockedStatic<Executors> executorsMockedStatic = mockStatic(Executors.class)) {
+            executorsMockedStatic.when(() -> Executors.newFixedThreadPool(anyInt(), any(ThreadFactory.class))).thenReturn(eventListnerExecutorService);
+            executorsMockedStatic.when(Executors::newSingleThreadExecutor).thenReturn(checkpointManagerExecutorService);
+            executorsMockedStatic.when(Executors::defaultThreadFactory).thenReturn(threadFactory);
+            objectUnderTest = spy(createObjectUnderTest());
+        }
+    }
+
+    @Test
+    void test_given_TableMap_event_then_calls_correct_handler() {
+        when(binlogEvent.getHeader().getEventType()).thenReturn(EventType.TABLE_MAP);
+        doNothing().when(objectUnderTest).handleTableMapEvent(binlogEvent);
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+        verify(objectUnderTest).handleTableMapEvent(binlogEvent);
+    }
+
+    @Test
+    void test_stopClient() throws IOException {
+        objectUnderTest.stopClient();
+
+        InOrder inOrder = inOrder(binaryLogClient, eventListnerExecutorService);
+        inOrder.verify(binaryLogClient).disconnect();
+        inOrder.verify(binaryLogClient).unregisterEventListener(objectUnderTest);
+        inOrder.verify(eventListnerExecutorService).shutdownNow();
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"WRITE_ROWS", "EXT_WRITE_ROWS"})
+    void test_given_WriteRows_event_then_calls_correct_handler(EventType eventType) {
+        when(binlogEvent.getHeader().getEventType()).thenReturn(eventType);
+        doNothing().when(objectUnderTest).handleInsertEvent(binlogEvent);
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+        verify(objectUnderTest).handleInsertEvent(binlogEvent);
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"UPDATE_ROWS", "EXT_UPDATE_ROWS"})
+    void test_given_UpdateRows_event_then_calls_correct_handler(EventType eventType) {
+        when(binlogEvent.getHeader().getEventType()).thenReturn(eventType);
+        doNothing().when(objectUnderTest).handleUpdateEvent(binlogEvent);
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+        verify(objectUnderTest).handleUpdateEvent(binlogEvent);
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"UPDATE_ROWS", "EXT_UPDATE_ROWS"})
+    void test_given_UpdateRows_event_when_primary_key_changes_then_generate_correct_events(EventType eventType) throws NoSuchFieldException, IllegalAccessException {
+        final UpdateRowsEventData data = mock(UpdateRowsEventData.class);
+        final Serializable[] oldCol1Data = new Serializable[]{1, "a"};
+        final Serializable[] newCol1Data = new Serializable[]{2, "a"};
+        final Serializable[] oldCol2Data = new Serializable[]{3, "b"};
+        final Serializable[] newCol2Data = new Serializable[]{1, "b"};
+        final List<Map.Entry<Serializable[], Serializable[]>> rows = List.of(
+                Map.entry(oldCol1Data, newCol1Data),
+                Map.entry(oldCol2Data, newCol2Data)
+        );
+        final long tableId = 1234L;
+        when(binlogEvent.getHeader().getEventType()).thenReturn(eventType);
+        when(binlogEvent.getData()).thenReturn(data);
+        when(data.getTableId()).thenReturn(tableId);
+        when(objectUnderTest.isValidTableId(tableId)).thenReturn(true);
+        when(data.getRows()).thenReturn(rows);
+
+        // Set tableMetadataMap reflectively
+        final TableMetadata tableMetadata = mock(TableMetadata.class);
+        final Map<Long, TableMetadata> tableMetadataMap = Map.of(tableId, tableMetadata);
+        Field tableMetadataMapField = BinlogEventListener.class.getDeclaredField("tableMetadataMap");
+        tableMetadataMapField.setAccessible(true);
+        tableMetadataMapField.set(objectUnderTest, tableMetadataMap);
+        when(tableMetadata.getPrimaryKeys()).thenReturn(List.of("col1"));
+        when(tableMetadata.getColumnNames()).thenReturn(List.of("col1", "col2"));
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+        verify(objectUnderTest).handleUpdateEvent(binlogEvent);
+
+        // verify rowList and bulkActionList that were sent to handleRowChangeEvent() were correct
+        ArgumentCaptor<List<Serializable[]>> rowListArgumentCaptor = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<OpenSearchBulkActions>> bulkActionListArgumentCaptor = ArgumentCaptor.forClass(List.class);
+        verify(objectUnderTest).handleRowChangeEvent(eq(binlogEvent), eq(tableId), rowListArgumentCaptor.capture(), bulkActionListArgumentCaptor.capture(), eq(StreamEventType.UPDATE));
+        List<Serializable[]> rowList = rowListArgumentCaptor.getValue();
+        List<OpenSearchBulkActions> bulkActionList = bulkActionListArgumentCaptor.getValue();
+
+        assertThat(rowList.size(), is(4));
+        assertThat(bulkActionList.size(), is(4));
+        assertThat(rowList.get(0), is(oldCol1Data));
+        assertThat(bulkActionList.get(0), is(OpenSearchBulkActions.DELETE));
+        assertThat(rowList.get(1), is(newCol1Data));
+        assertThat(bulkActionList.get(1), is(OpenSearchBulkActions.INDEX));
+        assertThat(rowList.get(2), is(oldCol2Data));
+        assertThat(bulkActionList.get(2), is(OpenSearchBulkActions.DELETE));
+        assertThat(rowList.get(3), is(newCol2Data));
+        assertThat(bulkActionList.get(3), is(OpenSearchBulkActions.INDEX));
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"DELETE_ROWS", "EXT_DELETE_ROWS"})
+    void test_given_DeleteRows_event_then_calls_correct_handler(EventType eventType) {
+        when(binlogEvent.getHeader().getEventType()).thenReturn(eventType);
+        doNothing().when(objectUnderTest).handleDeleteEvent(binlogEvent);
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+        verify(objectUnderTest).handleDeleteEvent(binlogEvent);
+    }
+
+    @Test
+    void test_sendToFailurePipeline_sends_event_with_failure_metadata() throws Exception {
+        final String pluginName = "rds";
+        final String pipelineName = "test-pipeline";
+        final String errorMessage = "test error";
+        final Event event = mock(Event.class);
+        final EventFailureMetadata failureMetadata = mock(EventFailureMetadata.class);
+
+        when(pluginSetting.getName()).thenReturn(pluginName);
+        when(event.updateFailureMetadata()).thenReturn(failureMetadata);
+        when(failureMetadata.withPluginId(pluginName)).thenReturn(failureMetadata);
+        when(failureMetadata.withPluginName(pluginName)).thenReturn(failureMetadata);
+        when(failureMetadata.withPipelineName(pipelineName)).thenReturn(failureMetadata);
+        when(failureMetadata.withErrorMessage(errorMessage)).thenReturn(failureMetadata);
+
+        // Use reflection to invoke sendToFailurePipeline
+        java.lang.reflect.Method method = BinlogEventListener.class.getDeclaredMethod("sendToFailurePipeline", Event.class, Exception.class);
+        method.setAccessible(true);
+        method.invoke(objectUnderTest, event, new RuntimeException(errorMessage));
+
+        verify(event).updateFailureMetadata();
+        verify(failureMetadata).withPluginId(pluginName);
+        verify(failureMetadata).withPluginName(pluginName);
+        verify(failureMetadata).withPipelineName(pipelineName);
+        verify(failureMetadata).withErrorMessage(errorMessage);
+        verify(failurePipeline).sendEvents(any());
+    }
+
+    @Test
+    void test_sendToFailurePipeline_does_nothing_when_failurePipeline_is_null() throws Exception {
+        // Create a listener with null failurePipeline
+        BinlogEventListener listenerWithNullDlq;
+        try (final MockedStatic<Executors> executorsMockedStatic = mockStatic(Executors.class)) {
+            executorsMockedStatic.when(() -> Executors.newFixedThreadPool(anyInt(), any(ThreadFactory.class))).thenReturn(eventListnerExecutorService);
+            executorsMockedStatic.when(Executors::newSingleThreadExecutor).thenReturn(checkpointManagerExecutorService);
+            executorsMockedStatic.when(Executors::defaultThreadFactory).thenReturn(threadFactory);
+            listenerWithNullDlq = BinlogEventListener.create(streamPartition, buffer, sourceConfig, s3Prefix, pluginMetrics, binaryLogClient,
+                    streamCheckpointer, acknowledgementSetManager, dbTableMetadata, cascadingActionDetector,
+                    pluginSetting, pipelineDescription, null);
+        }
+
+        final Event event = mock(Event.class);
+
+        java.lang.reflect.Method method = BinlogEventListener.class.getDeclaredMethod("sendToFailurePipeline", Event.class, Exception.class);
+        method.setAccessible(true);
+        method.invoke(listenerWithNullDlq, event, new RuntimeException("error"));
+
+        verify(event, org.mockito.Mockito.never()).updateFailureMetadata();
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"UPDATE_ROWS", "EXT_UPDATE_ROWS"})
+    void test_handleUpdateEvent_does_not_throw_when_row_data_has_extra_columns(EventType eventType) throws NoSuchFieldException, IllegalAccessException {
+        // Simulate expression index: row data has 4 values but only 2 visible column names
+        final UpdateRowsEventData data = mock(UpdateRowsEventData.class);
+        final Serializable[] oldData = new Serializable[]{1, "a", "hidden1", "hidden2"};
+        final Serializable[] newData = new Serializable[]{1, "b", "hidden1", "hidden2"};
+        final List<Map.Entry<Serializable[], Serializable[]>> rows = List.of(Map.entry(oldData, newData));
+        final long tableId = 1234L;
+        when(binlogEvent.getHeader().getEventType()).thenReturn(eventType);
+        when(binlogEvent.getData()).thenReturn(data);
+        when(data.getTableId()).thenReturn(tableId);
+        when(objectUnderTest.isValidTableId(tableId)).thenReturn(true);
+        when(data.getRows()).thenReturn(rows);
+
+        final TableMetadata tableMetadata = mock(TableMetadata.class);
+        final Map<Long, TableMetadata> tableMetadataMap = Map.of(tableId, tableMetadata);
+        Field tableMetadataMapField = BinlogEventListener.class.getDeclaredField("tableMetadataMap");
+        tableMetadataMapField.setAccessible(true);
+        tableMetadataMapField.set(objectUnderTest, tableMetadataMap);
+        when(tableMetadata.getPrimaryKeys()).thenReturn(List.of("col1"));
+        when(tableMetadata.getColumnNames()).thenReturn(List.of("col1", "col2"));
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+        verify(objectUnderTest).handleUpdateEvent(binlogEvent);
+
+        ArgumentCaptor<List<Serializable[]>> rowListCaptor = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<OpenSearchBulkActions>> bulkActionCaptor = ArgumentCaptor.forClass(List.class);
+        verify(objectUnderTest).handleRowChangeEvent(eq(binlogEvent), eq(tableId), rowListCaptor.capture(), bulkActionCaptor.capture(), eq(StreamEventType.UPDATE));
+
+        // No primary key change, so only the INDEX action for the new row
+        assertThat(rowListCaptor.getValue().size(), is(1));
+        assertThat(bulkActionCaptor.getValue().get(0), is(OpenSearchBulkActions.INDEX));
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"UPDATE_ROWS", "EXT_UPDATE_ROWS"})
+    void test_handleUpdateEvent_detects_primary_key_change_with_extra_columns(EventType eventType) throws NoSuchFieldException, IllegalAccessException {
+        // Row data has extra expression index columns, but primary key still changes
+        final UpdateRowsEventData data = mock(UpdateRowsEventData.class);
+        final Serializable[] oldData = new Serializable[]{1, "a", "hidden1"};
+        final Serializable[] newData = new Serializable[]{2, "a", "hidden1"};
+        final List<Map.Entry<Serializable[], Serializable[]>> rows = List.of(Map.entry(oldData, newData));
+        final long tableId = 1234L;
+        when(binlogEvent.getHeader().getEventType()).thenReturn(eventType);
+        when(binlogEvent.getData()).thenReturn(data);
+        when(data.getTableId()).thenReturn(tableId);
+        when(objectUnderTest.isValidTableId(tableId)).thenReturn(true);
+        when(data.getRows()).thenReturn(rows);
+
+        final TableMetadata tableMetadata = mock(TableMetadata.class);
+        final Map<Long, TableMetadata> tableMetadataMap = Map.of(tableId, tableMetadata);
+        Field tableMetadataMapField = BinlogEventListener.class.getDeclaredField("tableMetadataMap");
+        tableMetadataMapField.setAccessible(true);
+        tableMetadataMapField.set(objectUnderTest, tableMetadataMap);
+        when(tableMetadata.getPrimaryKeys()).thenReturn(List.of("col1"));
+        when(tableMetadata.getColumnNames()).thenReturn(List.of("col1", "col2"));
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+
+        ArgumentCaptor<List<Serializable[]>> rowListCaptor = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<OpenSearchBulkActions>> bulkActionCaptor = ArgumentCaptor.forClass(List.class);
+        verify(objectUnderTest).handleRowChangeEvent(eq(binlogEvent), eq(tableId), rowListCaptor.capture(), bulkActionCaptor.capture(), eq(StreamEventType.UPDATE));
+
+        // Primary key changed: DELETE old + INDEX new
+        assertThat(rowListCaptor.getValue().size(), is(2));
+        assertThat(bulkActionCaptor.getValue().get(0), is(OpenSearchBulkActions.DELETE));
+        assertThat(bulkActionCaptor.getValue().get(1), is(OpenSearchBulkActions.INDEX));
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"UPDATE_ROWS", "EXT_UPDATE_ROWS"})
+    void test_handleUpdateEvent_does_not_throw_when_before_value_is_null(EventType eventType) throws NoSuchFieldException, IllegalAccessException {
+        // Nullable column has null in the before-image of an UPDATE event
+        final UpdateRowsEventData data = mock(UpdateRowsEventData.class);
+        final Serializable[] oldData = new Serializable[]{1, null};
+        final Serializable[] newData = new Serializable[]{1, "new-value"};
+        final List<Map.Entry<Serializable[], Serializable[]>> rows = List.of(Map.entry(oldData, newData));
+        final long tableId = 1234L;
+        when(binlogEvent.getHeader().getEventType()).thenReturn(eventType);
+        when(binlogEvent.getData()).thenReturn(data);
+        when(data.getTableId()).thenReturn(tableId);
+        when(objectUnderTest.isValidTableId(tableId)).thenReturn(true);
+        when(data.getRows()).thenReturn(rows);
+
+        final TableMetadata tableMetadata = mock(TableMetadata.class);
+        final Map<Long, TableMetadata> tableMetadataMap = Map.of(tableId, tableMetadata);
+        Field tableMetadataMapField = BinlogEventListener.class.getDeclaredField("tableMetadataMap");
+        tableMetadataMapField.setAccessible(true);
+        tableMetadataMapField.set(objectUnderTest, tableMetadataMap);
+        when(tableMetadata.getPrimaryKeys()).thenReturn(List.of("col1"));
+        when(tableMetadata.getColumnNames()).thenReturn(List.of("col1", "col2"));
+
+        objectUnderTest.onEvent(binlogEvent);
+
+        verifyHandlerCallHelper();
+        verify(objectUnderTest).handleUpdateEvent(binlogEvent);
+
+        ArgumentCaptor<List<Serializable[]>> rowListCaptor = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<OpenSearchBulkActions>> bulkActionCaptor = ArgumentCaptor.forClass(List.class);
+        verify(objectUnderTest).handleRowChangeEvent(eq(binlogEvent), eq(tableId), rowListCaptor.capture(), bulkActionCaptor.capture(), eq(StreamEventType.UPDATE));
+
+        // No primary key change, only INDEX for the new row
+        assertThat(rowListCaptor.getValue().size(), is(1));
+        assertThat(bulkActionCaptor.getValue().get(0), is(OpenSearchBulkActions.INDEX));
+    }
+
+    private BinlogEventListener createObjectUnderTest() {
+        return BinlogEventListener.create(streamPartition, buffer, sourceConfig, s3Prefix, pluginMetrics, binaryLogClient,
+                streamCheckpointer, acknowledgementSetManager, dbTableMetadata, cascadingActionDetector,
+                pluginSetting, pipelineDescription, failurePipeline);
+    }
+
+    private void verifyHandlerCallHelper() {
+        ArgumentCaptor<Runnable> runnableArgumentCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(eventListnerExecutorService).submit(runnableArgumentCaptor.capture());
+
+        Runnable capturedRunnable = runnableArgumentCaptor.getValue();
+        capturedRunnable.run();
+    }
+
+    @Test
+    void test_given_TableMap_event_for_table_not_of_interest_then_removes_stale_table_metadata() throws Exception {
+        final long tableId = 1234L;
+        final String databaseName = "test_database";
+        final String tableOfInterest = "table_of_interest";
+        final String tableNotOfInterest = "table_not_of_interest";
+        final String fullTableOfInterest = databaseName + "." + tableOfInterest;
+
+        // Only tableOfInterest is included in the sync set
+        when(dbTableMetadata.getTableColumnDataTypeMap())
+                .thenReturn(Map.of(fullTableOfInterest, Map.of("col1", "int", "col2", "varchar")));
+        final BinlogEventListener objectUnderTest = createObjectUnderTestWithMockedExecutors();
+
+        // The listener is holding a mapping from tableId to the table of interest, which was
+        // built from an earlier TABLE_MAP event.
+        final TableMetadata staleTableMetadata = TableMetadata.builder()
+                .withDatabaseName(databaseName)
+                .withTableName(tableOfInterest)
+                .withColumnNames(List.of("col1", "col2"))
+                .withPrimaryKeys(List.of("col1"))
+                .build();
+        setTableMetadataMap(objectUnderTest, tableId, staleTableMetadata);
+        assertThat(objectUnderTest.isValidTableId(tableId), is(true));
+
+        // MySQL reassigns the same tableId to a table that is not part of the sync set.
+        objectUnderTest.handleTableMapEvent(createTableMapEvent(tableId, databaseName, tableNotOfInterest));
+
+        // The stale mapping must be gone, otherwise row events of tableNotOfInterest would be
+        // decoded with the schema of tableOfInterest.
+        assertThat(getTableMetadataMap(objectUnderTest).containsKey(tableId), is(false));
+        assertThat(objectUnderTest.isValidTableId(tableId), is(false));
+    }
+
+    @Test
+    void test_given_TableMap_event_for_table_not_of_interest_and_no_existing_mapping_then_no_mapping_is_added() throws Exception {
+        final long tableId = 1234L;
+        final String databaseName = "test_database";
+        final String fullTableOfInterest = databaseName + ".table_of_interest";
+
+        when(dbTableMetadata.getTableColumnDataTypeMap())
+                .thenReturn(Map.of(fullTableOfInterest, Map.of("col1", "int")));
+        final BinlogEventListener objectUnderTest = createObjectUnderTestWithMockedExecutors();
+
+        objectUnderTest.handleTableMapEvent(createTableMapEvent(tableId, databaseName, "table_not_of_interest"));
+
+        assertThat(getTableMetadataMap(objectUnderTest).isEmpty(), is(true));
+        assertThat(objectUnderTest.isValidTableId(tableId), is(false));
+    }
+
+    @Test
+    void test_given_TableMap_event_for_table_of_interest_then_overwrites_existing_mapping() throws Exception {
+        final long tableId = 1234L;
+        final String databaseName = "test_database";
+        final String previousTable = "previous_table_of_interest";
+        final String currentTable = "current_table_of_interest";
+
+        when(dbTableMetadata.getTableColumnDataTypeMap()).thenReturn(Map.of(
+                databaseName + "." + previousTable, Map.of("col1", "int"),
+                databaseName + "." + currentTable, Map.of("col1", "int", "col2", "varchar")));
+        final BinlogEventListener objectUnderTest = createObjectUnderTestWithMockedExecutors();
+
+        final TableMetadata staleTableMetadata = TableMetadata.builder()
+                .withDatabaseName(databaseName)
+                .withTableName(previousTable)
+                .withColumnNames(List.of("col1"))
+                .withPrimaryKeys(List.of("col1"))
+                .build();
+        setTableMetadataMap(objectUnderTest, tableId, staleTableMetadata);
+
+        final com.github.shyiko.mysql.binlog.event.Event tableMapEvent =
+                createTableMapEvent(tableId, databaseName, currentTable);
+        final TableMapEventData tableMapEventData = tableMapEvent.getData();
+        final TableMapEventMetadata tableMapEventMetadata = mock(TableMapEventMetadata.class);
+        when(tableMapEventData.getEventMetadata()).thenReturn(tableMapEventMetadata);
+        when(tableMapEventMetadata.getColumnNames()).thenReturn(List.of("col1", "col2"));
+        when(tableMapEventMetadata.getSimplePrimaryKeys()).thenReturn(List.of(0));
+
+        objectUnderTest.handleTableMapEvent(tableMapEvent);
+
+        final TableMetadata updatedTableMetadata = getTableMetadataMap(objectUnderTest).get(tableId);
+        assertThat(updatedTableMetadata.getTableName(), is(currentTable));
+        assertThat(updatedTableMetadata.getColumnNames(), is(List.of("col1", "col2")));
+        assertThat(objectUnderTest.isValidTableId(tableId), is(true));
+    }
+
+    private com.github.shyiko.mysql.binlog.event.Event createTableMapEvent(
+            final long tableId, final String databaseName, final String tableName) {
+        final com.github.shyiko.mysql.binlog.event.Event tableMapEvent =
+                mock(com.github.shyiko.mysql.binlog.event.Event.class);
+        final TableMapEventData tableMapEventData = mock(TableMapEventData.class);
+        when(tableMapEvent.getData()).thenReturn(tableMapEventData);
+        lenient().when(tableMapEventData.getTableId()).thenReturn(tableId);
+        when(tableMapEventData.getDatabase()).thenReturn(databaseName);
+        when(tableMapEventData.getTable()).thenReturn(tableName);
+        return tableMapEvent;
+    }
+
+    private BinlogEventListener createObjectUnderTestWithMockedExecutors() {
+        try (final MockedStatic<Executors> executorsMockedStatic = mockStatic(Executors.class)) {
+            executorsMockedStatic.when(() -> Executors.newFixedThreadPool(anyInt(), any(ThreadFactory.class)))
+                    .thenReturn(eventListnerExecutorService);
+            executorsMockedStatic.when(Executors::newSingleThreadExecutor).thenReturn(checkpointManagerExecutorService);
+            executorsMockedStatic.when(Executors::defaultThreadFactory).thenReturn(threadFactory);
+            return createObjectUnderTest();
+        }
+    }
+
+    private void setTableMetadataMap(final BinlogEventListener binlogEventListener,
+                                     final long tableId,
+                                     final TableMetadata tableMetadata) throws Exception {
+        getTableMetadataMap(binlogEventListener).put(tableId, tableMetadata);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<Long, TableMetadata> getTableMetadataMap(final BinlogEventListener binlogEventListener)
+            throws Exception {
+        final Field tableMetadataMapField = BinlogEventListener.class.getDeclaredField("tableMetadataMap");
+        tableMetadataMapField.setAccessible(true);
+        return (Map<Long, TableMetadata>) tableMetadataMapField.get(binlogEventListener);
+    }
+}

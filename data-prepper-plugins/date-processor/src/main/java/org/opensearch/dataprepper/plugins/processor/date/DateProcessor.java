@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.date;
@@ -8,10 +12,12 @@ package org.opensearch.dataprepper.plugins.processor.date;
 import io.micrometer.core.instrument.Counter;
 import org.apache.commons.lang3.tuple.Pair;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -63,6 +69,12 @@ public class DateProcessor extends AbstractProcessor<Record<Event>, Record<Event
 
         if (dateProcessorConfig.getMatch() != null)
             extractKeyAndFormatters();
+
+        if (dateProcessorConfig.getDateWhen() != null && (!expressionEvaluator.isValidExpressionStatement(dateProcessorConfig.getDateWhen()))) {
+            throw new InvalidPluginConfigurationException(
+                    String.format("date_when \"%s\" is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax",
+                            dateProcessorConfig.getDateWhen()));
+        }
     }
 
     @Override
@@ -97,7 +109,7 @@ public class DateProcessor extends AbstractProcessor<Record<Event>, Record<Event
                     record.getData().put(dateProcessorConfig.getDestination(), zonedDateTime);
                 }
             } catch (final Exception e) {
-                LOG.error("An exception occurred while attempting to process Event: ", e);
+                LOG.error(NOISY,"An exception occurred while attempting to process Event: ", e);
             }
 
         }
@@ -126,9 +138,11 @@ public class DateProcessor extends AbstractProcessor<Record<Event>, Record<Event
                 .appendPattern(pattern)
                 .parseDefaulting(ChronoField.MONTH_OF_YEAR, localDateForDefaultValues.getMonthValue())
                 .parseDefaulting(ChronoField.DAY_OF_MONTH, localDateForDefaultValues.getDayOfMonth())
-                .parseDefaulting(ChronoField.HOUR_OF_DAY, 0)
                 .parseDefaulting(ChronoField.MINUTE_OF_HOUR, 0)
                 .parseDefaulting(ChronoField.SECOND_OF_MINUTE, 0);
+
+        if(!pattern.contains("a") && !pattern.contains("k"))
+            dateTimeFormatterBuilder.parseDefaulting(ChronoField.HOUR_OF_DAY, 0);
 
         if (!(pattern.contains("y") || pattern.contains("u")))
             dateTimeFormatterBuilder.parseDefaulting(ChronoField.YEAR_OF_ERA, localDateForDefaultValues.getYear());

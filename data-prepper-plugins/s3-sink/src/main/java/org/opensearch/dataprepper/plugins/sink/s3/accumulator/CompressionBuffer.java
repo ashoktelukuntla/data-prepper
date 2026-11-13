@@ -5,12 +5,15 @@
 
 package org.opensearch.dataprepper.plugins.sink.s3.accumulator;
 
-import org.opensearch.dataprepper.plugins.sink.s3.compression.CompressionEngine;
+import org.opensearch.dataprepper.model.codec.CompressionEngine;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 class CompressionBuffer implements Buffer {
     private final Buffer innerBuffer;
@@ -38,8 +41,8 @@ class CompressionBuffer implements Buffer {
     }
 
     @Override
-    public void flushToS3() {
-        innerBuffer.flushToS3();
+    public Optional<CompletableFuture<?>> flushToS3(final Consumer<Boolean> runOnCompletion, final Consumer<Throwable> runOnException) {
+       return innerBuffer.flushToS3(runOnCompletion, runOnException);
     }
 
     @Override

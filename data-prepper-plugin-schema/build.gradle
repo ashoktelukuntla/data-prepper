@@ -1,0 +1,35 @@
+plugins {
+    id 'data-prepper.publish'
+}
+
+group = 'org.opensearch.dataprepper.core'
+
+dependencies {
+    implementation project(':data-prepper-api')
+    implementation project(':data-prepper-plugin-framework')
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation libs.reflections.core
+    implementation 'com.github.victools:jsonschema-maven-plugin:4.35.0'
+    implementation 'com.github.victools:jsonschema-generator:4.35.0'
+    implementation 'com.github.victools:jsonschema-module-jackson:4.35.0'
+    implementation 'com.github.victools:jsonschema-module-jakarta-validation:4.35.0'
+    implementation 'javax.inject:javax.inject:1'
+    implementation(libs.spring.core) {
+        exclude group: 'commons-logging', module: 'commons-logging'
+    }
+    implementation(libs.spring.context) {
+        exclude group: 'commons-logging', module: 'commons-logging'
+    }
+    testImplementation project(':data-prepper-plugins')
+}
+
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule { //in addition to core projects rule
+            limit {
+                minimum = 0.90
+            }
+        }
+    }
+}

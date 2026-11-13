@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.drop;
@@ -8,8 +12,8 @@ package org.opensearch.dataprepper.plugins.processor.drop;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
-import org.opensearch.dataprepper.model.annotations.SingleThread;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -19,7 +23,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.stream.Collectors;
 
-@SingleThread
 @DataPrepperPlugin(name = "drop_events", pluginType = Processor.class, pluginConfigurationType = DropEventProcessorConfig.class)
 public class DropEventsProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
 
@@ -32,6 +35,12 @@ public class DropEventsProcessor extends AbstractProcessor<Record<Event>, Record
             final ExpressionEvaluator expressionEvaluator
     ) {
         super(pluginMetrics);
+
+        if (dropEventProcessorConfig.getDropWhen() != null &&
+                (!expressionEvaluator.isValidExpressionStatement(dropEventProcessorConfig.getDropWhen()))) {
+            throw new InvalidPluginConfigurationException(String.format("drop_when \"%s\" is not a valid expression statement. " +
+                    "See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax", dropEventProcessorConfig.getDropWhen()));
+        }
 
         whenCondition = new DropEventsWhenCondition.Builder()
                 .withDropEventsProcessorConfig(dropEventProcessorConfig)

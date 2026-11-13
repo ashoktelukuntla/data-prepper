@@ -19,6 +19,8 @@ public interface TopicConfig {
 
     MessageFormat getSerdeFormat();
 
+    String getEncryptionId();
+
     String getEncryptionKey();
 
     KmsConfig getKmsConfig();
@@ -26,4 +28,6 @@ public interface TopicConfig {
     Duration getRetryBackoff();
 
     Duration getReconnectBackoff();
+
+    Duration getMetadataMaxAge();
 }

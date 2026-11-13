@@ -5,25 +5,38 @@
 
 package org.opensearch.dataprepper.plugins.sink.s3;
 
+import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.plugins.sink.s3.accumulator.ObjectKey;
+
 
 public class KeyGenerator {
     private final S3SinkConfig s3SinkConfig;
+    private final S3BucketSelector s3BucketSelector;
     private final ExtensionProvider extensionProvider;
 
-    public KeyGenerator(S3SinkConfig s3SinkConfig, ExtensionProvider extensionProvider) {
+    private final ExpressionEvaluator expressionEvaluator;
+
+    public KeyGenerator(final S3SinkConfig s3SinkConfig,
+                        final S3BucketSelector s3BucketSelector,
+                        final ExtensionProvider extensionProvider,
+                        final ExpressionEvaluator expressionEvaluator) {
         this.s3SinkConfig = s3SinkConfig;
+        this.s3BucketSelector = s3BucketSelector;
         this.extensionProvider = extensionProvider;
+        this.expressionEvaluator = expressionEvaluator;
     }
 
     /**
      * Generate the s3 object path prefix and object file name.
      *
+     * @param event event
      * @return object key path.
      */
-    String generateKey() {
-        final String pathPrefix = ObjectKey.buildingPathPrefix(s3SinkConfig);
-        final String namePattern = ObjectKey.objectFileName(s3SinkConfig, extensionProvider.getExtension());
-        return (!pathPrefix.isEmpty()) ? pathPrefix + namePattern : namePattern;
+    public String generateKeyForEvent(final Event event) {
+        final String pathPrefix = s3BucketSelector != null ? s3BucketSelector.getPathPrefix() : ObjectKey.buildingPathPrefix(s3SinkConfig, event, expressionEvaluator);
+        final String safePathPrefix = pathPrefix != null ? pathPrefix : "";
+        final String namePattern = ObjectKey.objectFileName(s3SinkConfig, extensionProvider.getExtension(), event, expressionEvaluator);
+        return (!safePathPrefix.isEmpty()) ? safePathPrefix + namePattern : namePattern;
     }
 }

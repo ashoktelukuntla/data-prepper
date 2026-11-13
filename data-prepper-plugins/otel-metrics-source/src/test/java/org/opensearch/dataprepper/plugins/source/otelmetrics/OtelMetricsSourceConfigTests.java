@@ -6,6 +6,8 @@
 package org.opensearch.dataprepper.plugins.source.otelmetrics;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -13,6 +15,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -28,9 +31,10 @@ import static org.opensearch.dataprepper.plugins.source.otelmetrics.OTelMetricsS
 import static org.opensearch.dataprepper.plugins.source.otelmetrics.OTelMetricsSourceConfig.DEFAULT_PORT;
 import static org.opensearch.dataprepper.plugins.source.otelmetrics.OTelMetricsSourceConfig.DEFAULT_REQUEST_TIMEOUT_MS;
 import static org.opensearch.dataprepper.plugins.source.otelmetrics.OTelMetricsSourceConfig.DEFAULT_THREAD_COUNT;
+import org.opensearch.dataprepper.plugins.server.RetryInfoConfig;
 
 class OtelMetricsSourceConfigTests {
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
     private static final String PLUGIN_NAME = "otel_metrics_source";
     private static final String TEST_KEY_CERT = "test.crt";
     private static final String TEST_KEY = "test.key";
@@ -303,6 +307,57 @@ class OtelMetricsSourceConfigTests {
         assertThat(oTelMetricsSourceConfig.isPathValid(), equalTo(false));
     }
 
+    @Test
+    void testRetryInfoConfig() {
+        final PluginSetting customPathPluginSetting = completePluginSettingForOtelMetricsSource(
+                DEFAULT_REQUEST_TIMEOUT_MS,
+                DEFAULT_PORT,
+                null,
+                false,
+                false,
+                false,
+                true,
+                TEST_KEY_CERT,
+                "",
+                DEFAULT_THREAD_COUNT,
+                DEFAULT_MAX_CONNECTION_COUNT);
+
+        final OTelMetricsSourceConfig otelTraceSourceConfig = OBJECT_MAPPER.convertValue(customPathPluginSetting.getSettings(), OTelMetricsSourceConfig.class);
+
+        RetryInfoConfig retryInfo = otelTraceSourceConfig.getRetryInfo();
+        assertThat(retryInfo.getMaxDelay(), equalTo(Duration.ofMillis(100)));
+        assertThat(retryInfo.getMinDelay(), equalTo(Duration.ofMillis(50)));
+    }
+
+    @Test
+    void maxConnectionAge_defaultsToNull() {
+        final OTelMetricsSourceConfig config = new OTelMetricsSourceConfig();
+        assertNull(config.getMaxConnectionAge());
+        assertNull(config.getConnectionDrainDuration());
+    }
+
+    @Test
+    void maxConnectionAge_deserializesFromYaml() {
+        final Map<String, Object> settings = new HashMap<>();
+        settings.put("max_connection_age", "PT60M");
+        settings.put("connection_drain_duration", "PT20S");
+        final OTelMetricsSourceConfig config = OBJECT_MAPPER.convertValue(settings, OTelMetricsSourceConfig.class);
+        assertThat(config.getMaxConnectionAge(), equalTo(Duration.ofMinutes(60)));
+        assertThat(config.getConnectionDrainDuration(), equalTo(Duration.ofSeconds(20)));
+    }
+
+    @Test
+    void convertConfiguration_propagatesKeepaliveSettings() {
+        final Map<String, Object> settings = new HashMap<>();
+        settings.put("max_connection_age", "PT12M");
+        settings.put("connection_drain_duration", "PT7S");
+        final OTelMetricsSourceConfig config = OBJECT_MAPPER.convertValue(settings, OTelMetricsSourceConfig.class);
+        final org.opensearch.dataprepper.plugins.server.ServerConfiguration server =
+                ConvertConfiguration.convertConfiguration(config);
+        assertThat(server.getMaxConnectionAge(), equalTo(Duration.ofMinutes(12)));
+        assertThat(server.getConnectionDrainDuration(), equalTo(Duration.ofSeconds(7)));
+    }
+
     private PluginSetting completePluginSettingForOtelMetricsSource(final int requestTimeoutInMillis,
                                                                     final int port,
                                                                     final String path,
@@ -326,6 +381,7 @@ class OtelMetricsSourceConfigTests {
         settings.put(OTelMetricsSourceConfig.SSL_KEY_FILE, sslKeyFile);
         settings.put(OTelMetricsSourceConfig.THREAD_COUNT, threadCount);
         settings.put(OTelMetricsSourceConfig.MAX_CONNECTION_COUNT, maxConnectionCount);
+        settings.put(OTelMetricsSourceConfig.RETRY_INFO, new RetryInfoConfig(Duration.ofMillis(50), Duration.ofMillis(100)));
         return new PluginSetting(PLUGIN_NAME, settings);
     }
 }

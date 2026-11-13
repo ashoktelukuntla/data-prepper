@@ -111,11 +111,15 @@ public class DataFileScheduler implements Runnable {
             runLoader.whenComplete(completeDataLoader(dataFilePartition));
         } else {
             runLoader.whenComplete((v, ex) -> {
+                numOfWorkers.decrementAndGet();
                 if (ex != null) {
                     LOG.error("There was an exception while processing an S3 data file: {}", ex);
-                    coordinator.giveUpPartition(dataFilePartition);
+                    try {
+                        coordinator.giveUpPartition(dataFilePartition);
+                    } catch (final Exception e) {
+                        LOG.error("Failed to give up partition for data file {}", dataFilePartition.getKey(), e);
+                    }
                 }
-                numOfWorkers.decrementAndGet();
             });
         }
         numOfWorkers.incrementAndGet();
@@ -237,7 +241,7 @@ public class DataFileScheduler implements Runnable {
             try {
                 coordinator.saveProgressStateForPartition(globalState, null);
                 // if all load are completed.
-                if (streamArn != null && loadStatus.getLoadedFiles() == loadStatus.getTotalFiles()) {
+                if (streamArn != null && loadStatus.getLoadedFiles() >= loadStatus.getTotalFiles()) {
                     LOG.info("All Exports are done, streaming can continue...");
                     coordinator.createPartition(new GlobalState(streamArn, Optional.empty()));
                 }

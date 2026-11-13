@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 package org.opensearch.dataprepper.plugins.codec.avro;
 
@@ -16,8 +20,9 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.opensearch.dataprepper.event.TestEventFactory;
 import org.opensearch.dataprepper.model.event.Event;
-import org.opensearch.dataprepper.model.log.JacksonLog;
+import org.opensearch.dataprepper.model.event.LogEventBuilder;
 import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.sink.OutputCodecContext;
 
@@ -389,7 +394,7 @@ public class AvroOutputCodecTest {
     }
 
     private static Event createEventRecord(final Map<String, Object> eventData) {
-        return JacksonLog.builder().withData(eventData).build();
+        return TestEventFactory.getTestEventFactory().eventBuilder(LogEventBuilder.class).withData(eventData).build();
     }
 
     private static List<Map<String, Object>> generateRecords(final int numberOfRecords) {

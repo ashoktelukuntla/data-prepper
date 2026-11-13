@@ -27,7 +27,7 @@ pipeline:
 
 The OpenSearch sink will reserve `otel-v1-apm-span-*` as index pattern and `otel-v1-apm-span` as index alias for record ingestion.
 
-### </a>Service map trace analytics
+### Service map trace analytics
 
 ```
 pipeline:
@@ -44,6 +44,45 @@ pipeline:
 ```
 
 The OpenSearch sink will reserve `otel-v1-apm-service-map` as index for record ingestion.
+
+### Log analytics
+
+```
+pipeline:
+  ...
+  sink:
+    opensearch:
+      hosts: ["https://localhost:9200"]
+      cert: path/to/cert
+      username: YOUR_USERNAME_HERE
+      password: YOUR_PASSWORD_HERE
+      index_type: log-analytics
+      dlq_file: /your/local/dlq-file
+      max_retries: 20
+      bulk_size: 4
+```
+
+The OpenSearch sink will reserve `logs-otel-v1-*` as index pattern and `logs-otel-v1` as index alias for record ingestion.
+
+### Metric analytics
+
+```
+pipeline:
+  ...
+  sink:
+    opensearch:
+      hosts: ["https://localhost:9200"]
+      cert: path/to/cert
+      username: YOUR_USERNAME_HERE
+      password: YOUR_PASSWORD_HERE
+      index_type: metric-analytics
+      dlq_file: /your/local/dlq-file
+      max_retries: 20
+      bulk_size: 4
+```
+
+The OpenSearch sink will reserve `metrics-otel-v1-*` as index pattern and `metrics-otel-v1` as index alias for record ingestion.
+
 
 ### Amazon OpenSearch Service
 
@@ -66,7 +105,7 @@ pipeline:
 
 - `hosts`: A list of IP addresses of OpenSearch nodes.
 
-- `cert`(optional): CA certificate that is pem encoded. Accepts both .pem or .crt. This enables the client to trust the CA that has signed the certificate that the OpenSearch cluster is using.
+- `cert`(optional): CA certificate that is pem encoded. Accepts both `.pem` or `.crt`. This enables the client to trust the CA that has signed the certificate that the OpenSearch cluster is using. This setting has no effect if `insecure` is set to `true`.
 Default is null.
 
 - `aws_sigv4`: A boolean flag to sign the HTTP request with AWS credentials. Only applies to Amazon OpenSearch Service. See [security](security.md) for details. Default to `false`.
@@ -79,7 +118,7 @@ Default is null.
 
 - `aws_sts_header_overrides`: An optional map of header overrides to make when assuming the IAM role for the sink plugin.
 
-- `insecure`: A boolean flag to turn off SSL certificate verification. If set to true, CA certificate verification will be turned off and insecure HTTP requests will be sent. Default to `false`.
+- `insecure`: A boolean flag to turn off SSL certificate verification. If set to true, CA certificate verification will be turned off and insecure HTTP requests will be sent. Setting this will override any `cert` configured. Default to `false`.
 
 - `aws` (Optional) : AWS configurations. See [AWS Configuration](#aws_configuration) for details. SigV4 is enabled by default when this option is used. If this option is present, `aws_` options are not expected to be present. If any of `aws_` options are present along with this, error is thrown.
 
@@ -93,7 +132,8 @@ Default is null.
 
 - `proxy`(optional): A String of the address of a forward HTTP proxy. The format is like "<host-name-or-ip>:\<port\>". Examples: "example.com:8100", "http://example.com:8100", "112.112.112.112:8100". Note: port number cannot be omitted.
 
-- `index_type` (optional): a String from the list [`custom`, `trace-analytics-raw`, `trace-analytics-service-map`, `management_disabled`], which represents an index type. Defaults to `custom` if `serverless` is `false` in [AWS Configuration](#aws_configuration), otherwise defaults to `management_disabled`. This index_type instructs Sink plugin what type of data it is handling.
+- `index_type` (optional): a String from the list [`custom`, `trace-analytics-raw`, `trace-analytics-plain-raw-v2`, `trace-analytics-service-map`, `metric-analytics`, `log-analytics`, `management_disabled`], which represents an index type. Defaults to `custom` if `serverless` is `false` in [AWS Configuration](#aws_configuration), otherwise defaults to `management_disabled`. This index_type instructs Sink plugin what type of data it is handling.
+  * `trace-analytics-plain-raw-v2` writes the same span documents as `trace-analytics-plain-raw`, to the `otel-v2-apm-span` alias with its own ISM policy `otel-v2-apm-span-policy`. Its index template is composed of two component templates that the sink creates or updates before the index template, each only when its `version` is higher than the one on the cluster: `otel-v2-apm-span-plain`, which holds the `trace-analytics-plain-raw` span mappings, and `otel-v2-apm-span-nested-keyword`, which maps string fields under the nested `events.attributes` and `links.attributes` to `keyword`. The index template itself sets `index.append_only.enabled` to `false` so that spans can be written with the document ID `${traceId}/${spanId}` on clusters where new indices are append-only by default. This type always uses `template_type` `index-template`, cannot be used with `distribution_version` `es6`, and requires OpenSearch 3.0 or later. Processors that read spans, such as `otel_trace_group`, default to `otel-v1-apm-span`, so set their `indices` to `otel-v2-apm-span`.
 
 - `enable_request_compression` (optional): A boolean that enables or disables request compression when sending requests to OpenSearch. For `distribution_version` set to `es6`, default value is `false`, otherwise default value is `true`.
 
@@ -134,11 +174,22 @@ Default is null.
   * This index name can also be a formatted string (with or without date-time pattern suffix), such as `my-${index}-name`. When OpenSearchSink is sending data to OpenSearch, the format portion "${index}" will be replaced by it's value in the event that is being processed. The format may also be like "${index1/index2/index3}" in which case the field "index1/index2/index3" is searched in the event and replaced by its value.
     - Additionally, the formatted string can include expressions to evaluate to format the index name. For example, `my-${index}-${getMetadata(\"some_metadata_key\")}-name` will inject both the `index` value from the Event, as well as the value of `some_metadata_key` from the Event metadata to construct the index name.
 - `normalize_index` (optional): If true, the plugin will try to make dynamic index names (index names with format options specified in `${}`) valid according to [index naming restrictions](https://opensearch.org/docs/2.11/api-reference/index-apis/create-index/#index-naming-restrictions). Any invalid characters will be removed. Default value is false. 
-- <a name="template_type"></a>`template_type`(optional): Defines what type of OpenSearch template to use. The available options are `v1` and `index-template`. The default value is `v1`, which uses the original OpenSearch templates available at the `_template` API endpoints. Select `index-template` to use composable index templates which are available at OpenSearch's `_index_template` endpoint. Note: when `distribution_version` is `es6`, `template_type` is enforced into `v1`.
+- <a name="template_type"></a>`template_type`(optional): Defines what type of OpenSearch template to use. The available options are `v1` and `index-template`. The default value is `v1`, which uses the original OpenSearch templates available at the `_template` API endpoints. Select `index-template` to use composable index templates which are available at OpenSearch's `_index_template` endpoint. Note: when `distribution_version` is `es6`, `template_type` is enforced into `v1`. When `index_type` is `trace-analytics-plain-raw-v2`, `template_type` is enforced into `index-template`.
 
 - <a name="template_file"></a>`template_file`(optional): A json file path or AWS S3 URI to be read as index template for custom data ingestion. The json file content should be the json value of
 `"template"` key in the json content of OpenSearch [Index templates API](https://opensearch.org/docs/latest/opensearch/index-templates/),
 e.g. [otel-v1-apm-span-index-template.json](https://github.com/opensearch-project/data-prepper/blob/main/data-prepper-plugins/opensearch/src/main/resources/otel-v1-apm-span-index-template.json)
+
+- <a name="component_templates"></a>`component_templates`(optional): A list of [component template](https://opensearch.org/docs/latest/im-plugin/index-templates/#composable-index-templates) names to add to the `composed_of` list of the index template this sink creates. This works with the built-in templates of `index_type`s such as `trace-analytics-plain-raw`, and with a custom `template_file` or `template_content`. Use it to add index settings or mappings on top of a template without copying it, for example:
+
+  ```
+  sink:
+    - opensearch:
+        index_type: trace-analytics-plain-raw
+        template_type: index-template
+        component_templates: ["my-index-settings"]
+  ```
+  Requires `template_type` to be `index-template`, and cannot be used with `index_type` `management_disabled`. The component templates must already exist on the cluster. They are applied in the listed order, after any in the template's own `composed_of`. Settings and mappings in the index template itself take precedence over the component templates. Like other template changes, adding this to an existing pipeline only takes effect once the index template is updated, which happens when its `version` increases.
 
 - `number_of_shards` (optional): The number of primary shards that an index should have on the destination OpenSearch server. This parameter is effective only when `template_file` is either explicitly provided in Sink configuration or built-in. If this parameter is set, it would override the value in index template file. OpenSearch documentation has [more about this parameter](https://opensearch.org/docs/latest/opensearch/rest-api/index-apis/create-index/).
 
@@ -237,6 +288,8 @@ the flush timeout and instead flush whatever is present at the end of each batch
       routing: '${/info/id}-test-${getMetadata("metadata_key")}'
       bulk_size: 4
 ```
+
+- `pipeline` (optional): A string which is used to represent the pipeline Id for preprocessing documents. Each incoming record is searched for this field and if it is present, it is used as the pipeline field for the document. Standard Data Prepper Json pointer syntax is used for retrieving the value. If the field has "/" in it then the incoming record is searched in the json sub-objects instead of just in the root of the json object. For example, if the field is specified as `info/id`, then the root of the event is searched for `info` and if it is found, then `id` is searched inside it. The value specified for `id` is used as the pipeline id. This field can also be a Data Prepper expression that is evaluated to determine the `pipeline_id`. For example, setting to `getMetadata(\"some_metadata_key\")` will use the value of the metadata key as the pipeline_id.
 
 - `ism_policy_file` (optional): A String of absolute file path or AWS S3 URI for an ISM (Index State Management) policy JSON file. This policy file is effective only when there is no built-in policy file for the index type. For example, `custom` index type is currently the only one without a built-in policy file, thus it would use the policy file here if it's provided through this parameter. OpenSearch documentation has more about [ISM policies.](https://opensearch.org/docs/latest/im-plugin/ism/policies/)
 
@@ -499,6 +552,69 @@ opensearch-source-pipeline:
         index: "${getMetadata(\"opensearch-index\"}"
 ```
 
+### MSK source to Opensearch Service pipeline
+The following example will read from MSK topic and ingest into OpenSearch Service domain. This example reads the date
+field from an incoming record and create date based indices based on the specified timestamp.
+
+```yaml
+msk-pipeline:
+  source:
+    kafka:
+      acknowledgement: true
+      topics:
+        - name: "TestTopic.Name"
+          group_id: "group-your-preferred-name"
+      aws:
+        sts_role_arn: "arn:aws:iam::123456789012:role/my-domain-role"
+        region: "us-east-1"
+        msk:
+          arn: "arn:aws:kafka:us-east-1:123456789012:cluster/my-cluster-name"
+      schema:
+          type: "aws_glue"
+          registry_url: "arn:aws:kafka:us-east-1:123456789012:registry/my-schema-registry"
+
+  processor:
+    - date:
+        match:
+          - key: "created_at"
+            patterns: ["epoch_milli"]
+        destination: "created_at_formatted"
+        output_format: "yyyy-MM-dd"
+
+  sink:
+    - opensearch:
+        hosts: [ "https://search-my-domain-soopywaovobopgs8ywurr3utsu.us-east-1.es.amazonaws.com" ]
+        aws:
+          region: "us-east-1"
+          sts_role_arn: "arn:aws:iam::123456789012:role/my-domain-role"
+        index: "index-prefix-${/created_at_formatted}"
+        document_id_field: "id"
+```
+The above example will parse the `created_at` timestamp field from the incoming record, parse it in the format
+`yyyy-MM-dd` and store it in the field `created_at_formatted`. You can then use this field to create date based
+indices by using the field in `index: "index-prefix-${/created_at_formatted}"`. If you have monthly based indices use
+` output_format: "yyyy-MM-dd"`
+
+For example, lets say you have following 2 records coming from source:
+```
+{
+  "message": "hello",
+  "created_at": 1723542856,
+  "type": "greeting"
+}
+```
+```
+{
+  "message": "how are you",
+  "created_at": 1723629256,
+  "type": "greeting"
+}
+```
+The first record will be ingested into the index with name `index-prefix-2024-08-13` and the second record would be 
+indexed into `index-prefix-2024-08-13`. This could be useful when replaying older data from kafka.
+
+
+
 ## Configuration
 
 - `hosts` (Required) : A list of IP addresses of OpenSearch or Elasticsearch nodes.
@@ -570,10 +686,10 @@ and then every hour after the first time the index is processed.
 
 ### <a name="connection_configuration">Connection Configuration</a>
 
-* `insecure` (Optional): A boolean flag to turn off SSL certificate verification. If set to true, CA certificate verification will be turned off and insecure HTTP requests will be sent. Default to false.
+* `insecure` (Optional): A boolean flag to turn off SSL certificate verification. If set to true, CA certificate verification will be turned off and insecure HTTP requests will be sent. Setting this will override any `cert` configured. Default to false.
 
 
-* `cert` (Optional) : CA certificate that is pem encoded. Accepts both .pem or .crt. This enables the client to trust the CA that has signed the certificate that the OpenSearch cluster is using. Default is null.
+* `cert` (Optional) : CA certificate that is pem encoded. Accepts both `.pem` or `.crt`. This enables the client to trust the CA that has signed the certificate that the OpenSearch cluster is using. This setting has no effect if `insecure` is set to `true`. Default is null.
 
 
 * `socket_timeout` (Optional) : A String that indicates the timeout duration for waiting for data. Supports ISO_8601 notation Strings ("PT20.345S", "PT15M", etc.) as well as simple notation Strings for seconds ("60s") and milliseconds ("1500ms"). If this timeout value not set, the underlying Apache HttpClient would rely on operating system settings for managing socket timeouts.
@@ -596,3 +712,20 @@ The default behavior is to process all indices.
 #### <a name="index_configuration">Index Configuration</a>
 
 * `index_name_regex`: A regex pattern to represent the index names for filtering
+
+## Developer guide
+
+### Integration tests
+
+#### Run OpenSearch
+
+Start an instance of OpenSearch that listens to opens port 9200 with default user admin:admin.
+```
+docker run -p 9200:9200 -e "discovery.type=single-node" -e "OPENSEARCH_INITIAL_ADMIN_PASSWORD=yourStrongPassword123!" opensearchproject/opensearch:latest
+```
+
+#### Run tests
+
+```
+./gradlew data-prepper-plugins:opensearch:integrationTest -Dtests.opensearch.host=localhost:9200 -Dtests.opensearch.user=admin -Dtests.opensearch.password=yourStrongPassword123!
+```

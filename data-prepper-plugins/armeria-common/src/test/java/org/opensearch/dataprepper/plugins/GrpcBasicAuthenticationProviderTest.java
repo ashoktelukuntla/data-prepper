@@ -1,12 +1,17 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins;
 
 import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
+import com.linecorp.armeria.common.HttpData;
 import com.linecorp.armeria.common.HttpMethod;
 import com.linecorp.armeria.common.HttpRequest;
 import com.linecorp.armeria.common.HttpStatus;
@@ -29,6 +34,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.opensearch.dataprepper.armeria.authentication.GrpcAuthenticationProvider;
 import org.opensearch.dataprepper.armeria.authentication.HttpBasicAuthenticationConfig;
 
+import java.nio.charset.Charset;
 import java.util.Collections;
 import java.util.UUID;
 
@@ -152,12 +158,12 @@ public class GrpcBasicAuthenticationProviderTest {
                     .method(HttpMethod.POST)
                     .path("/grpc.health.v1.Health/Check")
                     .contentType(MediaType.JSON_UTF_8)
-                    .build());
+                    .build(),
+                    HttpData.of(Charset.defaultCharset(), "{\"healthCheckConfig\":{\"serviceName\": \"test\"} }"));
 
             final AggregatedHttpResponse httpResponse = client.execute(request).aggregate().join();
 
-            // TODO: Figure out how to get SampleHealthGrpcService to return a status of 200
-            assertThat(httpResponse.status(), equalTo(HttpStatus.SERVICE_UNAVAILABLE));
+            assertThat(httpResponse.status(), equalTo(HttpStatus.OK));
         }
     }
 }

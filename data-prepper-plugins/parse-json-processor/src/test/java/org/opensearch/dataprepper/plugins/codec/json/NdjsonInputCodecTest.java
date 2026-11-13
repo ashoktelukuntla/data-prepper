@@ -1,0 +1,472 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+package org.opensearch.dataprepper.plugins.codec.json;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.exc.StreamConstraintsException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.ExtensionContext;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.ArgumentsProvider;
+import org.junit.jupiter.params.provider.ArgumentsSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.event.TestEventFactory;
+import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventFactory;
+import org.opensearch.dataprepper.model.record.Record;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+
+import static org.hamcrest.CoreMatchers.equalTo;
+import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.CoreMatchers.notNullValue;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class NdjsonInputCodecTest {
+    @Mock
+    private NdjsonInputConfig config;
+
+    private EventFactory eventFactory;
+
+    @Mock
+    private Consumer<Record<Event>> eventConsumer;
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    @BeforeEach
+    void setUp() {
+        eventFactory = TestEventFactory.getTestEventFactory();
+    }
+
+    private NdjsonInputCodec createObjectUnderTest() {
+        return new NdjsonInputCodec(config, eventFactory);
+    }
+
+    @Test
+    void parse_with_null_InputStream_throws() {
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        assertThrows(NullPointerException.class, () ->
+                objectUnderTest.parse(null, eventConsumer));
+
+        verifyNoInteractions(eventConsumer);
+    }
+
+    @Test
+    void parse_with_InputStream_null_Consumer_throws() {
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final InputStream inputStream = mock(InputStream.class);
+        assertThrows(NullPointerException.class, () ->
+                objectUnderTest.parse(inputStream, null));
+
+        verifyNoInteractions(inputStream);
+    }
+
+    @Test
+    void parse_with_empty_InputStream_does_not_call_Consumer() throws IOException {
+        final ByteArrayInputStream emptyInputStream = new ByteArrayInputStream(new byte[]{});
+
+        createObjectUnderTest().parse(emptyInputStream, eventConsumer);
+
+        verifyNoInteractions(eventConsumer);
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(ValidInputStreamFormatsArgumentsProvider.class)
+    void parse_includes_objects_from_single_line_of_JSON_objects(final InputStreamFormat inputStreamFormat, final int numberOfObjects) throws IOException {
+        final List<Map<String, Object>> objects = IntStream.range(0, numberOfObjects)
+                .mapToObj(i -> generateJson())
+                .collect(Collectors.toList());
+
+        final InputStream inputStream = inputStreamFormat.createInputStream(objects);
+
+        createObjectUnderTest().parse(inputStream, eventConsumer);
+
+        final ArgumentCaptor<Record<Event>> eventConsumerCaptor = ArgumentCaptor.forClass(Record.class);
+
+        verify(eventConsumer, times(numberOfObjects)).accept(eventConsumerCaptor.capture());
+
+        final List<Record<Event>> capturedRecords = eventConsumerCaptor.getAllValues();
+
+        for (int i = 0; i < numberOfObjects; i++) {
+            final Map<String, Object> expectedObject = objects.get(i);
+            final Record<Event> actualRecord = capturedRecords.get(i);
+            assertThat(actualRecord, notNullValue());
+            final Event actualEvent = actualRecord.getData();
+            assertThat(actualEvent, notNullValue());
+
+            final Map<String, Object> actualEventMap = actualEvent.toMap();
+            assertThat(actualEventMap, equalTo(expectedObject));
+        }
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(ValidInputStreamFormatsArgumentsProvider.class)
+    void parse_excludes_empty_objects(final InputStreamFormat inputStreamFormat, final int numberOfObjects) throws IOException {
+        final List<Map<String, Object>> objects = new ArrayList<>();
+        final List<Map<String, Object>> expectedObjects = new ArrayList<>();
+        for (int i = 0; i < numberOfObjects; i++) {
+            final Map<String, Object> emptyJson = Collections.emptyMap();
+            final Map<String, Object> json = generateJson();
+            objects.add(emptyJson);
+            objects.add(json);
+            expectedObjects.add(json);
+        }
+
+        final InputStream inputStream = inputStreamFormat.createInputStream(objects);
+
+        createObjectUnderTest().parse(inputStream, eventConsumer);
+
+        final ArgumentCaptor<Record<Event>> eventConsumerCaptor = ArgumentCaptor.forClass(Record.class);
+
+        verify(eventConsumer, times(numberOfObjects)).accept(eventConsumerCaptor.capture());
+
+        final List<Record<Event>> capturedRecords = eventConsumerCaptor.getAllValues();
+
+        for (int i = 0; i < numberOfObjects; i++) {
+            final Map<String, Object> expectedObject = expectedObjects.get(i);
+            final Record<Event> actualRecord = capturedRecords.get(i);
+            assertThat(actualRecord, notNullValue());
+            final Event actualEvent = actualRecord.getData();
+            assertThat(actualEvent, notNullValue());
+
+            final Map<String, Object> actualEventMap = actualEvent.toMap();
+            assertThat(actualEventMap, equalTo(expectedObject));
+        }
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(ValidInputStreamFormatsArgumentsProvider.class)
+    void parse_includes_empty_objects_when_configured(final InputStreamFormat inputStreamFormat, final int numberOfObjects) throws IOException {
+        final List<Map<String, Object>> objects = new ArrayList<>();
+        for (int i = 0; i < numberOfObjects; i++) {
+            final Map<String, Object> emptyJson = Collections.emptyMap();
+            final Map<String, Object> json = generateJson();
+            objects.add(emptyJson);
+            objects.add(json);
+        }
+
+        final InputStream inputStream = inputStreamFormat.createInputStream(objects);
+
+        when(config.isIncludeEmptyObjects()).thenReturn(true);
+        createObjectUnderTest().parse(inputStream, eventConsumer);
+
+        final ArgumentCaptor<Record<Event>> eventConsumerCaptor = ArgumentCaptor.forClass(Record.class);
+
+        verify(eventConsumer, times(objects.size())).accept(eventConsumerCaptor.capture());
+
+        final List<Record<Event>> capturedRecords = eventConsumerCaptor.getAllValues();
+
+        for (int i = 0; i < numberOfObjects; i++) {
+            final Map<String, Object> expectedObject = objects.get(2*i+1);
+            final Record<Event> expectedEmptyRecord = capturedRecords.get(2*i);
+            assertThat(expectedEmptyRecord, notNullValue());
+            assertThat(expectedEmptyRecord.getData(), notNullValue());
+            assertThat(expectedEmptyRecord.getData().toMap().size(), equalTo(0));
+
+            final Record<Event> actualRecord = capturedRecords.get(2*i+1);
+            assertThat(actualRecord, notNullValue());
+            final Event actualEvent = actualRecord.getData();
+            assertThat(actualEvent, notNullValue());
+
+            final Map<String, Object> actualEventMap = actualEvent.toMap();
+            assertThat(actualEventMap, equalTo(expectedObject));
+        }
+    }
+
+    @Test
+    void parse_with_array_of_objects_asserts_number_of_objects() throws IOException {
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final String jsonArray = "[{\"key1\":\"value1\"},{\"key2\":\"value2\"}]";
+        final InputStream inputStream = new ByteArrayInputStream(jsonArray.getBytes());
+
+        final List<Record<Event>> processedRecords = new ArrayList<>();
+        Consumer<Record<Event>> eventConsumer = processedRecords::add;
+        objectUnderTest.parse(inputStream, eventConsumer);
+        assertEquals(2, processedRecords.size());
+    }
+
+    @Test
+    void parse_with_multiple_array_of_objects_asserts_number_of_objects() throws IOException {
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final String jsonArray = "[{\"key1\":\"value1\"},{\"key2\":\"value2\"}]\n" +
+                "[{\"key3\":\"value3\"},{\"key4\":\"value4\"}]";
+        final InputStream inputStream = new ByteArrayInputStream(jsonArray.getBytes());
+
+        final List<Record<Event>> processedRecords = new ArrayList<>();
+        Consumer<Record<Event>> eventConsumer = processedRecords::add;
+        objectUnderTest.parse(inputStream, eventConsumer);
+        assertEquals(4, processedRecords.size());
+    }
+
+    @Test
+    void parse_with_multiple_array_with_empty_array() throws IOException {
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final String jsonArray = "[{\"key1\":\"value1\"},{\"key2\":\"value2\"}]\n" +
+                "[]\n" +
+                "[{\"key3\":\"value3\"},{\"key4\":\"value4\"}]";
+        final InputStream inputStream = new ByteArrayInputStream(jsonArray.getBytes());
+
+        final List<Record<Event>> processedRecords = new ArrayList<>();
+        Consumer<Record<Event>> eventConsumer = processedRecords::add;
+        objectUnderTest.parse(inputStream, eventConsumer);
+        assertEquals(4, processedRecords.size());
+    }
+
+    @Test
+    void parse_with_multiple_array_with_exclude_empty_object() throws IOException {
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final String jsonArray = "[{\"key1\":\"value1\"},{\"key2\":\"value2\"}]\n" +
+                "[{}, {\"key1\":\"value3\"}]\n" +
+                "[{\"key3\":\"value3\"},{\"key4\":\"value4\"}]";
+        final InputStream inputStream = new ByteArrayInputStream(jsonArray.getBytes());
+
+        final List<Record<Event>> processedRecords = new ArrayList<>();
+        Consumer<Record<Event>> eventConsumer = processedRecords::add;
+        objectUnderTest.parse(inputStream, eventConsumer);
+        assertEquals(5, processedRecords.size());
+    }
+
+    @Test
+    void parse_with_multiple_array_with_include_empty_object() throws IOException {
+        when(config.isIncludeEmptyObjects()).thenReturn(true);
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final String jsonArray = "[{\"key1\":\"value1\"},{\"key2\":\"value2\"}]\n" +
+                "[{}, {\"key1\":\"value3\"}]\n" +
+                "[{\"key3\":\"value3\"},{\"key4\":\"value4\"}]";
+        final InputStream inputStream = new ByteArrayInputStream(jsonArray.getBytes());
+
+        final List<Record<Event>> processedRecords = new ArrayList<>();
+        Consumer<Record<Event>> eventConsumer = processedRecords::add;
+        objectUnderTest.parse(inputStream, eventConsumer);
+        assertEquals(6, processedRecords.size());
+    }
+
+    @Test
+    void parse_with_array_of_empty_objects_excludes_objects_by_default() throws IOException {
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final String jsonArray = "[{},{}]";
+        final InputStream inputStream = new ByteArrayInputStream(jsonArray.getBytes());
+
+        final List<Record<Event>> processedRecords = new ArrayList<>();
+        Consumer<Record<Event>> eventConsumer = processedRecords::add;
+        objectUnderTest.parse(inputStream, eventConsumer);
+        assertEquals(0, processedRecords.size());
+    }
+
+    @Test
+    void parse_with_array_of_empty_objects_includes_objects_when_configured() throws IOException {
+        when(config.isIncludeEmptyObjects()).thenReturn(true);
+        final NdjsonInputCodec objectUnderTest = createObjectUnderTest();
+
+        final String jsonArray = "[{},{}]";
+        final InputStream inputStream = new ByteArrayInputStream(jsonArray.getBytes());
+
+        final List<Record<Event>> processedRecords = new ArrayList<>();
+        Consumer<Record<Event>> eventConsumer = processedRecords::add;
+        objectUnderTest.parse(inputStream, eventConsumer);
+        assertEquals(2, processedRecords.size());
+
+        for (Record<Event> record : processedRecords) {
+            assertThat(record.getData(), notNullValue());
+            assertThat(record.getData().toMap().size(), equalTo(0));
+        }
+    }
+
+    static class ValidInputStreamFormatsArgumentsProvider implements ArgumentsProvider {
+        @Override
+        public Stream<? extends Arguments> provideArguments(final ExtensionContext extensionContext) throws Exception {
+            return Stream.of(
+                    arguments(new StrictNdJsonInputStreamFormat(), 1),
+                    arguments(new StrictNdJsonInputStreamFormat(), 2),
+                    arguments(new StrictNdJsonInputStreamFormat(), 10),
+                    arguments(new AllObjectsOnSameLineInputStreamFormat(), 1),
+                    arguments(new AllObjectsOnSameLineInputStreamFormat(), 2),
+                    arguments(new AllObjectsOnSameLineInputStreamFormat(), 10),
+                    arguments(new AllObjectsOnSameLineWithSpacesInputStreamFormat(), 10),
+                    arguments(new MixedInputStreamFormat(), 3),
+                    arguments(new MixedInputStreamFormat(), 10)
+            );
+        }
+    }
+
+    interface InputStreamFormat {
+        InputStream createInputStream(final List<Map<String, Object>> jsonObjects) throws JsonProcessingException;
+    }
+
+    static class StrictNdJsonInputStreamFormat implements InputStreamFormat {
+        @Override
+        public InputStream createInputStream(final List<Map<String, Object>> jsonObjects) throws JsonProcessingException {
+            final StringWriter writer = new StringWriter();
+
+            for (final Map<String, Object> jsonObject : jsonObjects) {
+                writer.append(OBJECT_MAPPER.writeValueAsString(jsonObject));
+                writer.append(System.lineSeparator());
+            }
+
+            return new ByteArrayInputStream(writer.toString().getBytes());
+        }
+
+        @Override
+        public String toString() {
+            return "Strict ND-JSON";
+        }
+    }
+
+    static class AllObjectsOnSameLineInputStreamFormat implements InputStreamFormat {
+        @Override
+        public InputStream createInputStream(final List<Map<String, Object>> jsonObjects) throws JsonProcessingException {
+            final StringWriter writer = new StringWriter();
+
+            for (final Map<String, Object> jsonObject : jsonObjects) {
+                writer.append(OBJECT_MAPPER.writeValueAsString(jsonObject));
+            }
+
+            return new ByteArrayInputStream(writer.toString().getBytes());
+        }
+
+        @Override
+        public String toString() {
+            return "Single line";
+        }
+    }
+
+    static class AllObjectsOnSameLineWithSpacesInputStreamFormat implements InputStreamFormat {
+        @Override
+        public InputStream createInputStream(final List<Map<String, Object>> jsonObjects) throws JsonProcessingException {
+            final StringWriter writer = new StringWriter();
+
+            for (final Map<String, Object> jsonObject : jsonObjects) {
+                writer.append(OBJECT_MAPPER.writeValueAsString(jsonObject));
+                writer.append(" ");
+            }
+
+            return new ByteArrayInputStream(writer.toString().getBytes());
+        }
+
+        @Override
+        public String toString() {
+            return "Spaces";
+        }
+    }
+
+    static class MixedInputStreamFormat implements InputStreamFormat {
+        @Override
+        public InputStream createInputStream(final List<Map<String, Object>> jsonObjects) throws JsonProcessingException {
+            final StringWriter writer = new StringWriter();
+
+            int counter = 0;
+            for (final Map<String, Object> jsonObject : jsonObjects) {
+                writer.append(OBJECT_MAPPER.writeValueAsString(jsonObject));
+                if(counter % 2 == 0)
+                    writer.append(System.lineSeparator());
+                counter++;
+            }
+
+            return new ByteArrayInputStream(writer.toString().getBytes());
+        }
+
+        @Override
+        public String toString() {
+            return "Mixed";
+        }
+    }
+
+    private static Map<String, Object> generateJson() {
+        final Map<String, Object> jsonObject = new LinkedHashMap<>();
+        for (int i = 0; i < 1; i++) {
+            jsonObject.put(UUID.randomUUID().toString(), UUID.randomUUID().toString());
+        }
+        jsonObject.put(UUID.randomUUID().toString(), Arrays.asList(UUID.randomUUID().toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString()));
+
+        return jsonObject;
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {32, 64})
+    void parse_with_string_value_within_the_raised_limit_returns_event(final int valueSizeInMB) throws IOException {
+        // Jackson's default maximum string length is 20 MB; the codec raises it to 64 MB.
+        // String values up to that limit must parse successfully.
+        final String key = UUID.randomUUID().toString();
+        final String largeValue = buildStringOfSize(valueSizeInMB * 1024 * 1024);
+        final String ndjsonLine = OBJECT_MAPPER.writeValueAsString(Map.of(key, largeValue)) + "\n";
+        final InputStream inputStream = new ByteArrayInputStream(ndjsonLine.getBytes());
+
+        createObjectUnderTest().parse(inputStream, eventConsumer);
+
+        final ArgumentCaptor<Record<Event>> recordArgumentCaptor = ArgumentCaptor.forClass(Record.class);
+        verify(eventConsumer).accept(recordArgumentCaptor.capture());
+        assertThat(recordArgumentCaptor.getValue().getData().get(key, String.class), equalTo(largeValue));
+    }
+
+    @Test
+    void parse_with_string_value_exceeding_the_raised_limit_throws() throws IOException {
+        // A string value larger than the 64 MB limit must still be rejected. The codec's
+        // MappingIterator wraps the underlying StreamConstraintsException in a RuntimeException.
+        final String key = UUID.randomUUID().toString();
+        final String tooLargeValue = buildStringOfSize(65 * 1024 * 1024);
+        final String ndjsonLine = OBJECT_MAPPER.writeValueAsString(Map.of(key, tooLargeValue)) + "\n";
+        final InputStream inputStream = new ByteArrayInputStream(ndjsonLine.getBytes());
+
+        final Exception exception = assertThrows(Exception.class,
+                () -> createObjectUnderTest().parse(inputStream, eventConsumer));
+        Throwable rootCause = exception;
+        while (rootCause.getCause() != null) {
+            rootCause = rootCause.getCause();
+        }
+        assertThat(rootCause, instanceOf(StreamConstraintsException.class));
+        verifyNoInteractions(eventConsumer);
+    }
+
+    private static String buildStringOfSize(final int length) {
+        final StringBuilder builder = new StringBuilder(length);
+        while (builder.length() < length) {
+            builder.append('a');
+        }
+        return builder.toString();
+    }
+}

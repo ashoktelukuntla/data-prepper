@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.event;
@@ -9,6 +13,7 @@ import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.Serializable;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -29,11 +34,51 @@ public interface Event extends Serializable {
     /**
      * Adds or updates the key with a given value in the Event
      *
+     * @param key where the value will be set
+     * @param value value to set the key to
+     * @since 2.8
+     */
+    void put(EventKey key, Object value);
+
+    /**
+     * Adds or updates the key with a given value in the Event
+     *
+     * @param key where the value will be set
+     * @param value value to set the key to
+     * @param replaceInvalidCharacters flag indicating if invalid characters should be replaced or not
+     * @since 2.13
+     */
+    void put(EventKey key, Object value, boolean replaceInvalidCharacters);
+
+    /**
+     * Adds or updates the key with a given value in the Event
+     *
+     * @param key where the value will be set
+     * @param value value to set the key to
+     * @param replaceInvalidCharacters flag indicating if invalid characters should be replaced or not
+     * @since 2.13
+     */
+    void put(String key, Object value, boolean replaceInvalidCharacters);
+
+    /**
+     * Adds or updates the key with a given value in the Event
+     *
      * @param key   where the value will be set
      * @param value value to set the key to
      * @since 1.2
      */
     void put(String key, Object value);
+
+    /**
+     * Retrieves the given key from the Event
+     *
+     * @param key the value to retrieve from
+     * @param clazz the return type of the value
+     * @param <T> The type
+     * @return T a clazz object from the key
+     * @since 2.8
+     */
+    <T> T get(EventKey key, Class<T> clazz);
 
     /**
      * Retrieves the given key from the Event
@@ -53,9 +98,28 @@ public interface Event extends Serializable {
      * @param clazz the return type of elements in the list
      * @param <T>   The type
      * @return {@literal List<T>} a list of clazz elements
+     * @since 2.8
+     */
+    <T> List<T> getList(EventKey key, Class<T> clazz);
+
+    /**
+     * Retrieves the given key from the Event as a List
+     *
+     * @param key   the value to retrieve from
+     * @param clazz the return type of elements in the list
+     * @param <T>   The type
+     * @return {@literal List<T>} a list of clazz elements
      * @since 1.2
      */
     <T> List<T> getList(String key, Class<T> clazz);
+
+    /**
+     * Deletes the given key from the Event
+     *
+     * @param key the field to be deleted
+     * @since 2.8
+     */
+    void delete(EventKey key);
 
     /**
      * Deletes the given key from the Event
@@ -72,6 +136,59 @@ public interface Event extends Serializable {
     void clear();
 
     /**
+     * Merges another Event into the current Event.
+     * The values from the other Event will overwrite the values in the current Event for all keys in the current Event.
+     * If the other Event has keys that are not in the current Event, they will be unmodified.
+     *
+     * @param other the other Event to merge into this Event
+     * @throws IllegalArgumentException if the input event is not compatible to merge.
+     * @throws UnsupportedOperationException if the current Event does not support merging.
+     * @since 2.11
+     */
+    void merge(Event other);
+
+    /**
+     * Merges only the specified keys from another Event into the current Event.
+     * Only the keys present in {@code keys} will be copied from {@code other} into this Event.
+     * Values from {@code other} will overwrite existing values in this Event for matching keys.
+     *
+     * @param other the other Event to merge from
+     * @param keys  the list of keys to selectively merge
+     * @throws IllegalArgumentException if the input event is not compatible to merge.
+     * @throws UnsupportedOperationException if the current Event does not support merging.
+     * @since 2.15
+     */
+    void merge(Event other, Collection<String> keys);
+
+    /**
+     * Merges a map of fields into this Event, optionally under a destination key, resolving
+     * conflicts according to the supplied {@link MergeSettings}.
+     *
+     * <h2>Behavior</h2>
+     * <ul>
+     *   <li><b>Root write</b> when {@code destination} is {@code null} or empty, entries are
+     *       written to the event root and merged per-field. There is no single destination key
+     *       whose existence can be checked, so the conflict strategy collapses to its
+     *       {@link FieldConflictStrategy#isOverwrite()} flag: overwrite strategies replace
+     *       conflicting root fields, non-overwrite strategies preserve them. In particular
+     *       {@code SKIP} does not skip the write at the root, it merges while preserving existing
+     *       fields.</li>
+     *   <li><b>Destination does not exist</b> the whole map is written as the destination value.</li>
+     *   <li><b>Destination exists</b> resolved by the configured {@link FieldConflictStrategy};
+     *       see that enum for the per-strategy outcomes.</li>
+     * </ul>
+     *
+     * <p>Keys are interpreted as JSON Pointer paths (the {@code /} separator), so nested
+     * destinations such as {@code base/child} are created automatically.</p>
+     *
+     * @param destination   the destination key (JSON Pointer path), or {@code null}/empty for the root
+     * @param values        the parsed fields to merge
+     * @param mergeSettings the settings controlling conflict resolution and key handling
+     * @since 2.17
+     */
+    void mergeFields(String destination, Map<String, Object> values, MergeSettings mergeSettings);
+
+    /**
      * Generates a serialized Json string of the entire Event
      *
      * @return Json string of the event
@@ -86,6 +203,15 @@ public interface Event extends Serializable {
      * @since 2.5
      */
     JsonNode getJsonNode();
+
+    /**
+     * Gets a serialized Json string of the specific key in the Event
+     *
+     * @param key the field to be returned
+     * @return Json string of the field
+     * @since 2.8
+     */
+    String getAsJsonString(EventKey key);
 
     /**
      * Gets a serialized Json string of the specific key in the Event
@@ -109,9 +235,27 @@ public interface Event extends Serializable {
      *
      * @param key name of the key to look for
      * @return returns true if the key exists, otherwise false
+     * @since 2.8
+     */
+    boolean containsKey(EventKey key);
+
+    /**
+     * Checks if the key exists.
+     *
+     * @param key name of the key to look for
+     * @return returns true if the key exists, otherwise false
      * @since 1.2
      */
     boolean containsKey(String key);
+
+    /**
+     * Checks if the value stored for the key is list
+     *
+     * @param key name of the key to look for
+     * @return returns true if the key is a list, otherwise false
+     * @since 2.8
+     */
+    boolean isValueAList(EventKey key);
 
     /**
      * Checks if the value stored for the key is list
@@ -147,7 +291,19 @@ public interface Event extends Serializable {
      * @throws RuntimeException if the input string is not properly formatted
      * @since 2.1
      */
-    String formatString(String format, ExpressionEvaluator expressionEvaluator);
+    String formatString(final String format, final ExpressionEvaluator expressionEvaluator);
+
+    /**
+     * Returns formatted parts of the input string replaced by their values in the event or the values from the result
+     * of a Data Prepper expression
+     * @param format input format
+     * @param expressionEvaluator - The expression evaluator that will support formatting from Data Prepper expressions
+     * @param defaultValue - The String to use as a replacement for when keys in Events can't be found
+     * @return returns a string with no formatted parts, returns null if no value is found
+     * @throws RuntimeException if the input string is not properly formatted
+     * @since 2.1
+     */
+    String formatString(final String format, final ExpressionEvaluator expressionEvaluator, final String defaultValue);
 
     /**
      * Returns event handle
@@ -157,7 +313,14 @@ public interface Event extends Serializable {
      */
     EventHandle getEventHandle();
 
+    default void putIfAbsent(final String key, final Class clazz, final Object value) {
+        if (get(key, clazz) == null)
+            put(key, value);
+    }
+
     JsonStringBuilder jsonBuilder();
+
+    EventFailureMetadata updateFailureMetadata();
 
     abstract class JsonStringBuilder {
         private String tagsKey;

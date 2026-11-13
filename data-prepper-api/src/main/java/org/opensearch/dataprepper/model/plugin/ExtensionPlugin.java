@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.plugin;
@@ -20,4 +24,10 @@ public interface ExtensionPlugin {
      * @param extensionPoints The {@link ExtensionPoints} wherein the extension can extend behaviors.
      */
     void apply(ExtensionPoints extensionPoints);
+
+    /**
+     * Close resources used by the extension.
+     */
+    default void shutdown() {
+    };
 }

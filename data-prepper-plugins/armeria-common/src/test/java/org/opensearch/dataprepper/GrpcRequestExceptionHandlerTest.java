@@ -1,10 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper;
 
+import com.google.protobuf.Any;
+import com.google.rpc.RetryInfo;
 import com.linecorp.armeria.common.RequestContext;
 import com.linecorp.armeria.server.RequestTimeoutException;
 import io.grpc.Metadata;
@@ -13,6 +19,9 @@ import io.micrometer.core.instrument.Counter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.exceptions.BadRequestException;
@@ -22,11 +31,15 @@ import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.buffer.SizeOverflowException;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 
+import static com.linecorp.armeria.internal.common.grpc.MetadataUtil.GRPC_STATUS_DETAILS_BIN_KEY;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -55,6 +68,9 @@ public class GrpcRequestExceptionHandlerTest {
     @Mock
     private Metadata metadata;
 
+    @Captor
+    private ArgumentCaptor<com.google.rpc.Status> status;
+
     private GrpcRequestExceptionHandler grpcRequestExceptionHandler;
 
     @BeforeEach
@@ -64,7 +80,7 @@ public class GrpcRequestExceptionHandlerTest {
         when(pluginMetrics.counter(HttpRequestExceptionHandler.REQUESTS_TOO_LARGE)).thenReturn(requestsTooLargeCounter);
         when(pluginMetrics.counter(HttpRequestExceptionHandler.INTERNAL_SERVER_ERROR)).thenReturn(internalServerErrorCounter);
 
-        grpcRequestExceptionHandler = new GrpcRequestExceptionHandler(pluginMetrics);
+        grpcRequestExceptionHandler = new GrpcRequestExceptionHandler(pluginMetrics, Duration.ofMillis(100), Duration.ofSeconds(2));
     }
 
     @Test
@@ -73,11 +89,11 @@ public class GrpcRequestExceptionHandlerTest {
         final String exceptionMessage = UUID.randomUUID().toString();
         final BadRequestException badRequestExceptionWithMessage = new BadRequestException(exceptionMessage, new IOException());
 
-        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, badRequestExceptionNoMessage, metadata);
+        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INVALID_ARGUMENT, badRequestExceptionNoMessage, metadata);
         assertThat(noMessageStatus.getCode(), equalTo(Status.Code.INVALID_ARGUMENT));
         assertThat(noMessageStatus.getDescription(), equalTo(Status.Code.INVALID_ARGUMENT.name()));
 
-        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, badRequestExceptionWithMessage, metadata);
+        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INVALID_ARGUMENT, badRequestExceptionWithMessage, metadata);
         assertThat(messageStatus.getCode(), equalTo(Status.Code.INVALID_ARGUMENT));
         assertThat(messageStatus.getDescription(), equalTo(exceptionMessage));
 
@@ -90,22 +106,28 @@ public class GrpcRequestExceptionHandlerTest {
         final String exceptionMessage = UUID.randomUUID().toString();
         final BufferWriteException timeoutExceptionWithMessage = new BufferWriteException(exceptionMessage, new TimeoutException(exceptionMessage));
 
-        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, timeoutExceptionNoMessage, metadata);
+        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.DEADLINE_EXCEEDED, timeoutExceptionNoMessage, metadata);
         assertThat(noMessageStatus.getCode(), equalTo(Status.Code.RESOURCE_EXHAUSTED));
         assertThat(noMessageStatus.getDescription(), equalTo(Status.Code.RESOURCE_EXHAUSTED.name()));
 
-        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, timeoutExceptionWithMessage, metadata);
+        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.DEADLINE_EXCEEDED, timeoutExceptionWithMessage, metadata);
         assertThat(messageStatus.getCode(), equalTo(Status.Code.RESOURCE_EXHAUSTED));
         assertThat(messageStatus.getDescription(), equalTo(exceptionMessage));
 
         verify(requestTimeoutsCounter, times(2)).increment();
+
+        verify(metadata, times(2)).put(ArgumentMatchers.eq(GRPC_STATUS_DETAILS_BIN_KEY), status.capture());
+        for (com.google.rpc.Status currentStatus: status.getAllValues()) {
+            Optional<Any> retryInfo = currentStatus.getDetailsList().stream().filter(d -> d.is(RetryInfo.class)).findFirst();
+            assertTrue(retryInfo.isPresent(), "No RetryInfo at status:\n" + currentStatus.toString());
+        }
     }
 
     @Test
     public void testHandleArmeriaTimeoutException() {
         final RequestTimeoutException timeoutExceptionNoMessage = RequestTimeoutException.get();
 
-        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, timeoutExceptionNoMessage, metadata);
+        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.DEADLINE_EXCEEDED, timeoutExceptionNoMessage, metadata);
         assertThat(noMessageStatus.getCode(), equalTo(Status.Code.RESOURCE_EXHAUSTED));
         assertThat(noMessageStatus.getDescription(), equalTo(ARMERIA_REQUEST_TIMEOUT_MESSAGE));
 
@@ -118,11 +140,11 @@ public class GrpcRequestExceptionHandlerTest {
         final String exceptionMessage = UUID.randomUUID().toString();
         final BufferWriteException sizeOverflowExceptionWithMessage = new BufferWriteException(exceptionMessage, new SizeOverflowException(exceptionMessage));
 
-        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, sizeOverflowExceptionNoMessage, metadata);
+        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INVALID_ARGUMENT, sizeOverflowExceptionNoMessage, metadata);
         assertThat(noMessageStatus.getCode(), equalTo(Status.Code.RESOURCE_EXHAUSTED));
         assertThat(noMessageStatus.getDescription(), equalTo(Status.Code.RESOURCE_EXHAUSTED.name()));
 
-        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, sizeOverflowExceptionWithMessage, metadata);
+        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INVALID_ARGUMENT, sizeOverflowExceptionWithMessage, metadata);
         assertThat(messageStatus.getCode(), equalTo(Status.Code.RESOURCE_EXHAUSTED));
         assertThat(messageStatus.getDescription(), equalTo(exceptionMessage));
 
@@ -135,15 +157,60 @@ public class GrpcRequestExceptionHandlerTest {
         final String exceptionMessage = UUID.randomUUID().toString();
         final RequestCancelledException requestCancelledExceptionWithMessage = new RequestCancelledException(exceptionMessage);
 
-        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, requestCancelledExceptionNoMessage, metadata);
+        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.CANCELLED, requestCancelledExceptionNoMessage, metadata);
         assertThat(noMessageStatus.getCode(), equalTo(Status.Code.CANCELLED));
         assertThat(noMessageStatus.getDescription(), equalTo(Status.Code.CANCELLED.name()));
 
-        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, requestCancelledExceptionWithMessage, metadata);
+        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.CANCELLED, requestCancelledExceptionWithMessage, metadata);
         assertThat(messageStatus.getCode(), equalTo(Status.Code.CANCELLED));
         assertThat(messageStatus.getDescription(), equalTo(exceptionMessage));
 
         verify(requestTimeoutsCounter, times(2)).increment();
+    }
+
+    @Test
+    public void testHandleInvalidProtobufReturnsInformativeBadRequest() {
+        // Mirrors what Armeria's GrpcMessageMarshaller throws on a protobuf UTF-8 failure:
+        // Status.INTERNAL.withDescription("Invalid protobuf byte sequence").withCause(InvalidProtocolBufferException).asRuntimeException()
+        final com.google.protobuf.InvalidProtocolBufferException protobufException =
+                new com.google.protobuf.InvalidProtocolBufferException("Protocol message had invalid UTF-8.");
+        final io.grpc.StatusRuntimeException invalidProtobuf = Status.INTERNAL
+                .withDescription("Invalid protobuf byte sequence")
+                .withCause(protobufException)
+                .asRuntimeException();
+
+        final Status resultStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INTERNAL, invalidProtobuf, metadata);
+
+        assertThat(resultStatus.getCode(), equalTo(Status.Code.INVALID_ARGUMENT));
+        assertThat(resultStatus.getDescription(), equalTo(InvalidRequestExceptions.INVALID_PROTOBUF_MESSAGE));
+
+        verify(badRequestsCounter, times(1)).increment();
+    }
+
+    @Test
+    public void testHandleCompressedFrameReturnsInformativeBadRequest() {
+        final io.grpc.StatusRuntimeException compressedFrame =
+                Status.INTERNAL.withDescription("Can't decode compressed frame").asRuntimeException();
+
+        final Status resultStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INTERNAL, compressedFrame, metadata);
+
+        assertThat(resultStatus.getCode(), equalTo(Status.Code.INVALID_ARGUMENT));
+        assertThat(resultStatus.getDescription(), equalTo(InvalidRequestExceptions.COMPRESSED_FRAME_MESSAGE));
+
+        verify(badRequestsCounter, times(1)).increment();
+    }
+
+    @Test
+    public void testHandleGenericStatusRuntimeExceptionPassesThroughUnchanged() {
+        // A StatusRuntimeException that is NOT a client-data problem must retain its original status,
+        // matching Armeria's default short-circuit behavior.
+        final io.grpc.StatusRuntimeException generic =
+                Status.INTERNAL.withDescription("some internal failure").asRuntimeException();
+
+        final Status resultStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INTERNAL, generic, metadata);
+
+        assertThat(resultStatus.getCode(), equalTo(Status.Code.INTERNAL));
+        verify(badRequestsCounter, times(0)).increment();
     }
 
     @Test
@@ -152,11 +219,11 @@ public class GrpcRequestExceptionHandlerTest {
         final String exceptionMessage = UUID.randomUUID().toString();
         final RuntimeException runtimeExceptionWithMessage = new RuntimeException(exceptionMessage);
 
-        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, runtimeExceptionNoMessage, metadata);
+        final Status noMessageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INTERNAL, runtimeExceptionNoMessage, metadata);
         assertThat(noMessageStatus.getCode(), equalTo(Status.Code.INTERNAL));
         assertThat(noMessageStatus.getDescription(), equalTo(Status.Code.INTERNAL.name()));
 
-        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, runtimeExceptionWithMessage, metadata);
+        final Status messageStatus = grpcRequestExceptionHandler.apply(requestContext, Status.INTERNAL, runtimeExceptionWithMessage, metadata);
         assertThat(messageStatus.getCode(), equalTo(Status.Code.INTERNAL));
         assertThat(messageStatus.getDescription(), equalTo(exceptionMessage));
 

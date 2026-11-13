@@ -1,122 +1,69 @@
-/*
- * Copyright OpenSearch Contributors
- * SPDX-License-Identifier: Apache-2.0
- */
+ /*
+  * Copyright OpenSearch Contributors
+  * SPDX-License-Identifier: Apache-2.0
+  *
+  * The OpenSearch Contributors require contributions made to
+  * this file be licensed under the Apache-2.0 license or a
+  * compatible open source license.
+  *
+  */
 package org.opensearch.dataprepper.plugins.sink.prometheus.configuration;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotNull;
-import org.apache.commons.lang3.StringUtils;
-import org.opensearch.dataprepper.model.configuration.PluginModel;
-import org.opensearch.dataprepper.plugins.sink.prometheus.util.PrometheusSinkUtil;
+import org.hibernate.validator.constraints.time.DurationMax;
+import org.hibernate.validator.constraints.time.DurationMin;
+import org.opensearch.dataprepper.aws.api.AwsConfig;
+import org.opensearch.dataprepper.plugins.codec.CompressionOption;
+import org.opensearch.dataprepper.plugins.sink.prometheus.service.PrometheusTimeSeries;
 
-import java.net.URL;
 import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.regex.Pattern;
+
+import static com.linecorp.armeria.common.MediaTypeNames.X_PROTOBUF;
 
 public class PrometheusSinkConfiguration {
 
-    private static final int DEFAULT_UPLOAD_RETRIES = 5;
+    static final int DEFAULT_MAX_RETRIES = 5;
 
-    static final boolean DEFAULT_INSECURE = false;
+    public static final CompressionOption DEFAULT_ENCODING = CompressionOption.SNAPPY;
 
-    private static final String S3_PREFIX = "s3://";
+    private static final String DEFAULT_CONTENT_TYPE = X_PROTOBUF;
 
-    static final String SSL_KEY_CERT_FILE = "sslKeyCertChainFile";
-    static final String SSL_KEY_FILE = "sslKeyFile";
-    static final String SSL = "ssl";
-    static final String AWS_REGION = "awsRegion";
+    static final String DEFAULT_REMOTE_WRITE_VERSION = "0.1.0";
+    private static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DEFAULT_CONNECTION_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DEFAULT_OUT_OF_ORDER_TIME_WINDOW = Duration.ofSeconds(10);
 
-    public static final String STS_REGION = "sts_region";
+    private static final Pattern VALID_LABEL_NAME_PATTERN = Pattern.compile("[a-zA-Z_][a-zA-Z0-9_]*");
+    private static final String RESERVED_LABEL_NAME_PREFIX = "__";
 
-    public static final String STS_ROLE_ARN = "sts_role_arn";
-    static final boolean DEFAULT_USE_ACM_CERT_FOR_SSL = false;
-    public static final int DEFAULT_ACM_CERT_ISSUE_TIME_OUT_MILLIS = 120000;
-    public static final String SSL_IS_ENABLED = "%s is enabled";
+    @JsonProperty("aws")
+    @Valid
+    private AwsConfig awsConfig;
 
-    public static final Duration DEFAULT_HTTP_RETRY_INTERVAL = Duration.ofSeconds(30);
-
-    private static final String HTTPS = "https";
-
-    private static final String HTTP = "http";
-
-    private static final String AWS_HOST_AMAZONAWS_COM = "amazonaws.com";
-
-    private static final String AWS_HOST_API_AWS = "api.aws";
-
-    private static final String AWS_HOST_ON_AWS = "on.aws";
-
-    private static final String DEFAULT_ENCODING = "snappy";
-
-    private static final String DEFAULT_CONTENT_TYPE = "application/x-protobuf";
-
-    private static final String DEFAULT_REMOTE_WRITE_VERSION = "0.1.0";
-
+    @JsonProperty("authentication")
+    @Valid
+    private AuthenticationOptions authentication;
 
     @NotNull
     @JsonProperty("url")
     private String url;
 
-    @JsonProperty("http_method")
-    private HTTPMethodOptions httpMethod = HTTPMethodOptions.POST;
-
-    @JsonProperty("proxy")
-    private String proxy;
-
-    @JsonProperty("auth_type")
-    private AuthTypeOptions authType = AuthTypeOptions.UNAUTHENTICATED;
-
-    @JsonProperty("authentication")
-    private AuthenticationOptions authentication;
-
-    @JsonProperty("ssl_certificate_file")
-    private String sslCertificateFile;
-
-    @JsonProperty("ssl_key_file")
-    private String sslKeyFile;
+    @JsonProperty("out_of_order_time_window")
+    private Duration outOfOrderTimeWindow = DEFAULT_OUT_OF_ORDER_TIME_WINDOW;
 
     @JsonProperty("max_retries")
-    private int maxUploadRetries = DEFAULT_UPLOAD_RETRIES;
+    private int maxRetries = DEFAULT_MAX_RETRIES;
 
-    @JsonProperty("aws")
-    @Valid
-    private AwsAuthenticationOptions awsAuthenticationOptions;
-
-    @JsonProperty("custom_header")
-    private Map<String, List<String>> customHeaderOptions;
-
-    @JsonProperty("dlq_file")
-    private String dlqFile;
-
-    @JsonProperty("dlq")
-    private PluginModel dlq;
-
-    @JsonProperty("use_acm_cert_for_ssl")
-    private boolean useAcmCertForSSL = DEFAULT_USE_ACM_CERT_FOR_SSL;
-
-    @JsonProperty("acm_private_key_password")
-    private String acmPrivateKeyPassword;
-
-    @JsonProperty("acm_certificate_arn")
-    private String acmCertificateArn;
-
-    @JsonProperty("acm_cert_issue_time_out_millis")
-    private long acmCertIssueTimeOutMillis = DEFAULT_ACM_CERT_ISSUE_TIME_OUT_MILLIS;
-
-    @JsonProperty("insecure")
-    private boolean insecure = DEFAULT_INSECURE;
-
-    @JsonProperty("insecure_skip_verify")
-    private boolean insecureSkipVerify = DEFAULT_INSECURE;
-
-    @JsonProperty("http_retry_interval")
-    private Duration httpRetryInterval = DEFAULT_HTTP_RETRY_INTERVAL;
+    @JsonProperty("threshold")
+    private PrometheusSinkThresholdConfig thresholdConfig;
 
     @JsonProperty("encoding")
-    private String encoding = DEFAULT_ENCODING;
+    private CompressionOption encoding = DEFAULT_ENCODING;
 
     @JsonProperty("content_type")
     private String contentType = DEFAULT_CONTENT_TYPE;
@@ -124,141 +71,62 @@ public class PrometheusSinkConfiguration {
     @JsonProperty("remote_write_version")
     private String remoteWriteVersion = DEFAULT_REMOTE_WRITE_VERSION;
 
-    @JsonProperty("request_timout")
-    private Duration requestTimout;
+    @JsonProperty("request_timeout")
+    @DurationMin(seconds = 1)
+    @DurationMax(seconds = 600)
+    private Duration requestTimeout = DEFAULT_REQUEST_TIMEOUT;
 
-    private boolean sslCertAndKeyFileInS3;
+    @JsonProperty("connection_timeout")
+    @DurationMin(seconds = 1)
+    @DurationMax(seconds = 600)
+    private Duration connectionTimeout = DEFAULT_CONNECTION_TIMEOUT;
+
+    @JsonProperty("idle_timeout")
+    @DurationMin(seconds = 1)
+    @DurationMax(seconds = 600)
+    private Duration idleTimeout = DEFAULT_IDLE_TIMEOUT;
+
+    @JsonProperty("insecure")
+    private boolean insecure = false;
+
+    @JsonProperty("sanitize_names")
+    private boolean sanitizeNames = true;
+
+    @JsonProperty("instance_label")
+    private String instanceLabel;
+
+    public boolean isInsecure() {
+        return insecure;
+    }
+
+    public boolean getSanitizeNames() {
+        return sanitizeNames;
+    }
 
     public String getUrl() {
         return url;
     }
 
-    public boolean isInsecureSkipVerify() {
-        return insecureSkipVerify; }
-
-    public Duration getHttpRetryInterval() {
-        return httpRetryInterval;
-    }
-
-    public String getAcmPrivateKeyPassword() {
-        return acmPrivateKeyPassword;
-    }
-
-    public boolean isSslCertAndKeyFileInS3() {
-        return sslCertAndKeyFileInS3;
-    }
-
-    public long getAcmCertIssueTimeOutMillis() {
-        return acmCertIssueTimeOutMillis;
-    }
-
-    public boolean useAcmCertForSSL() {
-        return useAcmCertForSSL;
-    }
-
-    public void validateAndInitializeCertAndKeyFileInS3() {
-        boolean certAndKeyFileInS3 = false;
-        if (useAcmCertForSSL) {
-            validateSSLArgument(String.format(SSL_IS_ENABLED, useAcmCertForSSL), acmCertificateArn, acmCertificateArn);
-            validateSSLArgument(String.format(SSL_IS_ENABLED, useAcmCertForSSL), awsAuthenticationOptions.getAwsRegion().toString(), AWS_REGION);
-        } else if(!insecureSkipVerify) {
-            validateSSLCertificateFiles();
-            certAndKeyFileInS3 = isSSLCertificateLocatedInS3();
-            if (certAndKeyFileInS3) {
-                validateSSLArgument("The certificate and key files are located in S3", awsAuthenticationOptions.getAwsRegion().toString(), AWS_REGION);
-            }
+    public PrometheusSinkThresholdConfig getThresholdConfig() {
+        if (thresholdConfig == null) {
+            return new PrometheusSinkThresholdConfig();
         }
-        sslCertAndKeyFileInS3 = certAndKeyFileInS3;
-    }
-    private void validateSSLArgument(final String sslTypeMessage, final String argument, final String argumentName) {
-        if (StringUtils.isEmpty(argument)) {
-            throw new IllegalArgumentException(String.format("%s, %s can not be empty or null", sslTypeMessage, argumentName));
-        }
+        return thresholdConfig;
     }
 
-    private void validateSSLCertificateFiles() {
-        validateSSLArgument(String.format(SSL_IS_ENABLED, SSL), sslCertificateFile, SSL_KEY_CERT_FILE);
-        validateSSLArgument(String.format(SSL_IS_ENABLED, SSL), sslKeyFile, SSL_KEY_FILE);
-    }
-
-    private boolean isSSLCertificateLocatedInS3() {
-        return sslCertificateFile.toLowerCase().startsWith(S3_PREFIX) &&
-                sslKeyFile.toLowerCase().startsWith(S3_PREFIX);
-    }
-
-    public String getAcmCertificateArn() {
-        return acmCertificateArn;
-    }
-
-    public HTTPMethodOptions getHttpMethod() {
-        return httpMethod;
-    }
-
-    public String getProxy() {
-        return proxy;
-    }
-
-    public AuthTypeOptions getAuthType() {
-        return authType;
+    public AwsConfig getAwsConfig() {
+        return awsConfig;
     }
 
     public AuthenticationOptions getAuthentication() {
         return authentication;
     }
 
-    public String getSslCertificateFile() {
-        return sslCertificateFile;
+    public int getMaxRetries() {
+        return maxRetries;
     }
 
-    public String getSslKeyFile() {
-        return sslKeyFile;
-    }
-
-    public int getMaxUploadRetries() {
-        return maxUploadRetries;
-    }
-
-    public Map<String, List<String>> getCustomHeaderOptions() {
-        return customHeaderOptions;
-    }
-
-    public AwsAuthenticationOptions getAwsAuthenticationOptions() {
-        return awsAuthenticationOptions;
-    }
-
-    public String getDlqFile() {
-        return dlqFile;
-    }
-
-    public PluginModel getDlq() {
-        return dlq;
-    }
-
-    public boolean isValidAWSUrl() {
-        URL parsedUrl = PrometheusSinkUtil.getURLByUrlString(url);
-        if(parsedUrl.getProtocol().equals(HTTPS) && (parsedUrl.getHost().contains(AWS_HOST_AMAZONAWS_COM) ||parsedUrl.getHost().contains(AWS_HOST_API_AWS) || parsedUrl.getHost().contains(AWS_HOST_ON_AWS))){
-            return true;
-        }
-        return false;
-    }
-
-    public String getDlqStsRoleARN(){
-        return Objects.nonNull(getDlqPluginSetting().get(STS_ROLE_ARN)) ?
-                String.valueOf(getDlqPluginSetting().get(STS_ROLE_ARN)) :
-                awsAuthenticationOptions.getAwsStsRoleArn();
-    }
-
-    public String getDlqStsRegion(){
-        return Objects.nonNull(getDlqPluginSetting().get(STS_REGION)) ?
-                String.valueOf(getDlqPluginSetting().get(STS_REGION)) :
-                awsAuthenticationOptions.getAwsRegion().toString();
-    }
-
-    public  Map<String, Object> getDlqPluginSetting(){
-        return dlq != null ? dlq.getPluginSettings() : Map.of();
-    }
-
-    public String getEncoding() {
+    public CompressionOption getEncoding() {
         return encoding;
     }
 
@@ -266,20 +134,85 @@ public class PrometheusSinkConfiguration {
         return contentType;
     }
 
+    public Duration getOutOfOrderTimeWindow() {
+        return outOfOrderTimeWindow;
+    }
+
     public String getRemoteWriteVersion() {
         return remoteWriteVersion;
     }
 
-    public boolean isInsecure() {
-        return insecure;
+    public Duration getRequestTimeout() {
+        return requestTimeout;
     }
 
-    public Duration getRequestTimout() {
-        return requestTimout;
+    public Duration getConnectionTimeout() {
+        return connectionTimeout;
     }
 
-    public boolean isHttpUrl() {
-        URL parsedUrl = PrometheusSinkUtil.getURLByUrlString(url);
-        return parsedUrl.getProtocol().equals(HTTP);
+    public Duration getIdleTimeout() {
+        return idleTimeout;
+    }
+
+    /**
+     * Returns the name of the label which carries this instance's address, or null when the sink should
+     * not add one.
+     *
+     * @return the label name, or null
+     */
+    public String getInstanceLabel() {
+        return instanceLabel;
+    }
+
+    @AssertTrue(message = "url must be https when insecure is not set to true.")
+    boolean isHttpsOrInsecure() {
+        if (url == null) {
+            return true;
+        }
+        if (insecure) {
+            return true;
+        }
+        return url.startsWith("https://");
+    }
+
+    @AssertTrue(message = "Cannot use both AWS SigV4 and authentication options. Choose one.")
+    boolean isValidAuthConfig() {
+        return !(awsConfig != null && authentication != null);
+    }
+
+    @AssertTrue(message = "encoding or content_type or remote_write_version or url is incorrect.")
+    boolean isValidConfig() {
+        final boolean validUrl = url.startsWith("https://") || url.startsWith("http://");
+        return  validUrl &&
+                encoding == CompressionOption.SNAPPY &&
+                contentType.equals(X_PROTOBUF) &&
+                remoteWriteVersion.equals(DEFAULT_REMOTE_WRITE_VERSION);
+    }
+
+    @AssertTrue(message = "AWS configuration requires an https:// URL.")
+    boolean isValidAwsConfig() {
+        if (awsConfig != null) {
+            return url != null && url.startsWith("https://");
+        }
+        return true;
+    }
+
+    @AssertTrue(message = "Bearer token authentication is not yet supported.")
+    boolean isValidBearerTokenConfig() {
+        if (authentication != null && authentication.getBearerTokenOptions() != null) {
+            return false;
+        }
+        return true;
+    }
+
+    @AssertTrue(message = "instance_label must match [a-zA-Z_][a-zA-Z0-9_]*, must not begin with \"__\", " +
+            "and must not be a name this sink adds itself (\"le\", \"ge\", or \"quantile\").")
+    boolean isValidInstanceLabel() {
+        if (instanceLabel == null) {
+            return true;
+        }
+        return VALID_LABEL_NAME_PATTERN.matcher(instanceLabel).matches() &&
+                !instanceLabel.startsWith(RESERVED_LABEL_NAME_PREFIX) &&
+                !PrometheusTimeSeries.RESERVED_LABEL_NAMES.contains(instanceLabel);
     }
 }

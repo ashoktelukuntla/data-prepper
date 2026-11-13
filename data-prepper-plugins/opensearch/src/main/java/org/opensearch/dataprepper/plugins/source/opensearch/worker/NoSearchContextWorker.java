@@ -24,6 +24,7 @@ import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.Search
 import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.exceptions.IndexNotFoundException;
 import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.NoSearchContextSearchRequest;
 import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.SearchWithSearchAfterResults;
+import org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.SortingOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +37,8 @@ import static org.opensearch.dataprepper.plugins.source.opensearch.worker.Worker
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.calculateExponentialBackoffAndJitter;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.completeIndexPartition;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.createAcknowledgmentSet;
+import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.hasMorePages;
+import static org.opensearch.dataprepper.plugins.source.opensearch.worker.WorkerCommonUtils.recordShardFailuresIfAny;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.MetadataKeyAttributes.DOCUMENT_ID_METADATA_ATTRIBUTE_NAME;
 import static org.opensearch.dataprepper.plugins.source.opensearch.worker.client.model.MetadataKeyAttributes.INDEX_METADATA_ATTRIBUTE_NAME;
 
@@ -102,19 +105,19 @@ public class NoSearchContextWorker implements SearchWorker, Runnable {
                     openSearchSourcePluginMetrics.getIndexProcessingTimeTimer().record(() -> processIndex(indexPartition.get(), acknowledgementSet));
 
                     completeIndexPartition(openSearchSourceConfiguration, acknowledgementSet,
-                            indexPartition.get(), sourceCoordinator);
+                            indexPartition.get(), sourceCoordinator, openSearchSourcePluginMetrics);
 
                     openSearchSourcePluginMetrics.getIndicesProcessedCounter().increment();
                     LOG.info("Completed processing for index: '{}'", indexPartition.get().getPartitionKey());
                 } catch (final PartitionUpdateException | PartitionNotFoundException | PartitionNotOwnedException e) {
                     LOG.warn("The search_after worker received an exception from the source coordinator. There is a potential for duplicate data for index {}, giving up partition and getting next partition: {}", indexPartition.get().getPartitionKey(), e.getMessage());
-                    sourceCoordinator.giveUpPartitions();
+                    sourceCoordinator.giveUpPartition(indexPartition.get().getPartitionKey());
                 } catch (final IndexNotFoundException e) {
                     LOG.warn("{}, marking index as complete and continuing processing", e.getMessage());
                     sourceCoordinator.completePartition(indexPartition.get().getPartitionKey(), false);
                 } catch (final Exception e) {
                     LOG.error("Unknown exception while processing index '{}', moving on to another index:", indexPartition.get().getPartitionKey(), e);
-                    sourceCoordinator.giveUpPartitions();
+                    sourceCoordinator.giveUpPartition(indexPartition.get().getPartitionKey());
                     openSearchSourcePluginMetrics.getProcessingErrorsCounter().increment();
                 }
             } catch (final Exception e) {
@@ -147,13 +150,14 @@ public class NoSearchContextWorker implements SearchWorker, Runnable {
 
         final SearchConfiguration searchConfiguration = openSearchSourceConfiguration.getSearchConfiguration();
         SearchWithSearchAfterResults searchWithSearchAfterResults = null;
+        final List<SortingOptions> sortingOptions = SortingOptions.fromSortConfigs(searchConfiguration.getSort());
 
-        // todo: Pass query and sort options from SearchConfiguration to the search request
         do {
             searchWithSearchAfterResults = searchAccessor.searchWithoutSearchContext(NoSearchContextSearchRequest.builder()
                             .withIndex(indexName)
                             .withPaginationSize(searchConfiguration.getBatchSize())
                             .withSearchAfter(getSearchAfter(openSearchIndexProgressState, searchWithSearchAfterResults))
+                            .withSortOptions(sortingOptions)
                             .build());
 
             searchWithSearchAfterResults.getDocuments().stream().map(Record::new).forEach(record -> {
@@ -176,12 +180,19 @@ public class NoSearchContextWorker implements SearchWorker, Runnable {
 
             openSearchIndexProgressState.setSearchAfter(searchWithSearchAfterResults.getNextSearchAfter());
 
+            recordShardFailuresIfAny(indexName, searchWithSearchAfterResults.getShardStatistics(), openSearchIndexProgressState, openSearchSourcePluginMetrics);
+
             if (System.currentTimeMillis() - lastCheckpointTime > DEFAULT_CHECKPOINT_INTERVAL_MILLS) {
                 LOG.debug("Renew ownership of index {}", indexName);
                 sourceCoordinator.saveProgressStateForPartition(indexName, openSearchIndexProgressState);
                 lastCheckpointTime = System.currentTimeMillis();
             }
-        } while (searchWithSearchAfterResults.getDocuments().size() == searchConfiguration.getBatchSize());
+        } while (hasMorePages(searchWithSearchAfterResults));
+
+        LOG.info("Reached end of index '{}' (last page returned {} documents, nextSearchAfter present: {}).",
+                indexName,
+                searchWithSearchAfterResults.getDocuments().size(),
+                searchWithSearchAfterResults.getNextSearchAfter() != null);
 
         try {
             bufferAccumulator.flush();

@@ -9,6 +9,7 @@ import org.opensearch.client.opensearch.core.bulk.BulkResponseItem;
 import org.opensearch.client.opensearch.core.bulk.CreateOperation;
 import org.opensearch.client.opensearch.core.bulk.IndexOperation;
 import org.opensearch.dataprepper.model.failures.DlqObject;
+import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.plugins.sink.opensearch.bulk.SerializedJson;
 import org.opensearch.dataprepper.plugins.sink.opensearch.BulkOperationWrapper;
 import org.opensearch.rest.RestStatus;
@@ -31,12 +32,13 @@ public class FailedBulkOperationConverterTest {
     private String testId;
     private String pipelineName;
     private String pluginName;
-    private String pluginId;
     private BulkOperation bulkOperation;
     private BulkResponseItem bulkResponseItem;
     private String errorReason;
     private Throwable failure;
     private String failureMessage;
+
+    private Event event;
 
     private FailedBulkOperationConverter converter;
 
@@ -47,7 +49,6 @@ public class FailedBulkOperationConverterTest {
         testId = UUID.randomUUID().toString();
         pipelineName = UUID.randomUUID().toString();
         pluginName = UUID.randomUUID().toString();
-        pluginId = UUID.randomUUID().toString();
         errorReason = UUID.randomUUID().toString();
 
         failureMessage = UUID.randomUUID().toString();
@@ -75,7 +76,7 @@ public class FailedBulkOperationConverterTest {
         when(bulkResponseItem.error()).thenReturn(errorCause);
         when(errorCause.reason()).thenReturn(errorReason);
 
-        converter = new FailedBulkOperationConverter(pipelineName, pluginName, pluginId);
+        converter = new FailedBulkOperationConverter(pipelineName, pluginName);
     }
 
     @Test
@@ -90,6 +91,21 @@ public class FailedBulkOperationConverterTest {
         final DlqObject result = converter.convertToDlqObject(testData);
 
         validateResponse(result, errorReason);
+    }
+
+    @Test
+    public void testConvertToDlqObjectWithEvent() {
+
+        final FailedBulkOperation testData = FailedBulkOperation.builder()
+                .withBulkOperation(new BulkOperationWrapper(bulkOperation, event, null, null))
+                .withBulkResponseItem(bulkResponseItem)
+                .withFailure(failure)
+                .build();
+
+        final DlqObject result = converter.convertToDlqObject(testData);
+
+        validateResponse(result, errorReason);
+        assertThat(result.getEvent(), equalTo(event));
     }
 
     @Test
@@ -136,7 +152,7 @@ public class FailedBulkOperationConverterTest {
     private void validateResponse(final DlqObject result, final String expectedErrorMessage) {
         assertThat(result, is(notNullValue()));
         assertThat(result.getPipelineName(), is(equalTo(pipelineName)));
-        assertThat(result.getPluginId(), is(equalTo(pluginId)));
+        assertThat(result.getPluginId(), is(equalTo(pluginName)));
         assertThat(result.getPluginName(), is(equalTo(pluginName)));
         final Object failedData = result.getFailedData();
         assertThat(failedData, is(notNullValue()));
@@ -160,8 +176,29 @@ public class FailedBulkOperationConverterTest {
 
         final String jsonString = String.format("{\"%s\": \"%s\", \"%s\": \"%s\"}", key1, value1, key2, value2);
 
-        document = SerializedJson.fromStringAndOptionals(jsonString, null, null);
+        document = SerializedJson.fromStringAndOptionals(jsonString, null, null, null);
     }
 
+    @Test
+    public void testConvertToDlqObjectWithStringValueAboveTheJacksonDefaultLimit() {
+        final int length = 21 * 1024 * 1024;
+        final SerializedJson largeDocument = SerializedJson.fromStringAndOptionals(
+                "{\"largeField\":\"" + "a".repeat(length) + "\"}", null, null, null);
+        final IndexOperation indexOperation = mock(IndexOperation.class);
+        when(indexOperation.index()).thenReturn(testIndex);
+        when(indexOperation.id()).thenReturn(testId);
+        when(indexOperation.document()).thenReturn(largeDocument);
+        when(bulkOperation.index()).thenReturn(indexOperation);
 
+        final FailedBulkOperation testData = FailedBulkOperation.builder()
+                .withBulkOperation(new BulkOperationWrapper(bulkOperation))
+                .withBulkResponseItem(bulkResponseItem)
+                .withFailure(failure)
+                .build();
+
+        final DlqObject result = converter.convertToDlqObject(testData);
+
+        final Map<String, Object> doc = (Map<String, Object>) ((FailedDlqData) result.getFailedData()).getDocument();
+        assertThat(((String) doc.get("largeField")).length(), is(equalTo(length)));
+    }
 }

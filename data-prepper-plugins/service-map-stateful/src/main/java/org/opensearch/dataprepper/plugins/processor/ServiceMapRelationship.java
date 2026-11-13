@@ -66,6 +66,11 @@ public class ServiceMapRelationship {
 
     /**
      * Create a destination relationship
+     * @param serviceName service name
+     * @param spanKind span kind
+     * @param domain domain
+     * @param resource resource
+     * @param traceGroupName trace group name
      * @return Relationship with the fields set, and target set to null
      */
     public static ServiceMapRelationship newDestinationRelationship (
@@ -74,11 +79,18 @@ public class ServiceMapRelationship {
             final String domain,
             final String resource,
             final String traceGroupName) {
+
+
         return new ServiceMapRelationship(serviceName, spanKind, new Endpoint(resource, domain), null, traceGroupName);
     }
 
     /**
      * Create a target relationship
+     * @param serviceName service name
+     * @param spanKind span kind
+     * @param domain domain
+     * @param resource resource
+     * @param traceGroupName trace group name
      * @return Relationship with the fields set, and destination set to null
      */
     public static ServiceMapRelationship newTargetRelationship (
@@ -87,6 +99,7 @@ public class ServiceMapRelationship {
             final String domain,
             final String resource,
             final String traceGroupName) {
+
         return new ServiceMapRelationship(serviceName, spanKind, null, new Endpoint(resource, domain), traceGroupName);
     }
 
@@ -164,12 +177,10 @@ public class ServiceMapRelationship {
 
     /**
      * The endpoint follows the URL spec.
-     * <p>
-     * Example, https://paymentservice/makePayment.
-     * <p>
+     * <p> Example, https://paymentservice/makePayment.  <p>
      *  domain: paymentservice
      *  resource: makePayment
-     * <p>
+     * 
      *
      */
     public static class Endpoint {

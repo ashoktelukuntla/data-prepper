@@ -5,13 +5,22 @@
 
 package org.opensearch.dataprepper.plugins.processor.parse;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventKey;
+import org.opensearch.dataprepper.model.event.EventKeyFactory;
+import org.opensearch.dataprepper.model.event.HandleFailedEventsOption;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.SENSITIVE;
 import org.opensearch.dataprepper.model.record.Record;
+import io.micrometer.core.instrument.Counter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,34 +38,86 @@ import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
 
 public abstract class AbstractParseProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
     private static final Logger LOG = LoggerFactory.getLogger(AbstractParseProcessor.class);
+    private static final String PROCESSING_FAILURES = "processingFailures";
 
-    private final String source;
-    private final String destination;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private final EventKey source;
+    private final EventKey destination;
     private final String pointer;
     private final String parseWhen;
     private final List<String> tagsOnFailure;
     private final boolean overwriteIfDestinationExists;
+    private final boolean deleteSourceRequested;
+
+    private final HandleFailedEventsOption handleFailedEventsOption;
+
+    protected final Counter processingFailuresCounter;
 
     private final ExpressionEvaluator expressionEvaluator;
+    private final EventKeyFactory eventKeyFactory;
+    private final boolean normalizeKeys;
 
-    protected AbstractParseProcessor(PluginMetrics pluginMetrics,
-                                     CommonParseConfig commonParseConfig,
-                                     ExpressionEvaluator expressionEvaluator) {
+    protected AbstractParseProcessor(final PluginMetrics pluginMetrics,
+                                     final CommonParseConfig commonParseConfig,
+                                     final ExpressionEvaluator expressionEvaluator,
+                                     final EventKeyFactory eventKeyFactory) {
         super(pluginMetrics);
 
-        source = commonParseConfig.getSource();
-        destination = commonParseConfig.getDestination();
+        source = eventKeyFactory.createEventKey(commonParseConfig.getSource(), EventKeyFactory.EventAction.GET, EventKeyFactory.EventAction.DELETE);
+        destination = commonParseConfig.getDestination() != null ? eventKeyFactory.createEventKey(commonParseConfig.getDestination(), EventKeyFactory.EventAction.PUT, EventKeyFactory.EventAction.GET) : null;
         pointer = commonParseConfig.getPointer();
         parseWhen = commonParseConfig.getParseWhen();
         tagsOnFailure = commonParseConfig.getTagsOnFailure();
         overwriteIfDestinationExists = commonParseConfig.getOverwriteIfDestinationExists();
+        deleteSourceRequested = commonParseConfig.isDeleteSourceRequested();
+        handleFailedEventsOption = commonParseConfig.getHandleFailedEventsOption();
+        processingFailuresCounter = pluginMetrics.counter(PROCESSING_FAILURES);
+        normalizeKeys = commonParseConfig.getNormalizeKeys();
         this.expressionEvaluator = expressionEvaluator;
+        this.eventKeyFactory = eventKeyFactory;
+
+        if (commonParseConfig.getParseWhen() != null
+                && !expressionEvaluator.isValidExpressionStatement(commonParseConfig.getParseWhen())) {
+            throw new InvalidPluginConfigurationException(
+                    String.format("parse_when value of %s is not a valid expression statement. " +
+                            "See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax.", commonParseConfig.getParseWhen()));
+        }
     }
 
     /**
-     * @return Optional HashMap of the parsed value - empty if the message was invalid (be sure to log the error)
+     * @param message message
+     * @param context context
+     * @return Optional parsed value - empty if the message was invalid (be sure to log the error). The value is a
+     * {@link Map} when the message parses to an object, or another type such as a {@link List} or scalar when the
+     * message parses to a top-level array or scalar value.
      */
-    protected abstract Optional<HashMap<String, Object>> readValue(String message, Event context);
+    protected abstract Optional<Object> readValue(String message, Event context);
+
+    protected Map<String, Object> convertNestedObjectToString(Map<String, Object> map, int curDepth, int targetDepth) {
+        HashMap<String, Object> resultMap = new HashMap<>();
+        try {
+            for (Map.Entry<String, Object> entry: map.entrySet()) {
+                if (entry.getValue() instanceof Map) {
+                    if (curDepth == targetDepth) {
+                        resultMap.put(entry.getKey(), objectMapper.writeValueAsString((Map<String, Object>) entry.getValue()));
+                    } else {
+                        resultMap.put(entry.getKey(), convertNestedObjectToString((Map<String, Object>) entry.getValue(), curDepth + 1, targetDepth));
+                    }
+                } else {
+                    resultMap.put(entry.getKey(), entry.getValue());
+                }
+            }
+        } catch (Exception e) {
+            LOG.atError()
+                        .addMarker(SENSITIVE)
+                        .addMarker(NOISY)
+                        .setMessage("Failed to convert to string while parsing")
+                        .setCause(e)
+                        .log();
+        }
+        return resultMap;
+    }
 
     @Override
     public Collection<Record<Event>> doExecute(final Collection<Record<Event>> records) {
@@ -76,25 +137,60 @@ public abstract class AbstractParseProcessor extends AbstractProcessor<Record<Ev
                     continue;
                 }
 
-                final Optional<HashMap<String, Object>> parsedValueOptional = readValue(message, event);
+                final Optional<Object> parsedValueOptional = readValue(message, event);
                 if (parsedValueOptional.isEmpty()) {
                     event.getMetadata().addTags(tagsOnFailure);
                     continue;
                 }
 
-                Map<String, Object> parsedValue = parsedValueOptional.get();
+                Object parsedValue = parsedValueOptional.get();
 
                 if (doUsePointer) {
                     parsedValue = parseUsingPointer(event, parsedValue, pointer, doWriteToRoot);
                 }
 
+                if (!(parsedValue instanceof Map)) {
+                    if (doWriteToRoot) {
+                        processingFailuresCounter.increment();
+                        if (handleFailedEventsOption.shouldLog()) {
+                            LOG.error(EVENT, "A non-object value was parsed but cannot be written to the root of the Event. " +
+                                    "A destination must be configured to parse a top-level array or scalar value. Event [{}]", event);
+                        }
+                        event.getMetadata().addTags(tagsOnFailure);
+                        continue;
+                    }
+
+                    if (overwriteIfDestinationExists || !event.containsKey(destination)) {
+                        event.put(destination, parsedValue, normalizeKeys);
+                    }
+
+                    if (deleteSourceRequested) {
+                        event.delete(this.source);
+                    }
+
+                    continue;
+                }
+
+                final Map<String, Object> parsedMap = (Map<String, Object>) parsedValue;
+
+                if (doWriteToRoot && deleteSourceRequested) {
+                    event.delete(this.source);
+                }
+
                 if (doWriteToRoot) {
-                    writeToRoot(event, parsedValue);
+                    writeToRoot(event, parsedMap);
                 } else if (overwriteIfDestinationExists || !event.containsKey(destination)) {
-                    event.put(destination, parsedValue);
+                    event.put(destination, parsedMap, normalizeKeys);
+                }
+
+                if (deleteSourceRequested && !doWriteToRoot) {
+                    event.delete(this.source);
                 }
             } catch (Exception e) {
-                LOG.error(EVENT, "An exception occurred while using the {} processor on Event [{}]", getProcessorName(), record.getData(), e);
+                processingFailuresCounter.increment();
+                if (handleFailedEventsOption.shouldLog()) {
+                    LOG.error(EVENT, "An exception occurred while using the {} processor on Event [{}]", getProcessorName(), record.getData(), e);
+                }
             }
         }
         return records;
@@ -119,10 +215,11 @@ public abstract class AbstractParseProcessor extends AbstractProcessor<Record<Ev
         return this.getClass().getAnnotation(DataPrepperPlugin.class).name();
     }
 
-    private Map<String, Object> parseUsingPointer(final Event event, final Map<String, Object> parsedJson, final String pointer,
-                                                  final boolean doWriteToRoot) {
+    private Object parseUsingPointer(final Event event, final Object parsedJson, final String pointer,
+                                     final boolean doWriteToRoot) {
         final Event temporaryEvent = JacksonEvent.builder().withEventType("event").build();
-        temporaryEvent.put(source, parsedJson);
+        final EventKey temporaryPutKey = eventKeyFactory.createEventKey(source.getKey(), EventKeyFactory.EventAction.PUT);
+        temporaryEvent.put(temporaryPutKey, parsedJson, normalizeKeys);
 
         final String trimmedPointer = trimPointer(pointer);
         final String actualPointer = source + "/" + trimmedPointer;
@@ -159,20 +256,22 @@ public abstract class AbstractParseProcessor extends AbstractProcessor<Record<Ev
 
     /**
      * Trim the pointer and change each front slash / to be a dot (.) to process
+     * @param pointer input string
+     * @return returns replaced string
      */
     private String normalizePointerStructure(final String pointer) {
         return pointer.replace('/','.');
     }
 
-    private String trimPointer(String pointer) {
+    private String trimPointer(final String pointer) {
         final String trimmedLeadingSlash = pointer.startsWith("/") ? pointer.substring(1) : pointer;
         return trimmedLeadingSlash.endsWith("/") ? trimmedLeadingSlash.substring(0, trimmedLeadingSlash.length() - 1) : trimmedLeadingSlash;
     }
 
     private void writeToRoot(final Event event, final Map<String, Object> parsedJson) {
-        for (Map.Entry<String, Object> entry : parsedJson.entrySet()) {
+        for (final Map.Entry<String, Object> entry : parsedJson.entrySet()) {
             if (overwriteIfDestinationExists || !event.containsKey(entry.getKey())) {
-                event.put(entry.getKey(), entry.getValue());
+                event.put(eventKeyFactory.createEventKey(entry.getKey(), EventKeyFactory.EventAction.PUT), entry.getValue(), normalizeKeys);
             }
         }
     }

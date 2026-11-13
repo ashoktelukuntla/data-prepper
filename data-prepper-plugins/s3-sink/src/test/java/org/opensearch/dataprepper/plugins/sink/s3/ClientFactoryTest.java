@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.sink.s3;
@@ -17,12 +21,16 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.plugins.sink.s3.configuration.AwsAuthenticationOptions;
+import org.opensearch.dataprepper.plugins.sink.s3.configuration.ClientOptions;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.S3ClientBuilder;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
+import software.amazon.awssdk.services.s3.S3AsyncClientBuilder;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
@@ -30,6 +38,7 @@ import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
@@ -44,6 +53,8 @@ class ClientFactoryTest {
 
     @Mock
     private AwsAuthenticationOptions awsAuthenticationOptions;
+    @Mock
+    private ClientOptions clientOptions;
 
     @BeforeEach
     void setUp() {
@@ -51,16 +62,16 @@ class ClientFactoryTest {
     }
 
     @Test
-    void createS3Client_with_real_S3Client() {
+    void createS3AsyncClient_with_real_S3AsyncClient() {
         when(awsAuthenticationOptions.getAwsRegion()).thenReturn(Region.US_EAST_1);
-        final S3Client s3Client = ClientFactory.createS3Client(s3SinkConfig, awsCredentialsSupplier);
+        final S3AsyncClient s3Client = ClientFactory.createS3AsyncClient(s3SinkConfig, awsCredentialsSupplier);
 
         assertThat(s3Client, notNullValue());
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"us-east-1", "us-west-2", "eu-central-1"})
-    void createS3Client_provides_correct_inputs(final String regionString) {
+    void createS3AsyncClient_with_client_options_returns_expected_client(final String regionString) {
         final Region region = Region.of(regionString);
         final String stsRoleArn = UUID.randomUUID().toString();
         final String externalId = UUID.randomUUID().toString();
@@ -71,20 +82,38 @@ class ClientFactoryTest {
         when(awsAuthenticationOptions.getAwsStsHeaderOverrides()).thenReturn(stsHeaderOverrides);
 
         final AwsCredentialsProvider expectedCredentialsProvider = mock(AwsCredentialsProvider.class);
-        when(awsCredentialsSupplier.getProvider(any())).thenReturn(expectedCredentialsProvider);
+        when(awsCredentialsSupplier.getProvider(any(AwsCredentialsOptions.class))).thenReturn(expectedCredentialsProvider);
 
-        final S3ClientBuilder s3ClientBuilder = mock(S3ClientBuilder.class);
-        when(s3ClientBuilder.region(region)).thenReturn(s3ClientBuilder);
-        when(s3ClientBuilder.credentialsProvider(any())).thenReturn(s3ClientBuilder);
-        when(s3ClientBuilder.overrideConfiguration(any(ClientOverrideConfiguration.class))).thenReturn(s3ClientBuilder);
-        try(final MockedStatic<S3Client> s3ClientMockedStatic = mockStatic(S3Client.class)) {
-            s3ClientMockedStatic.when(S3Client::builder)
-                    .thenReturn(s3ClientBuilder);
-            ClientFactory.createS3Client(s3SinkConfig, awsCredentialsSupplier);
+        final S3AsyncClientBuilder s3AsyncClientBuilder = mock(S3AsyncClientBuilder.class);
+        when(s3AsyncClientBuilder.region(region)).thenReturn(s3AsyncClientBuilder);
+        when(s3AsyncClientBuilder.crossRegionAccessEnabled(true)).thenReturn(s3AsyncClientBuilder);
+        when(s3AsyncClientBuilder.credentialsProvider(any())).thenReturn(s3AsyncClientBuilder);
+        when(s3AsyncClientBuilder.overrideConfiguration(any(ClientOverrideConfiguration.class))).thenReturn(s3AsyncClientBuilder);
+
+        when(s3SinkConfig.getClientOptions()).thenReturn(clientOptions);
+
+        final int maxConnections = 100;
+        final Duration acquireTimeout = Duration.ofSeconds(30);
+        when(clientOptions.getMaxConnections()).thenReturn(maxConnections);
+        when(clientOptions.getAcquireTimeout()).thenReturn(acquireTimeout);
+
+        final NettyNioAsyncHttpClient.Builder httpClientBuilder = mock(NettyNioAsyncHttpClient.Builder.class);
+        final SdkAsyncHttpClient httpClient = mock(SdkAsyncHttpClient.class);
+        when(httpClientBuilder.connectionAcquisitionTimeout(any(Duration.class))).thenReturn(httpClientBuilder);
+        when(httpClientBuilder.maxConcurrency(anyInt())).thenReturn(httpClientBuilder);
+        when(httpClientBuilder.build()).thenReturn(httpClient);
+
+        try(final MockedStatic<S3AsyncClient> s3AsyncClientMockedStatic = mockStatic(S3AsyncClient.class);
+            final MockedStatic<NettyNioAsyncHttpClient> httpClientMockedStatic = mockStatic(NettyNioAsyncHttpClient.class)) {
+            s3AsyncClientMockedStatic.when(S3AsyncClient::builder)
+                    .thenReturn(s3AsyncClientBuilder);
+            httpClientMockedStatic.when(NettyNioAsyncHttpClient::builder)
+                    .thenReturn(httpClientBuilder);
+            ClientFactory.createS3AsyncClient(s3SinkConfig, awsCredentialsSupplier);
         }
 
         final ArgumentCaptor<AwsCredentialsProvider> credentialsProviderArgumentCaptor = ArgumentCaptor.forClass(AwsCredentialsProvider.class);
-        verify(s3ClientBuilder).credentialsProvider(credentialsProviderArgumentCaptor.capture());
+        verify(s3AsyncClientBuilder).credentialsProvider(credentialsProviderArgumentCaptor.capture());
 
         final AwsCredentialsProvider actualCredentialsProvider = credentialsProviderArgumentCaptor.getValue();
 
@@ -98,5 +127,9 @@ class ClientFactoryTest {
         assertThat(actualCredentialsOptions.getStsRoleArn(), equalTo(stsRoleArn));
         assertThat(actualCredentialsOptions.getStsExternalId(), equalTo(externalId));
         assertThat(actualCredentialsOptions.getStsHeaderOverrides(), equalTo(stsHeaderOverrides));
+
+        verify(httpClientBuilder).connectionAcquisitionTimeout(acquireTimeout);
+        verify(httpClientBuilder).maxConcurrency(maxConnections);
+        verify(s3AsyncClientBuilder).httpClient(httpClient);
     }
 }

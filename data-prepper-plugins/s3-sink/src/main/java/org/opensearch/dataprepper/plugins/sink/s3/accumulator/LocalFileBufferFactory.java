@@ -1,17 +1,25 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.sink.s3.accumulator;
 
+import org.opensearch.dataprepper.plugins.sink.s3.configuration.ServerSideEncryptionConfig;
+import org.opensearch.dataprepper.plugins.sink.s3.ownership.BucketOwnerProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Map;
 import java.util.function.Supplier;
+import java.util.function.Function;
 
 public class LocalFileBufferFactory implements BufferFactory {
 
@@ -20,12 +28,18 @@ public class LocalFileBufferFactory implements BufferFactory {
     public static final String SUFFIX = ".log";
 
     @Override
-    public Buffer getBuffer(S3Client s3Client, Supplier<String> bucketSupplier, Supplier<String> keySupplier) {
+    public Buffer getBuffer(final S3AsyncClient s3Client,
+                            final Supplier<String> bucketSupplier,
+                            final Supplier<String> keySupplier,
+                            final String defaultBucket,
+                            final Function<Integer, Map<String, String>> metadataSupplier,
+                            final BucketOwnerProvider bucketOwnerProvider,
+                            final ServerSideEncryptionConfig serverSideEncryptionConfig) {
         File tempFile = null;
         Buffer localfileBuffer = null;
         try {
             tempFile = File.createTempFile(PREFIX, SUFFIX);
-            localfileBuffer = new LocalFileBuffer(tempFile, s3Client, bucketSupplier, keySupplier);
+            localfileBuffer = new LocalFileBuffer(tempFile, s3Client, bucketSupplier, keySupplier, defaultBucket, bucketOwnerProvider, serverSideEncryptionConfig);
         } catch (IOException e) {
             LOG.error("Unable to create temp file ", e);
         }

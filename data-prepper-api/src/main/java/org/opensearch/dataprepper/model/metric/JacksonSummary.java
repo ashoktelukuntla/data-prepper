@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.metric;
 
 import org.opensearch.dataprepper.model.event.EventType;
+import org.opensearch.dataprepper.model.validation.ParameterValidator;
 
 import java.time.Instant;
 import java.util.Arrays;
@@ -34,6 +39,8 @@ public class JacksonSummary extends JacksonMetric implements Summary {
 
     protected JacksonSummary(JacksonSummary.Builder builder, boolean flattenAttributes) {
         super(builder, flattenAttributes);
+        checkAndSetDefaultValues();
+        new ParameterValidator().validate(REQUIRED_KEYS, REQUIRED_NON_EMPTY_KEYS, REQUIRED_NON_NULL_KEYS, (HashMap<String, Object>)toMap());
 
         checkArgument(this.getMetadata().getEventType().equals(EventType.METRIC.toString()), "eventType must be of type Metric");
     }
@@ -81,7 +88,7 @@ public class JacksonSummary extends JacksonMetric implements Summary {
          * @since 1.4
          */
         public Builder withQuantiles(final List<Quantile> quantiles) {
-            data.put(QUANTILES_KEY, quantiles);
+            put(QUANTILES_KEY, quantiles);
             return this;
         }
 
@@ -92,7 +99,7 @@ public class JacksonSummary extends JacksonMetric implements Summary {
          * @since 1.4
          */
         public Builder withQuantilesValueCount(int quantileValuesCount) {
-            data.put(QUANTILE_VALUES_COUNT_KEY, quantileValuesCount);
+            put(QUANTILE_VALUES_COUNT_KEY, quantileValuesCount);
             return this;
         }
 
@@ -103,7 +110,7 @@ public class JacksonSummary extends JacksonMetric implements Summary {
          * @since 1.4
          */
         public Builder withSum(double sum) {
-            data.put(SUM_KEY, sum);
+            put(SUM_KEY, sum);
             return this;
         }
 
@@ -126,7 +133,7 @@ public class JacksonSummary extends JacksonMetric implements Summary {
          * @since 1.4
          */
         public Builder withCount(Long count) {
-            data.put(COUNT_KEY, count);
+            put(COUNT_KEY, count);
             return this;
         }
 
@@ -146,18 +153,11 @@ public class JacksonSummary extends JacksonMetric implements Summary {
          * @since 2.1
          */
         public JacksonSummary build(boolean flattenAttributes) {
-            this.withData(data);
-            this.withEventKind(KIND.SUMMARY.toString());
-            this.withEventType(EventType.METRIC.toString());
+            populateEvent(KIND.SUMMARY.toString());
 
-            new ParameterValidator().validate(REQUIRED_KEYS, REQUIRED_NON_EMPTY_KEYS, REQUIRED_NON_NULL_KEYS, data);
-            checkAndSetDefaultValues();
             return new JacksonSummary(this, flattenAttributes);
         }
 
-        private void checkAndSetDefaultValues() {
-            data.computeIfAbsent(ATTRIBUTES_KEY, k -> new HashMap<>());
-        }
 
     }
 }

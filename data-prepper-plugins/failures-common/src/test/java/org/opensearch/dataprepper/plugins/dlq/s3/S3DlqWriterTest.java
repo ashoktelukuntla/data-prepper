@@ -33,6 +33,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
@@ -48,6 +49,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.opensearch.dataprepper.plugins.dlq.s3.S3DlqWriter.S3_DLQ_RECORDS_FAILED;
@@ -114,7 +116,7 @@ public class S3DlqWriterTest {
             .sdkHttpResponse(mockHttpResponse)
             .build();
 
-        final int numberOfObjects = new Random().nextInt(20);
+        final int numberOfObjects = new Random().nextInt(18) + 2;
         dlqObjects = generateDlqData(numberOfObjects);
 
         objectMapper = new ObjectMapper();
@@ -138,6 +140,7 @@ public class S3DlqWriterTest {
         when(config.getKeyPathPrefix()).thenReturn(keyPathPrefix);
         when(config.getS3Client()).thenReturn(s3Client);
         when(config.getBucket()).thenReturn(bucket);
+        when(config.getBucketOwner()).thenReturn(UUID.randomUUID().toString());
         when(dlqS3RequestTimer.recordCallable(any(Callable.class))).thenAnswer(a -> {
             try {
                 return a.getArgument(0, Callable.class).call();
@@ -159,8 +162,66 @@ public class S3DlqWriterTest {
         assertThat(putObjectRequest.bucket(), is(equalTo(bucket)));
         assertThat(putObjectRequest.key(), startsWith(String.format("%s-%s-%s", expectedKeyPrefix, pipelineName, pluginId)));
         assertThat(putObjectRequest.key(), endsWith(".json"));
+        assertThat(putObjectRequest.expectedBucketOwner(), equalTo(config.getBucketOwner()));
         verify(dlqS3RequestSuccessCounter).increment();
         verify(dlqS3RecordsSuccessCounter).increment(dlqObjects.size());
+    }
+
+    @Test
+    public void testWriteWithNdjsonCodec() throws Exception {
+        when(config.getKeyPathPrefix()).thenReturn(null);
+        when(config.getS3Client()).thenReturn(s3Client);
+        when(config.getBucket()).thenReturn(bucket);
+        when(config.getBucketOwner()).thenReturn(UUID.randomUUID().toString());
+        when(config.getCodec()).thenReturn(DlqCodec.NDJSON);
+        when(dlqS3RequestTimer.recordCallable(any(Callable.class))).thenAnswer(a -> {
+            try {
+                return a.getArgument(0, Callable.class).call();
+            } catch (final Exception ex) {
+                throw ex;
+            }
+        });
+        s3DlqWriter = new S3DlqWriter(config, objectMapper, pluginMetrics);
+        when(s3Client.putObject(any(PutObjectRequest.class), any(RequestBody.class))).thenReturn(putObjectResponse);
+        when(mockHttpResponse.isSuccessful()).thenReturn(true);
+
+        s3DlqWriter.write(dlqObjects, pipelineName, pluginId);
+
+        final ArgumentCaptor<PutObjectRequest> putObjectRequestArgumentCaptor = ArgumentCaptor.forClass(PutObjectRequest.class);
+        final ArgumentCaptor<RequestBody> requestBodyArgumentCaptor = ArgumentCaptor.forClass(RequestBody.class);
+        verify(s3Client).putObject(putObjectRequestArgumentCaptor.capture(), requestBodyArgumentCaptor.capture());
+        final PutObjectRequest putObjectRequest = putObjectRequestArgumentCaptor.getValue();
+
+        assertThat(putObjectRequest.key(), endsWith(".ndjson"));
+
+        final String content = new String(
+            requestBodyArgumentCaptor.getValue().contentStreamProvider().newStream().readAllBytes(),
+            java.nio.charset.StandardCharsets.UTF_8);
+        final String[] lines = content.split("\n");
+        assertThat(lines.length, is(equalTo(dlqObjects.size())));
+        for (final String line : lines) {
+            assertThat(line.trim().startsWith("{"), is(true));
+        }
+        verify(dlqS3RequestSuccessCounter).increment();
+        verify(dlqS3RecordsSuccessCounter).increment(dlqObjects.size());
+    }
+
+    @Test
+    void write_with_empty_list_does_not_write_to_S3() throws Exception {
+        when(config.getKeyPathPrefix()).thenReturn(keyPathPrefix);
+        when(config.getS3Client()).thenReturn(s3Client);
+        when(config.getBucket()).thenReturn(bucket);
+        s3DlqWriter = new S3DlqWriter(config, objectMapper, pluginMetrics);
+
+        dlqObjects = Collections.emptyList();
+
+        s3DlqWriter.write(dlqObjects, pipelineName, pluginId);
+
+        verifyNoInteractions(s3Client);
+        verifyNoInteractions(dlqS3RequestSuccessCounter);
+        verifyNoInteractions(dlqS3RecordsSuccessCounter);
+        verifyNoInteractions(dlqS3RequestFailedCounter);
+        verifyNoInteractions(dlqS3RecordsFailedCounter);
     }
 
     private static Stream<Arguments> validKeyPathPrefixes() {

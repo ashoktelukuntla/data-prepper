@@ -12,6 +12,7 @@ import jakarta.validation.constraints.NotNull;
 import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.plugins.source.opensearch.configuration.AwsAuthenticationConfiguration;
 import org.opensearch.dataprepper.plugins.source.opensearch.configuration.ConnectionConfiguration;
+import org.opensearch.dataprepper.plugins.source.opensearch.configuration.DiscoveryMode;
 import org.opensearch.dataprepper.plugins.source.opensearch.configuration.IndexParametersConfiguration;
 import org.opensearch.dataprepper.plugins.source.opensearch.configuration.SchedulingParameterConfiguration;
 import org.opensearch.dataprepper.plugins.source.opensearch.configuration.SearchConfiguration;
@@ -26,11 +27,16 @@ public class OpenSearchSourceConfiguration {
     @JsonProperty("hosts")
     private List<String> hosts;
 
+    @Deprecated
     @JsonProperty("username")
     private String username;
 
+    @Deprecated
     @JsonProperty("password")
     private String password;
+
+    @JsonProperty("authentication")
+    private AuthConfig authConfig;
 
     @JsonProperty("disable_authentication")
     private Boolean disableAuthentication = false;
@@ -98,13 +104,39 @@ public class OpenSearchSourceConfiguration {
         return schedulingParameterConfiguration;
     }
 
+    @JsonIgnore
+    public boolean isSingleScanMode() {
+        return Objects.nonNull(schedulingParameterConfiguration)
+                && schedulingParameterConfiguration.getDiscoveryMode() == DiscoveryMode.SINGLE_SCAN;
+    }
+
     public SearchConfiguration getSearchConfiguration() {
         return searchConfiguration;
     }
 
     public DistributionVersion getDistributionVersion() { return distributionVersionValue; }
 
+    public AuthConfig getAuthConfig() {
+        return authConfig;
+    }
+
+    void validateAuthConfigConflictWithDeprecatedUsernameAndPassword() {
+        if (Objects.nonNull(authConfig) && (Objects.nonNull(username) || Objects.nonNull(password))) {
+            throw new InvalidPluginConfigurationException(
+                    "Deprecated username and password cannot be set when authentication is configured.");
+        }
+    }
+
     void validateAwsConfigWithUsernameAndPassword() {
+        final String username;
+        final String password;
+        if (Objects.nonNull(authConfig)) {
+            username = authConfig.getUsername();
+            password = authConfig.getPassword();
+        } else {
+            username = this.username;
+            password = this.password;
+        }
 
         if (((Objects.nonNull(awsAuthenticationOptions) && ((Objects.nonNull(username) || Objects.nonNull(password)) || disableAuthentication)) ||
                 (Objects.nonNull(username) || Objects.nonNull(password)) && disableAuthentication) ||

@@ -7,6 +7,8 @@ package org.opensearch.dataprepper.plugins.source.opensearch.worker.client;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.transport.ElasticsearchTransport;
+import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.http.Header;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequestInterceptor;
@@ -29,6 +31,9 @@ import org.opensearch.client.transport.rest_client.RestClientTransport;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.aws.api.AwsRequestSigningApache4Interceptor;
+import org.opensearch.dataprepper.model.codec.JsonFactories;
+import org.opensearch.dataprepper.plugins.source.opensearch.AuthConfig;
+import org.opensearch.dataprepper.plugins.certificate.validation.PemObjectValidator;
 import org.opensearch.dataprepper.plugins.source.opensearch.OpenSearchSourceConfiguration;
 import org.opensearch.dataprepper.plugins.source.opensearch.configuration.ConnectionConfiguration;
 import org.opensearch.dataprepper.plugins.truststore.TrustStoreProvider;
@@ -80,7 +85,7 @@ public class OpenSearchClientFactory {
     }
 
     private OpenSearchTransport createOpenSearchTransport(final RestClient restClient) {
-        return new RestClientTransport(restClient, new JacksonJsonpMapper());
+        return new RestClientTransport(restClient, createJacksonJsonpMapper());
     }
 
     private OpenSearchTransport createOpenSearchTransportForAws(final OpenSearchSourceConfiguration openSearchSourceConfiguration) {
@@ -100,9 +105,33 @@ public class OpenSearchClientFactory {
                 openSearchSourceConfiguration.getAwsAuthenticationOptions().getAwsRegion(),
                 AwsSdk2TransportOptions.builder()
                         .setCredentials(awsCredentialsProvider)
-                        .setMapper(new JacksonJsonpMapper())
+                        .setMapper(createJacksonJsonpMapper())
                         .build());
 
+    }
+
+    static JacksonJsonpMapper createJacksonJsonpMapper() {
+        final JacksonJsonpMapper jacksonJsonpMapper = new JacksonJsonpMapper();
+        raiseMaxStringLength(jacksonJsonpMapper.objectMapper());
+        return jacksonJsonpMapper;
+    }
+
+    static co.elastic.clients.json.jackson.JacksonJsonpMapper createElasticsearchJacksonJsonpMapper() {
+        final co.elastic.clients.json.jackson.JacksonJsonpMapper jacksonJsonpMapper = new co.elastic.clients.json.jackson.JacksonJsonpMapper();
+        raiseMaxStringLength(jacksonJsonpMapper.objectMapper());
+        return jacksonJsonpMapper;
+    }
+
+    /**
+     * Raises the maximum JSON string length to {@link JsonFactories#MAX_JSON_STRING_LENGTH} so that
+     * documents which can be represented as an Event can also be read from the source cluster.
+     * The JacksonJsonpMapper JSON provider is created from the ObjectMapper's JsonFactory,
+     * so updating the factory's constraints applies to response parsing as well.
+     */
+    private static void raiseMaxStringLength(final ObjectMapper objectMapper) {
+        objectMapper.getFactory().setStreamReadConstraints(StreamReadConstraints.builder()
+                .maxStringLength(JsonFactories.MAX_JSON_STRING_LENGTH)
+                .build());
     }
 
     public SdkAsyncHttpClient createSdkAsyncHttpClient(final OpenSearchSourceConfiguration openSearchSourceConfiguration) {
@@ -137,7 +166,7 @@ public class OpenSearchClientFactory {
     }
 
     private ElasticsearchTransport createElasticSearchTransport(final org.elasticsearch.client.RestClient restClient) {
-        return new co.elastic.clients.transport.rest_client.RestClientTransport(restClient, new co.elastic.clients.json.jackson.JacksonJsonpMapper());
+        return new co.elastic.clients.transport.rest_client.RestClientTransport(restClient, createElasticsearchJacksonJsonpMapper());
     }
 
     private org.elasticsearch.client.RestClient createElasticSearchRestClient(final OpenSearchSourceConfiguration openSearchSourceConfiguration) {
@@ -238,8 +267,18 @@ public class OpenSearchClientFactory {
         LOG.info("Using username and password for auth for the OpenSearch source");
 
         final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
+        final String username;
+        final String password;
+        final AuthConfig authConfig = openSearchSourceConfiguration.getAuthConfig();
+        if (authConfig != null) {
+            username = openSearchSourceConfiguration.getAuthConfig().getUsername();
+            password = openSearchSourceConfiguration.getAuthConfig().getPassword();
+        } else {
+            username = openSearchSourceConfiguration.getUsername();
+            password = openSearchSourceConfiguration.getPassword();
+        }
         credentialsProvider.setCredentials(AuthScope.ANY,
-                new UsernamePasswordCredentials(openSearchSourceConfiguration.getUsername(), openSearchSourceConfiguration.getPassword()));
+                new UsernamePasswordCredentials(username, password));
         httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
     }
 
@@ -259,7 +298,9 @@ public class OpenSearchClientFactory {
 
     private void attachSSLContext(final NettyNioAsyncHttpClient.Builder asyncClientBuilder, final OpenSearchSourceConfiguration openSearchSourceConfiguration) {
         TrustManager[] trustManagers = createTrustManagers(openSearchSourceConfiguration.getConnectionConfiguration());
-        asyncClientBuilder.tlsTrustManagersProvider(() -> trustManagers);
+        if (trustManagers.length > 0) {
+            asyncClientBuilder.tlsTrustManagersProvider(() -> trustManagers);
+        }
     }
 
     private void attachSSLContext(final HttpAsyncClientBuilder httpClientBuilder, final OpenSearchSourceConfiguration openSearchSourceConfiguration) {
@@ -275,23 +316,37 @@ public class OpenSearchClientFactory {
 
     private TrustManager[] createTrustManagers(final ConnectionConfiguration connectionConfiguration) {
         final Path certPath = connectionConfiguration.getCertPath();
-        if (Objects.nonNull(certPath)) {
+        final String certificate = connectionConfiguration.getCertificate();
+        if (certPath != null) {
             return TrustStoreProvider.createTrustManager(certPath);
-        } else if (Objects.nonNull(connectionConfiguration.getCertificateContent())) {
-            return TrustStoreProvider.createTrustManager(connectionConfiguration.getCertificateContent());
-        } else {
+        } else if (certificate != null) {
+            if (PemObjectValidator.isPemObject(certificate)) {
+                return TrustStoreProvider.createTrustManager(certificate);
+            } else {
+                return TrustStoreProvider.createTrustManager(Path.of(certificate));}
+        } else if (connectionConfiguration.isInsecure()) {
             return TrustStoreProvider.createTrustAllManager();
+
+        } else {
+            return new TrustManager[0];
         }
     }
 
     private SSLContext getCAStrategy(final ConnectionConfiguration connectionConfiguration) {
         final Path certPath = connectionConfiguration.getCertPath();
-        if (Objects.nonNull(certPath)) {
+        final String certificate = connectionConfiguration.getCertificate();
+        if (certPath != null) {
             return TrustStoreProvider.createSSLContext(certPath);
-        } else if (Objects.nonNull(connectionConfiguration.getCertificateContent())) {
-            return TrustStoreProvider.createSSLContext(connectionConfiguration.getCertificateContent());
+        } else if (certificate != null) {
+            if (PemObjectValidator.isPemObject(certificate)) {
+                return TrustStoreProvider.createSSLContext(certificate);
+            } else {
+                return TrustStoreProvider.createSSLContext(Path.of(connectionConfiguration.getCertificate()));
+            }
+        } else if (connectionConfiguration.isInsecure()) {
+                return TrustStoreProvider.createSSLContextWithTrustAllStrategy();
         } else {
-            return TrustStoreProvider.createSSLContextWithTrustAllStrategy();
+            return null;
         }
     }
 }

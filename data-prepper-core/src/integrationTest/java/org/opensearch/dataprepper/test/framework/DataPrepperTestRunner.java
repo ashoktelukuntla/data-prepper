@@ -1,13 +1,19 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.test.framework;
 
 import org.opensearch.dataprepper.AbstractContextManager;
-import org.opensearch.dataprepper.DataPrepper;
-import org.opensearch.dataprepper.parser.config.FileStructurePathProvider;
+import org.opensearch.dataprepper.core.DataPrepper;
+import org.opensearch.dataprepper.core.parser.config.FileStructurePathProvider;
+import org.opensearch.dataprepper.model.plugin.PluginFactory;
+import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.plugins.InMemorySinkAccessor;
 import org.opensearch.dataprepper.plugins.InMemorySourceAccessor;
 import org.slf4j.Logger;
@@ -15,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import javax.annotation.Nullable;
+import java.util.List;
 
 /**
  * Provides the ability to run a Data Prepper test instance. Each of these will run
@@ -25,7 +32,7 @@ import javax.annotation.Nullable;
  */
 public class DataPrepperTestRunner {
     private static final Logger LOG = LoggerFactory.getLogger(DataPrepperTestRunner.class);
-    private static final String BASE_PATH = "src/integrationTest/resources/org/opensearch/dataprepper";
+    public static final String BASE_PATH = "src/integrationTest/resources/org/opensearch/dataprepper";
     private final String dataPrepperConfigFile;
     private final String pipelinesDirectoryOrFile;
     private final InMemorySourceAccessor inMemorySourceAccessor;
@@ -60,12 +67,27 @@ public class DataPrepperTestRunner {
                 .execute();
     }
 
+    public PluginFactory getPluginFactory() {
+        return contextManager.getDataPrepperBean()
+                .getPluginFactory();
+    }
+
+    /**
+     * Dynamically Swap processors in a running pipeline
+     */
+    public void swapProcessors(String pipelineName, List<Processor> newProcessors) {
+        contextManager.getDataPrepperBean()
+                .getPipeline(pipelineName)
+                .swapProcessors(newProcessors);
+    }
+
     /**
      * Stops the Data Prepper test instance.
      */
     public void stop() {
         final DataPrepper dataPrepper = contextManager.getDataPrepperBean();
         dataPrepper.shutdown();
+        contextManager.shutdown();
     }
 
     /**

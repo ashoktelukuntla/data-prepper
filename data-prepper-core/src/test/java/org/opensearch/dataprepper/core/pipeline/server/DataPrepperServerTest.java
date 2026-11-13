@@ -1,0 +1,196 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+package org.opensearch.dataprepper.core.pipeline.server;
+
+import com.sun.net.httpserver.Authenticator;
+import com.sun.net.httpserver.HttpContext;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.plugins.encryption.EncryptionHttpHandler;
+
+import java.net.InetSocketAddress;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+
+
+@ExtendWith(MockitoExtension.class)
+public class DataPrepperServerTest {
+    @Mock
+    private HttpServer server;
+
+    @Mock
+    private HttpServerProvider httpServerProvider;
+
+    @Mock
+    private ListPipelinesHandler listPipelinesHandler;
+
+    @Mock
+    private ShutdownHandler shutdownHandler;
+
+    @Mock
+    private GetPipelinesHandler getPipelinesHandler;
+
+    @Mock
+    private ReadinessHandler readinessHandler;
+
+    @Mock
+    private EncryptionHttpHandler encryptionHttpHandler;
+
+    @Mock
+    private PrometheusMeterRegistry prometheusMeterRegistry;
+
+    @Mock
+    private HttpContext context;
+
+    @Mock
+    private InetSocketAddress socketAddress;
+
+    @Mock
+    private Authenticator authenticator;
+
+    @AfterEach
+    public void tearDown() {
+        verifyNoMoreInteractions(server, httpServerProvider, listPipelinesHandler, shutdownHandler,
+                readinessHandler, prometheusMeterRegistry, authenticator, context, socketAddress);
+    }
+
+    @Test
+    public void testDataPrepperServerConstructor() {
+        final DataPrepperServer dataPrepperServer = createObjectUnderTest(prometheusMeterRegistry, authenticator, null);
+        assertThat(dataPrepperServer, is(notNullValue()));
+    }
+
+    @Test
+    public void testGivenValidServerWhenStartThenShouldCallServerStart() {
+        mockServerStart();
+
+        final DataPrepperServer dataPrepperServer = createObjectUnderTest(prometheusMeterRegistry, authenticator, null);
+        dataPrepperServer.start();
+
+        verifyServerStart();
+        verify(server).createContext(eq("/metrics/prometheus"), any(PrometheusMetricsHandler.class));
+        verify(server).createContext(eq("/metrics/sys"), any(PrometheusMetricsHandler.class));
+        verify(context, times(6)).setAuthenticator(eq(authenticator));
+    }
+
+    @Test
+    public void testServerStartWithEncryptionHttpHandler() {
+        mockServerStart();
+
+        final DataPrepperServer dataPrepperServer = createObjectUnderTest(prometheusMeterRegistry, authenticator, encryptionHttpHandler);
+        dataPrepperServer.start();
+
+        verifyServerStart();
+        verify(server).createContext(eq("/metrics/prometheus"), any(PrometheusMetricsHandler.class));
+        verify(server).createContext(eq("/metrics/sys"), any(PrometheusMetricsHandler.class));
+        verify(server).createContext(eq("/encryption/rotate"), any(EncryptionHttpHandler.class));
+        verify(context, times(7)).setAuthenticator(eq(authenticator));
+    }
+
+    @Test
+    public void testGivenValidServerWhenStartThenShouldCallServerStart_NullPrometheus() {
+        mockServerStart();
+
+        final DataPrepperServer dataPrepperServer = createObjectUnderTest(null, authenticator, null);
+        dataPrepperServer.start();
+
+        verifyServerStart();
+        verify(context, times(4)).setAuthenticator(eq(authenticator));
+    }
+
+    @Test
+    public void testGivenValidServerWhenStartThenShouldCallServerStart_NullAuthenticator() {
+        mockServerStart();
+
+        final DataPrepperServer dataPrepperServer = createObjectUnderTest(prometheusMeterRegistry, null, null);
+        dataPrepperServer.start();
+
+        verifyServerStart();
+        verify(server).createContext(eq("/metrics/prometheus"), any(PrometheusMetricsHandler.class));
+        verify(server).createContext(eq("/metrics/sys"), any(PrometheusMetricsHandler.class));
+    }
+
+    @Test
+    public void testGivenValidServerWhenStartThenShouldCallServerStart_NullPrometheusAndAuthenticator() {
+        mockServerStart();
+
+        final DataPrepperServer dataPrepperServer = createObjectUnderTest(null, null, null);
+        dataPrepperServer.start();
+
+        verifyServerStart();
+
+    }
+
+    @Test
+    public void testGivenValidServerWhenStopThenShouldCallServerStopWithNoDelay() {
+        mockServerStart();
+
+        final DataPrepperServer dataPrepperServer = createObjectUnderTest(null, null, null);
+        dataPrepperServer.start();
+        dataPrepperServer.stop();
+
+        verifyServerStart();
+        verify(server).stop(eq(0));
+    }
+
+    private void mockServerStart() {
+        when(httpServerProvider.get())
+                .thenReturn(server);
+
+        when(server.getAddress())
+                .thenReturn(socketAddress);
+        when(server.createContext(any(String.class), any(HttpHandler.class)))
+                .thenReturn(context);
+    }
+
+    private void verifyServerStart() {
+        verify(httpServerProvider).get();
+        verify(server).createContext("/list", listPipelinesHandler);
+        verify(server).createContext(eq("/shutdown"), eq(shutdownHandler));
+        verify(server).createContext(eq("/pipelines"), eq(getPipelinesHandler));
+        verify(server).createContext(eq("/ready"), eq(readinessHandler));
+        final ArgumentCaptor<ExecutorService> executorServiceArgumentCaptor = ArgumentCaptor.forClass(ExecutorService.class);
+        verify(server).setExecutor(executorServiceArgumentCaptor.capture());
+        final ExecutorService actualExecutorService = executorServiceArgumentCaptor.getValue();
+        assertThat(actualExecutorService, instanceOf(ThreadPoolExecutor.class));
+        final ThreadPoolExecutor threadPoolExecutor = (ThreadPoolExecutor) actualExecutorService;
+        assertThat(threadPoolExecutor.getMaximumPoolSize(), greaterThanOrEqualTo(3));
+
+        verify(server).start();
+        verify(server).getAddress();
+        verify(socketAddress).getPort();
+    }
+
+    private DataPrepperServer createObjectUnderTest(final PrometheusMeterRegistry prometheusMeterRegistry,
+                                                    final Authenticator authenticator,
+                                                    final EncryptionHttpHandler encryptionHttpHandler) {
+        return new DataPrepperServer(
+                httpServerProvider, listPipelinesHandler, shutdownHandler, getPipelinesHandler, readinessHandler, encryptionHttpHandler, prometheusMeterRegistry, authenticator);
+    }
+}

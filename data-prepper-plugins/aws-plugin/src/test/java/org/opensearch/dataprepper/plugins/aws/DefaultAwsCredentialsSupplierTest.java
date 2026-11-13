@@ -1,18 +1,28 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.aws;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
 
+import java.util.List;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -62,4 +72,58 @@ class DefaultAwsCredentialsSupplierTest {
         when(credentialsProviderFactory.providerFromOptions(options)).thenReturn(awsCredentialsProvider);
         assertThat(actualCredentialsSupplier.get(), equalTo(awsCredentialsProvider));
     }
+
+    @ParameterizedTest
+    @MethodSource("getRegions")
+    void getDefaultRegion_returns_default_region(final Region region) {
+        when(credentialsProviderFactory.getDefaultRegion()).thenReturn(region);
+
+        final AwsCredentialsSupplier objectUnderTest = createObjectUnderTest();
+        assertThat(objectUnderTest.getDefaultRegion().isPresent(), equalTo(true));
+        assertThat(objectUnderTest.getDefaultRegion().get(), equalTo(credentialsProviderFactory.getDefaultRegion()));
+    }
+
+    @Test
+    void no_default_region_returns_empty_optional() {
+        when(credentialsProviderFactory.getDefaultRegion()).thenReturn(null);
+
+        final AwsCredentialsSupplier objectUnderTest = createObjectUnderTest();
+        assertThat(objectUnderTest.getDefaultRegion(), equalTo(Optional.empty()));
+
+    }
+
+    @Test
+    void getDefaultStsRoleArn_returns_default_sts_role_arn() {
+        final String roleArn = "arn:aws:iam::123456789012:role/test-role";
+        when(credentialsProviderFactory.getDefaultStsRoleArn()).thenReturn(roleArn);
+
+        assertThat(createObjectUnderTest().getDefaultStsRoleArn(), equalTo(Optional.of(roleArn)));
+    }
+
+    @Test
+    void no_default_sts_role_arn_returns_empty_optional() {
+        when(credentialsProviderFactory.getDefaultStsRoleArn()).thenReturn(null);
+
+        assertThat(createObjectUnderTest().getDefaultStsRoleArn(), equalTo(Optional.empty()));
+    }
+
+    private static List<Region> getRegions() {
+        return Region.regions();
+    }
+
+    @Test
+    void getProvider_with_configurationName_resolves_and_delegates() {
+        final String configName = "ecs_task_role";
+        final AwsCredentialsOptions resolvedOptions = mock(AwsCredentialsOptions.class);
+        final AwsCredentialsProvider expectedProvider = mock(AwsCredentialsProvider.class);
+
+        when(credentialsProviderFactory.resolveNamedConfiguration(configName)).thenReturn(resolvedOptions);
+        when(credentialsCache.getOrCreate(any(), any())).thenReturn(expectedProvider);
+
+        final AwsCredentialsProvider result = createObjectUnderTest().getProvider(configName);
+
+        assertThat(result, equalTo(expectedProvider));
+        verify(credentialsProviderFactory).resolveNamedConfiguration(configName);
+    }
+
 }

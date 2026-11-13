@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.aws;
@@ -12,6 +16,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.model.plugin.PluginConfigVariable;
 
 import java.util.UUID;
 
@@ -64,5 +69,34 @@ class AwsSecretsPluginConfigValueTranslatorTest {
         final String testSecretValue = UUID.randomUUID().toString();
         when(secretsSupplier.retrieveValue(eq(testSecretName))).thenReturn(testSecretValue);
         assertThat(objectUnderTest.translate(testSecretName), equalTo(testSecretValue));
+    }
+
+    @Test
+    void testTranslateToPluginConfigVariableWithoutKeyMatch() {
+        final String testSecretName = "valid@secret-manager_name";
+        final String testSecretValue = UUID.randomUUID().toString();
+        when(secretsSupplier.retrieveValue(eq(testSecretName))).thenReturn(testSecretValue);
+        PluginConfigVariable pluginConfigVariable = objectUnderTest.translateToPluginConfigVariable(testSecretName);
+        assertThat(pluginConfigVariable.getValue(), equalTo(testSecretValue));
+    }
+
+    @Test
+    void testTranslateToPluginConfigVariableWithKeyMatch() {
+        final String testSecretName = "valid@secret-manager_name";
+        final String testSecretKey = UUID.randomUUID().toString();
+        final String testSecretValue = UUID.randomUUID().toString();
+        final String input = String.format("%s:%s", testSecretName, testSecretKey);
+        when(secretsSupplier.retrieveValue(eq(testSecretName), eq(testSecretKey))).thenReturn(testSecretValue);
+        PluginConfigVariable pluginConfigVariable = objectUnderTest.translateToPluginConfigVariable(input);
+        assertThat(pluginConfigVariable.getValue(), equalTo(testSecretValue));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "",
+            "invalid secret id with space:secret_key"
+    })
+    void testTranslateToPluginConfigVariableInputNoMatch(final String input) {
+        assertThrows(IllegalArgumentException.class, () -> objectUnderTest.translateToPluginConfigVariable(input));
     }
 }

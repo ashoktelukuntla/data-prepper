@@ -1,13 +1,24 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 ext.coreProjects = [
         project(':data-prepper-api'),
         project(':data-prepper-core'),
-        project('data-prepper-plugins:common'),
-        project('data-prepper-expression'),
-        project(':data-prepper-logstash-configuration')
+        project(':data-prepper-event'),
+        project(':data-prepper-expression'),
+        project(':data-prepper-logstash-configuration'),
+        project(':data-prepper-main'),
+        project(':data-prepper-pipeline-parser'),
+        project(':data-prepper-plugins'),
+        project(':data-prepper-test'),
+        project(':data-prepper-plugin-framework'),
+        project(':data-prepper-plugin-schema'),
+        project(':data-prepper-plugin-schema-cli'),
+        project(':plugin-framework-osgi')
 ]
-ext.mavenArtifactProjects = [project(':data-prepper-api')]

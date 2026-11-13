@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.event;
@@ -9,20 +13,34 @@ import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
 
 public interface InternalEventHandle {
     /**
-     * sets acknowledgement set
+     * adds acknowledgement set
      *
      * @param acknowledgementSet acknowledgementSet to be set in the event handle
-     * @since 2.6
+     * @since 2.9
      */
-    void setAcknowledgementSet(final AcknowledgementSet acknowledgementSet);
+    void addAcknowledgementSet(final AcknowledgementSet acknowledgementSet);
 
     /**
-     * gets acknowledgement set
+     * Indicates if the event handle has atleast one acknowledgement set
      *
-     * @return returns acknowledgementSet from the event handle
-     * @since 2.6
+     * @return returns true if there is at least one acknowledgementSet in the event handle
+     * @since 2.9
      */
-    AcknowledgementSet getAcknowledgementSet();
+    boolean hasAcknowledgementSet();
 
+    /**
+     * Acquires reference to acknowledgement set(s) in the event handle
+     *
+     * @since 2.9
+     */
+    void acquireReference();
+
+    /**
+     * Adds new event handle to the acknowledgement sets associated
+     * with this event handle
+     * @param eventHandle event handle to add
+     * @since 2.11
+    */
+    void addEventHandle(EventHandle eventHandle);
 }
 

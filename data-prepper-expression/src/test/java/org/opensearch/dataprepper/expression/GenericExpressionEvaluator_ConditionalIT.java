@@ -1,26 +1,31 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.expression;
 
 import org.apache.commons.lang3.RandomStringUtils;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
-import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -35,8 +40,9 @@ import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
-class GenericExpressionEvaluator_ConditionalIT {
+class GenericExpressionEvaluator_ConditionalIT extends BaseExpressionEvaluatorIT {
     /**
      * {@link JacksonEvent#get(String, Class)} supports a String matching the following regex expression:
      * ^[A-Za-z0-9]+([A-Za-z0-9.-_][A-Za-z0-9])*$
@@ -44,14 +50,6 @@ class GenericExpressionEvaluator_ConditionalIT {
     private static final String ALL_JACKSON_EVENT_GET_SUPPORTED_CHARACTERS =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-_abcdefghijklmnopqrstuvwxyz0123456789";
 
-    private AnnotationConfigApplicationContext applicationContext;
-
-    @BeforeEach
-    void beforeEach() {
-        applicationContext = new AnnotationConfigApplicationContext();
-        applicationContext.scan("org.opensearch.dataprepper.expression");
-        applicationContext.refresh();
-    }
 
     @Test
     void testGenericExpressionEvaluatorBeanAvailable() {
@@ -113,11 +111,19 @@ class GenericExpressionEvaluator_ConditionalIT {
     }
 
     @ParameterizedTest
-    @MethodSource("invalidExpressionArguments")
+    @MethodSource("invalidExpressionSyntaxArguments")
     void testGenericExpressionEvaluatorThrows(final String expression, final Event event) {
         final GenericExpressionEvaluator evaluator = applicationContext.getBean(GenericExpressionEvaluator.class);
 
         assertThrows(RuntimeException.class, () -> evaluator.evaluateConditional(expression, event));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidExpressionArguments")
+    void testGenericExpressionEvaluatorWithInvalidData(final String expression, final Event event) {
+        final GenericExpressionEvaluator evaluator = applicationContext.getBean(GenericExpressionEvaluator.class);
+
+        assertThat(evaluator.evaluateConditional(expression, event), equalTo(false));
     }
 
     private static Stream<Arguments> validExpressionArguments() {
@@ -145,76 +151,124 @@ class GenericExpressionEvaluator_ConditionalIT {
         int testStringLength = random.nextInt(10);
         String testString = RandomStringUtils.randomAlphabetic(testStringLength);
         return Stream.of(
-                Arguments.of("true", event("{}"), true),
-                Arguments.of("/status_code == 200", event("{\"status_code\": 200}"), true),
-                Arguments.of("/status_code == 200", longEvent, true),
-                Arguments.of("/status_code != 300", event("{\"status_code\": 200}"), true),
-                Arguments.of("/status_code == 200", event("{}"), false),
-                Arguments.of("/success == /status_code", event("{\"success\": true, \"status_code\": 200}"), false),
-                Arguments.of("/success != /status_code", event("{\"success\": true, \"status_code\": 200}"), true),
-                Arguments.of("/part1@part2.part3 != 111", event("{\"success\": true, \"part1@part2.part3\":111, \"status_code\": 200}"), false),
-                Arguments.of("/part1.part2@part3 != 111", event("{\"success\": true, \"part1.part2@part3\":222, \"status_code\": 200}"), true),
-                Arguments.of("/pi == 3.14159", event("{\"pi\": 3.14159}"), true),
-                Arguments.of("/value == 12345.678", event("{\"value\": 12345.678}"), true),
-                Arguments.of("/value == 12345.678E12", event("{\"value\": 12345.678E12}"), true),
-                Arguments.of("/value == 12345.678e-12", event("{\"value\": 12345.678e-12}"), true),
-                Arguments.of("/value == 12345.0000012", event("{\"value\": 12345.0000012}"), true),
-                Arguments.of("/value == 12345.00012E6", event("{\"value\": 12345.00012E6}"), true),
-                Arguments.of("true == (/is_cool == true)", event("{\"is_cool\": true}"), true),
-                Arguments.of("not /is_cool", event("{\"is_cool\": true}"), false),
-                Arguments.of("/status_code < 300", event("{\"status_code\": 200}"), true),
-                Arguments.of("/status_code != null", event("{\"status_code\": 200}"), true),
-                Arguments.of("null != /status_code", event("{\"status_code\": 200}"), true),
-                Arguments.of("/status_code == null", event("{\"status_code\": null}"), true),
-                Arguments.of("/response == null", event("{\"status_code\": 200}"), true),
-                Arguments.of("null == /response", event("{\"status_code\": 200}"), true),
-                Arguments.of("/response != null", event("{\"status_code\": 200}"), false),
-                Arguments.of("/status_code <= 0", event("{\"status_code\": 200}"), false),
-                Arguments.of("/status_code > 0", event("{\"status_code\": 200}"), true),
-                Arguments.of("/status_code >= 300", event("{\"status_code\": 200}"), false),
-                Arguments.of("-/status_code == -200", event("{\"status_code\": 200}"), true),
-                Arguments.of("/success and /status_code == 200", event("{\"success\": true, \"status_code\": 200}"), true),
-                Arguments.of("/success or /status_code == 200", event("{\"success\": false, \"status_code\": 200}"), true),
-                Arguments.of("(/success == true) or (/status_code == 200)", event("{\"success\": false, \"status_code\": 200}"), true),
-                Arguments.of("/should_drop", event("{\"should_drop\": true}"), true),
-                Arguments.of("/should_drop", event("{\"should_drop\": false}"), false),
-                Arguments.of("/logs/2/should_drop", event("{\"logs\": [{}, {}, {\"should_drop\": true}]}"), true),
-                Arguments.of(
+                arguments("true", event("{}"), true),
+                arguments("/status_code == 200", event("{\"status_code\": 200}"), true),
+                arguments("/status_code == 200", longEvent, true),
+                arguments("/status_code != 300", event("{\"status_code\": 200}"), true),
+                arguments("/status_code == 200", event("{}"), false),
+                arguments("/success == /status_code", event("{\"success\": true, \"status_code\": 200}"), false),
+                arguments("/success != /status_code", event("{\"success\": true, \"status_code\": 200}"), true),
+                arguments("(/value  == 10) or ((/status_code >= 300) and (/novalue == 15))", event("{\"status_code_not_present\": 200, \"value\" : 10}"), true),
+                arguments("(/status_code >= 300) or (/value == 10)", event("{\"status_code_not_present\": 200, \"value\" : 10}"), true),
+                arguments("not (/status_code >= 300)", event("{\"status_code_not_present\": 200}"), true),
+                arguments("/part1@part2.part3 != 111", event("{\"success\": true, \"part1@part2.part3\":111, \"status_code\": 200}"), false),
+                arguments("/part1.part2@part3 != 111", event("{\"success\": true, \"part1.part2@part3\":222, \"status_code\": 200}"), true),
+                arguments("/pi == 3.14159", event("{\"pi\": 3.14159}"), true),
+                arguments("/value == 12345.678", event("{\"value\": 12345.678}"), true),
+                arguments("/value == 12345.678E12", event("{\"value\": 12345.678E12}"), true),
+                arguments("/value == 12345.678e-12", event("{\"value\": 12345.678e-12}"), true),
+                arguments("/value == 12345.0000012", event("{\"value\": 12345.0000012}"), true),
+                arguments("/value == 12345.00012E6", event("{\"value\": 12345.00012E6}"), true),
+                arguments("true == (/is_cool == true)", event("{\"is_cool\": true}"), true),
+                arguments("not /is_cool", event("{\"is_cool\": true}"), false),
+                arguments("/status_code < 300", event("{\"status_code\": 200}"), true),
+                arguments("/status_code != null", event("{\"status_code\": 200}"), true),
+                arguments("null != /status_code", event("{\"status_code\": 200}"), true),
+                arguments("/status_code == null", event("{\"status_code\": null}"), true),
+                arguments("/response == null", event("{\"status_code\": 200}"), true),
+                arguments("null == /response", event("{\"status_code\": 200}"), true),
+                arguments("/response != null", event("{\"status_code\": 200}"), false),
+                arguments("/status_code <= 0", event("{\"status_code\": 200}"), false),
+                arguments("/status_code > 0", event("{\"status_code\": 200}"), true),
+                arguments("/status_code >= 300", event("{\"status_code\": 200}"), false),
+                arguments("-/status_code == -200", event("{\"status_code\": 200}"), true),
+                arguments("/success and /status_code == 200", event("{\"success\": true, \"status_code\": 200}"), true),
+                arguments("/success or /status_code == 200", event("{\"success\": false, \"status_code\": 200}"), true),
+                arguments("(/success == true) or (/status_code == 200)", event("{\"success\": false, \"status_code\": 200}"), true),
+                arguments("/should_drop", event("{\"should_drop\": true}"), true),
+                arguments("/should_drop", event("{\"should_drop\": false}"), false),
+                arguments("/logs/2/should_drop", event("{\"logs\": [{}, {}, {\"should_drop\": true}]}"), true),
+                arguments("/path == \"\"\"/path/to/route\"\"\"", event("{\"path\": \"/path/to/route\"}"), true),
+                arguments("/path == \"\"\"/path/to/route\"\"\"", event("{\"path\": \"/incorrect/path\"}"), false),
+                arguments(
                         escapedJsonPointer(ALL_JACKSON_EVENT_GET_SUPPORTED_CHARACTERS) + " == true",
                         complexEvent(ALL_JACKSON_EVENT_GET_SUPPORTED_CHARACTERS, true),
                         true),
-                Arguments.of("/durationInNanos > 5000000000", event("{\"durationInNanos\": 6000000000}"), true),
-                Arguments.of("/response == \"OK\"", event("{\"response\": \"OK\"}"), true),
-                Arguments.of("length(/response) == "+testStringLength, event("{\"response\": \""+testString+"\"}"), true),
-                Arguments.of("hasTags(\""+ testTag1+"\")", longEvent, true),
-                Arguments.of("hasTags(\""+ testTag1+"\",\""+testTag2+"\")", longEvent, true),
-                Arguments.of("hasTags(\""+ testTag1+"\", \""+testTag2+"\", \""+testTag3+"\")", longEvent, true),
-                Arguments.of("hasTags(\""+ testTag4+"\")", longEvent, false),
-                Arguments.of("hasTags(\""+ testTag3+"\",\""+testTag4+"\")", longEvent, false),
-                Arguments.of("contains(\""+ strValue+"\",\""+strValue.substring(1,5)+"\")", longEvent, true),
-                Arguments.of("contains(/status,\""+strValue.substring(0,2)+"\")", event("{\"status\":\""+strValue+"\"}"), true),
-                Arguments.of("contains(\""+strValue+strValue+"\",/status)", event("{\"status\":\""+strValue+"\"}"), true),
-                Arguments.of("contains(/message,/status)", event("{\"status\":\""+strValue+"\", \"message\":\""+strValue+strValue+"\"}"), true),
-                Arguments.of("contains(/unknown,/status)", event("{\"status\":\""+strValue+"\", \"message\":\""+strValue+strValue+"\"}"), false),
-                Arguments.of("contains(/status,/unknown)", event("{\"status\":\""+strValue+"\", \"message\":\""+strValue+strValue+"\"}"), false),
-                Arguments.of("getMetadata(\"key1\") == \""+strValue+"\"", longEvent, true),
-                Arguments.of("getMetadata(\"key2\") == "+value4, longEvent, true),
-                Arguments.of("getMetadata(\"key3\") == "+value5, longEvent, true),
-                Arguments.of("getMetadata(\"/key1\") == \""+strValue+"\"", longEvent, true),
-                Arguments.of("getMetadata(\"/key2\") == "+value4, longEvent, true),
-                Arguments.of("getMetadata(\"key3\") == "+value5, longEvent, true),
-                Arguments.of("getMetadata(\"/key6\") == \""+value5+"\"", longEvent, false),
-                Arguments.of("getMetadata(\"key6\") == "+value5, longEvent, false),
-                Arguments.of("cidrContains(/sourceIp,\"192.0.2.0/24\")", event("{\"sourceIp\": \"192.0.2.3\"}"), true),
-                Arguments.of("cidrContains(/sourceIp,\"192.0.2.0/24\",\"192.1.1.0/24\")", event("{\"sourceIp\": \"192.0.2.3\"}"), true),
-                Arguments.of("cidrContains(/sourceIp,\"192.0.2.0/24\",\"192.1.1.0/24\")", event("{\"sourceIp\": \"192.2.2.3\"}"), false),
-                Arguments.of("cidrContains(/sourceIp,\"2001:0db8::/32\")", event("{\"sourceIp\": \"2001:0db8:aaaa:bbbb::\"}"), true),
-                Arguments.of("cidrContains(/sourceIp,\"2001:0db8::/32\",\"2001:aaaa::/32\")", event("{\"sourceIp\": \"2001:0db8:aaaa:bbbb::\"}"), true),
-                Arguments.of("cidrContains(/sourceIp,\"2001:0db8::/32\",\"2001:aaaa::/32\")", event("{\"sourceIp\": \"2001:abcd:aaaa:bbbb::\"}"), false),
-                Arguments.of("/sourceIp != null", event("{\"sourceIp\": [10, 20]}"), true),
-                Arguments.of("/sourceIp == null", event("{\"sourceIp\": [\"test\", \"test_two\"]}"), false),
-                Arguments.of("/sourceIp == null", event("{\"sourceIp\": {\"test\": \"test_two\"}}"), false),
-                Arguments.of("/sourceIp != null", event("{\"sourceIp\": {\"test\": \"test_two\"}}"), true)
+                arguments("/durationInNanos > 5000000000", event("{\"durationInNanos\": 6000000000}"), true),
+                arguments("/response == \"OK\"", event("{\"response\": \"OK\"}"), true),
+                arguments("length(/response) == "+testStringLength, event("{\"response\": \""+testString+"\"}"), true),
+                arguments("length(\""+testString+"\") == "+testStringLength, event("{\"response\": \""+testString+"\"}"), true),
+                arguments("hasTags(\""+ testTag1+"\")", longEvent, true),
+                arguments("hasTags(\""+ testTag1+"\",\""+testTag2+"\")", longEvent, true),
+                arguments("hasTags(\""+ testTag1+"\", \""+testTag2+"\", \""+testTag3+"\")", longEvent, true),
+                arguments("hasTags(\""+ testTag4+"\")", longEvent, false),
+                arguments("hasTags(\""+ testTag3+"\",\""+testTag4+"\")", longEvent, false),
+                arguments("contains(\""+ strValue+"\",\""+strValue.substring(1,5)+"\")", longEvent, true),
+                arguments("contains(/status,\""+strValue.substring(0,2)+"\")", event("{\"status\":\""+strValue+"\"}"), true),
+                arguments("contains(\""+strValue+strValue+"\",/status)", event("{\"status\":\""+strValue+"\"}"), true),
+                arguments("contains(/message,/status)", event("{\"status\":\""+strValue+"\", \"message\":\""+strValue+strValue+"\"}"), true),
+                arguments("contains(/unknown,/status)", event("{\"status\":\""+strValue+"\", \"message\":\""+strValue+strValue+"\"}"), false),
+                arguments("contains(/status,/unknown)", event("{\"status\":\""+strValue+"\", \"message\":\""+strValue+strValue+"\"}"), false),
+                arguments("getMetadata(\"key1\") == \""+strValue+"\"", longEvent, true),
+                arguments("getMetadata(\"key2\") == "+value4, longEvent, true),
+                arguments("getMetadata(\"key3\") == "+value5, longEvent, true),
+                arguments("getMetadata(\"/key1\") == \""+strValue+"\"", longEvent, true),
+                arguments("getMetadata(\"/key2\") == "+value4, longEvent, true),
+                arguments("getMetadata(\"key3\") == "+value5, longEvent, true),
+                arguments("getMetadata(\"/key6\") == \""+value5+"\"", longEvent, false),
+                arguments("getMetadata(\"key6\") == "+value5, longEvent, false),
+                arguments("cidrContains(/sourceIp,\"192.0.2.0/24\")", event("{\"sourceIp\": \"192.0.2.3\"}"), true),
+                arguments("cidrContains(/sourceIp,\"192.0.2.0/24\",\"192.1.1.0/24\")", event("{\"sourceIp\": \"192.0.2.3\"}"), true),
+                arguments("cidrContains(/sourceIp,\"192.0.2.0/24\",\"192.1.1.0/24\")", event("{\"sourceIp\": \"192.2.2.3\"}"), false),
+                arguments("cidrContains(/sourceIp,\"2001:0db8::/32\")", event("{\"sourceIp\": \"2001:0db8:aaaa:bbbb::\"}"), true),
+                arguments("cidrContains(/sourceIp,\"2001:0db8::/32\",\"2001:aaaa::/32\")", event("{\"sourceIp\": \"2001:0db8:aaaa:bbbb::\"}"), true),
+                arguments("cidrContains(/sourceIp,\"2001:0db8::/32\",\"2001:aaaa::/32\")", event("{\"sourceIp\": \"2001:abcd:aaaa:bbbb::\"}"), false),
+                arguments("/sourceIp != null", event("{\"sourceIp\": [10, 20]}"), true),
+                arguments("/sourceIp == null", event("{\"sourceIp\": [\"test\", \"test_two\"]}"), false),
+                arguments("/sourceIp == null", event("{\"sourceIp\": {\"test\": \"test_two\"}}"), false),
+                arguments("/sourceIp != null", event("{\"sourceIp\": {\"test\": \"test_two\"}}"), true),
+                arguments("/value in {200.222, 300.333, 400}", event("{\"value\": 400}"), true),
+                arguments("/value in {200.222, 300.333, 400}", event("{\"value\": 400.222}"), false),
+                arguments("/value not in {200.222, 300.333, 400}", event("{\"value\": 400}"), false),
+                arguments("/value not in {200.222, 300.333, 400}", event("{\"value\": 800.222}"), true),
+                arguments("/color in {\"blue\", \"red\", \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}"), true),
+                arguments("/color in {\"blue\", \"red\", \"yellow\", \"green\"}", event("{\"color\": \"gray\"}"), false),
+                arguments("/color not in {\"blue\", \"red\", \"yellow\", \"green\"}", event("{\"color\": \"gray\"}"), true),
+                arguments("/color not in {\"blue\", \"red\", \"yellow\", \"green\"}", event("{\"color\": \"blue\"}"), false),
+                arguments("/color in {\"blue\", \"\", \"red\", \"yellow\", \"green\"}", event("{\"color\": \"\"}"), true),
+                arguments("/status_code in {200 , 300}", event("{\"status_code\": 200}"), true),
+                arguments("/status_code in {2 , 3}", event("{\"status_code\": 2}"), true),
+                arguments("/status_code not in {200 , 300}", event("{\"status_code\": 400}"), true),
+                arguments("/status_code in {200 , 300}", event("{\"status_code\": 500}"), false),
+                arguments("/flag in {true , false}", event("{\"flag\": false}"), true),
+                arguments("/flag in {true , false}", event("{\"flag\": true}"), true),
+                arguments("/name =~ \".*dataprepper-[0-9]+\"", event("{\"name\": \"dataprepper-0\"}"), true),
+                arguments("/name =~ \".*dataprepper-[0-9]+\"", event("{\"name\": \"dataprepper-212\"}"), true),
+                arguments("/name =~ \".*dataprepper-[0-9]+\"", event("{\"name\": \"dataprepper-abc\"}"), false),
+                arguments("/name =~ \".*dataprepper-[0-9]+\"", event("{\"other\": \"dataprepper-abc\"}"), false),
+                arguments("/name !~ \".*dataprepper-[0-9]+\"", event("{\"name\": \"dataprepper-abc\"}"), true),
+                arguments("/name !~ \".*dataprepper-[0-9]+\"", event("{\"name\": \"dataprepper-0\"}"), false),
+                arguments("startsWith(\""+strValue+ UUID.randomUUID() + "\",/status)", event("{\"status\":\""+strValue+"\"}"), true),
+                arguments("startsWith(\""+ UUID.randomUUID() +strValue+ "\",/status)", event("{\"status\":\""+strValue+"\"}"), false),
+                arguments("getEventType() == \"event\"",  longEvent, true),
+                arguments("getEventType() == \"LOG\"",  longEvent, false),
+                arguments("formatDateTime(/time, \"'year='yyyy'/month='MM'/day='dd\", \"UTC-8\") == \"year=2025/month=04/day=01\"", event("{\"time\": " + LocalDateTime.of(2025, 4, 1, 23, 59).toInstant(ZoneOffset.UTC).toEpochMilli() + "}"), true),
+                arguments("substringAfter(\"file.txt\", \".\") == \"txt\"", event("{}"), true),
+                arguments("substringAfter(/path, \"/\") == \"app/src/main.py\"", event("{\"path\": \"/app/src/main.py\"}"), true),
+                arguments("substringBefore(\"key=a=b\", \"=\") == \"key\"", event("{}"), true),
+                arguments("substringAfterLast(\"/app/src/main.py\", \"/\") == \"main.py\"", event("{}"), true),
+                arguments("substringBeforeLast(\"app.src.main\", \".\") == \"app.src\"", event("{}"), true),
+                arguments("/value == \"value-a\" and contains(/string, \"x/y/\")", event("{\"value\": \"value-a\", \"string\": \"prefix/x/y/postfix\"}"), true),
+                arguments("/status_code typeof integer", event("{\"status_code\": 200}"), true),
+                arguments("/status_code typeof integer", event("{\"status_code\": \"200\"}"), false),
+                arguments("/name typeof string", event("{\"name\": \"test\"}"), true),
+                arguments("/flag typeof boolean", event("{\"flag\": true}"), true),
+                arguments("/value typeof long", event("{\"value\": 2147483648}"), true),
+                arguments("/items typeof array", event("{\"items\": [1, 2]}"), true),
+                arguments("/data typeof map", event("{\"data\": {\"k\": \"v\"}}"), true),
+                arguments("not (/status_code typeof integer)", event("{\"status_code\": \"200\"}"), true),
+                arguments("not (/status_code typeof integer)", event("{\"status_code\": 200}"), false),
+                arguments("not (/name typeof string)", event("{\"name\": 123}"), true)
         );
     }
 
@@ -236,43 +290,90 @@ class GenericExpressionEvaluator_ConditionalIT {
         int testStringLength = random.nextInt(10);
         String testString = RandomStringUtils.randomAlphabetic(testStringLength);
         return Stream.of(
-                Arguments.of("/missing", event("{}")),
-                Arguments.of("/success < /status_code", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("/success <= /status_code", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("/success > /status_code", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("/success >= /status_code", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("/success > null", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("/success >= null", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("/status_code < null", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("/status_code <= null", event("{\"success\": true, \"status_code\": 200}")),
-                Arguments.of("not /status_code", event("{\"status_code\": 200}")),
-                Arguments.of("/status_code >= 200 and 3", event("{\"status_code\": 200}")),
-                Arguments.of("", event("{}")),
-                Arguments.of("-false", event("{}")),
-                Arguments.of("not 5", event("{}")),
-                Arguments.of("not null", event("{}")),
-                Arguments.of("not/status_code", event("{\"status_code\": 200}")),
-                Arguments.of("trueand/status_code", event("{\"status_code\": 200}")),
-                Arguments.of("trueor/status_code", event("{\"status_code\": 200}")),
-                Arguments.of("length(\""+testString+") == "+testStringLength, event("{\"response\": \""+testString+"\"}")),
-                Arguments.of("length(\""+testString+"\") == "+testStringLength, event("{\"response\": \""+testString+"\"}")),
-                Arguments.of("hasTags(10)", tagEvent),
-                Arguments.of("hasTags("+ testTag1+")", tagEvent),
-                Arguments.of("hasTags(\""+ testTag1+")", tagEvent),
-                Arguments.of("hasTags(\""+ testTag1+"\","+testTag2+"\")", tagEvent),
-                Arguments.of("hasTags(,\""+testTag2+"\")", tagEvent),
-                Arguments.of("hasTags(\""+testTag2+"\",)", tagEvent),
-                Arguments.of("contains(\""+testTag2+"\",)", tagEvent),
-                Arguments.of("contains(\""+testTag2+"\")", tagEvent),
-                Arguments.of("contains(/intField, /strField)", event("{\"intField\":1234,\"strField\":\"string\"}")),
-                Arguments.of("contains(1234, /strField)", event("{\"intField\":1234,\"strField\":\"string\"}")),
-                Arguments.of("contains(str, /strField)", event("{\"intField\":1234,\"strField\":\"string\"}")),
-                Arguments.of("contains(/strField, 1234)", event("{\"intField\":1234,\"strField\":\"string\"}")),
-                Arguments.of("getMetadata(10)", tagEvent),
-                Arguments.of("getMetadata("+ testMetadataKey+ ")", tagEvent),
-                Arguments.of("getMetadata(\""+ testMetadataKey+")", tagEvent),
-                Arguments.of("cidrContains(/sourceIp)", event("{\"sourceIp\": \"192.0.2.3\"}")),
-                Arguments.of("cidrContains(/sourceIp,123)", event("{\"sourceIp\": \"192.0.2.3\"}"))
+                arguments("not 5", event("{}")),
+                arguments("not null", event("{}")),
+                arguments("contains(\""+testTag2+"\")", tagEvent),
+                arguments("contains(/intField, /strField)", event("{\"intField\":1234,\"strField\":\"string\"}")),
+                arguments("/status_code >= 300", event("{\"status_code_not_present\": 200}")),
+                arguments("/status_code != null and /status_code >= 300", event("{\"status_code_not_present\": 200}")),
+                arguments("(/status_code >= 300) and (/value == 15)", event("{\"status_code2\": 200, \"value\" : 10}")),
+                arguments("/color in {\"blue\", 222.0, \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/success < /status_code", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("/status_code > 3", event("{\"success\": true, \"status_code_not_present\": 200}")),
+                arguments("/success <= /status_code", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("/success > /status_code", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("/success >= /status_code", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("/success > null", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("/success >= null", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("/status_code < null", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("/status_code <= null", event("{\"success\": true, \"status_code\": 200}")),
+                arguments("not /status_code", event("{\"status_code\": 200}")),
+                arguments("cidrContains(/sourceIp)", event("{\"sourceIp\": \"192.0.2.3\"}")),
+                arguments("/status_code >= 200 and 3", event("{\"status_code\": 200}")),
+                // Integer literals in function args are now valid syntax but fail at evaluation time
+                arguments("hasTags(10)", tagEvent),
+                arguments("contains(1234, /strField)", event("{\"intField\":1234,\"strField\":\"string\"}")),
+                arguments("contains(/strField, 1234)", event("{\"intField\":1234,\"strField\":\"string\"}")),
+                arguments("getMetadata(10)", tagEvent),
+                arguments("cidrContains(/sourceIp,123)", event("{\"sourceIp\": \"192.0.2.3\"}")),
+                arguments("substringAfter()", event("{}")),
+                arguments("substringBefore()", event("{}")),
+                arguments("substringAfterLast()", event("{}")),
+                arguments("substringBeforeLast()", event("{}"))
+        );
+    }
+
+
+    private static Stream<Arguments> invalidExpressionSyntaxArguments() {
+        Random random = new Random();
+
+        final String key = RandomStringUtils.randomAlphabetic(5);
+        final String value = RandomStringUtils.randomAlphabetic(10);
+        Map<Object, Object> eventMap = Collections.singletonMap(key, value);
+        Event tagEvent = JacksonEvent.builder()
+                .withEventType("event")
+                .withData(eventMap)
+                .build();
+        String testTag1 = RandomStringUtils.randomAlphabetic(6);
+        String testTag2 = RandomStringUtils.randomAlphabetic(7);
+        tagEvent.getMetadata().addTags(List.of(testTag1, testTag2));
+        String testMetadataKey = RandomStringUtils.randomAlphabetic(5);
+
+        int testStringLength = random.nextInt(10);
+        String testString = RandomStringUtils.randomAlphabetic(testStringLength);
+        return Stream.of(
+                arguments("/missing", event("{}")),
+                arguments("", event("{}")),
+                arguments("-false", event("{}")),
+                arguments("not/status_code", event("{\"status_code\": 200}")),
+                arguments("trueand/status_code", event("{\"status_code\": 200}")),
+                arguments("trueor/status_code", event("{\"status_code\": 200}")),
+                arguments("length(\""+testString+") == "+testStringLength, event("{\"response\": \""+testString+"\"}")),
+                arguments("hasTags("+ testTag1+")", tagEvent),
+                arguments("hasTags(\""+ testTag1+")", tagEvent),
+                arguments("hasTags(\""+ testTag1+"\","+testTag2+"\")", tagEvent),
+                arguments("hasTags(,\""+testTag2+"\")", tagEvent),
+                arguments("hasTags(\""+testTag2+"\",)", tagEvent),
+                arguments("contains(\""+testTag2+"\",)", tagEvent),
+                arguments("contains(\""+testTag2+"\"", tagEvent),
+                arguments("contains\""+testTag2+"\"", tagEvent),
+                arguments("contains", tagEvent),
+                arguments("contains(str, /strField)", event("{\"intField\":1234,\"strField\":\"string\"}")),
+                arguments("/color in {\"blue, \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in {\"blue\", yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in {\", \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in { \", \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in {, \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in { , \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in {blue, \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in { blue, \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/color in {\"\",blue, \"yellow\", \"green\"}", event("{\"color\": \"yellow\"}")),
+                arguments("/value in {22a2.0, 100}", event("{\"value\": 100}")),
+                arguments("/value in {222, 10a0}", event("{\"value\": 100}")),
+                arguments("getMetadata("+ testMetadataKey+ ")", tagEvent),
+                arguments("getMetadata(\""+ testMetadataKey+")", tagEvent),
+                arguments("getEventType() == \"test_event", tagEvent),
+                arguments("getEventType() == test_event\"", tagEvent)
         );
     }
 

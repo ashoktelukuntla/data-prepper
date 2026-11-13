@@ -1,7 +1,12 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
+
 package org.opensearch.dataprepper.plugins.kafka.consumer;
 
 import com.amazonaws.services.schemaregistry.serializers.json.JsonDataWithSchema;
@@ -19,8 +24,9 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.AuthenticationException;
+import org.apache.kafka.common.errors.RebalanceInProgressException;
+import org.apache.kafka.common.utils.ExponentialBackoff;
 import org.apache.kafka.common.errors.RecordDeserializationException;
-import org.opensearch.dataprepper.buffer.common.BufferAccumulator;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.buffer.Buffer;
@@ -30,6 +36,7 @@ import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.EventMetadata;
 import org.opensearch.dataprepper.model.log.JacksonLog;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaConsumerConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaKeyMode;
 import org.opensearch.dataprepper.plugins.kafka.configuration.TopicConsumerConfig;
@@ -66,8 +73,10 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
 
     private static final Logger LOG = LoggerFactory.getLogger(KafkaCustomConsumer.class);
     private static final Long COMMIT_OFFSET_INTERVAL_MS = 300000L;
-    private static final int DEFAULT_NUMBER_OF_RECORDS_TO_ACCUMULATE = 1;
     private static final int RETRY_ON_EXCEPTION_SLEEP_MS = 1000;
+    static final Duration INITIAL_BACKOFF = Duration.ofSeconds(10);
+    static final Duration MAX_BACKOFF = Duration.ofMinutes(10);
+    private static final int BUFFER_WRITE_TIMEOUT = 2000;
     static final String DEFAULT_KEY = "message";
 
     private volatile long lastCommitTime;
@@ -77,7 +86,6 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
     private final TopicConsumerConfig topicConfig;
     private MessageFormat schema;
     private boolean paused;
-    private final BufferAccumulator<Record<Event>> bufferAccumulator;
     private final Buffer<Record<Event>> buffer;
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private final JsonFactory jsonFactory = new JsonFactory();
@@ -96,7 +104,53 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
     private long numRecordsCommitted = 0;
     private final LogRateLimiter errLogRateLimiter;
     private final ByteDecoder byteDecoder;
-    private final long maxRetriesOnException;
+    private final ExponentialBackoff exponentialBackoff;
+    private long authFailureAttempts;
+    private final Map<Integer, Long> partitionToLastReceivedTimestampMillis;
+    private final CompressionOption compressionConfig;
+    private final boolean invokeCallbackOnExpiry;
+
+    public KafkaCustomConsumer(final KafkaConsumer consumer,
+                               final AtomicBoolean shutdownInProgress,
+                               final Buffer<Record<Event>> buffer,
+                               final KafkaConsumerConfig consumerConfig,
+                               final TopicConsumerConfig topicConfig,
+                               final String schemaType,
+                               final AcknowledgementSetManager acknowledgementSetManager,
+                               final ByteDecoder byteDecoder,
+                               final KafkaTopicConsumerMetrics topicMetrics,
+                               final PauseConsumePredicate pauseConsumePredicate,
+                               final CompressionOption compressionConfig,
+                               final boolean invokeCallbackOnExpiry) {
+        this.topicName = topicConfig.getName();
+        this.topicConfig = topicConfig;
+        this.shutdownInProgress = shutdownInProgress;
+        this.consumer = consumer;
+        this.buffer = buffer;
+        this.paused = false;
+        this.byteDecoder = byteDecoder;
+        this.invokeCallbackOnExpiry = invokeCallbackOnExpiry;
+        this.topicMetrics = topicMetrics;
+        this.pauseConsumePredicate = pauseConsumePredicate;
+        this.topicMetrics.register(consumer);
+        this.offsetsToCommit = new HashMap<>();
+        this.partitionToLastReceivedTimestampMillis = new HashMap<>();
+        this.ownedPartitionsEpoch = new HashMap<>();
+        this.metricsUpdatedTime = Instant.now().getEpochSecond();
+        this.acknowledgedOffsets = new ArrayList<>();
+        this.acknowledgementsTimeout = consumerConfig.getAcknowledgementsTimeout();
+        this.acknowledgementsEnabled = consumerConfig.getAcknowledgementsEnabled();
+        this.acknowledgementSetManager = acknowledgementSetManager;
+        this.partitionCommitTrackerMap = new HashMap<>();
+        this.partitionsToReset = Collections.synchronizedSet(new HashSet<>());
+        this.schema = MessageFormat.getByMessageFormatByName(schemaType);
+        this.lastCommitTime = System.currentTimeMillis();
+        this.numberOfAcksPending = new AtomicInteger(0);
+        this.errLogRateLimiter = new LogRateLimiter(2, System.currentTimeMillis());
+        this.exponentialBackoff = new ExponentialBackoff(INITIAL_BACKOFF.toMillis(), 2, MAX_BACKOFF.toMillis(), 0);
+        this.authFailureAttempts = 0;
+        this.compressionConfig = (compressionConfig == null) ? CompressionOption.NONE : compressionConfig;
+    }
 
     public KafkaCustomConsumer(final KafkaConsumer consumer,
                                final AtomicBoolean shutdownInProgress,
@@ -108,36 +162,27 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
                                final ByteDecoder byteDecoder,
                                final KafkaTopicConsumerMetrics topicMetrics,
                                final PauseConsumePredicate pauseConsumePredicate) {
-        this.topicName = topicConfig.getName();
-        this.topicConfig = topicConfig;
-        this.shutdownInProgress = shutdownInProgress;
-        this.consumer = consumer;
-        this.buffer = buffer;
-        this.paused = false;
-        this.byteDecoder = byteDecoder;
-        this.topicMetrics = topicMetrics;
-        this.maxRetriesOnException = topicConfig.getMaxPollInterval().toMillis() / (2 * RETRY_ON_EXCEPTION_SLEEP_MS);
-        this.pauseConsumePredicate = pauseConsumePredicate;
-        this.topicMetrics.register(consumer);
-        this.offsetsToCommit = new HashMap<>();
-        this.ownedPartitionsEpoch = new HashMap<>();
-        this.metricsUpdatedTime = Instant.now().getEpochSecond();
-        this.acknowledgedOffsets = new ArrayList<>();
-        this.acknowledgementsTimeout = Duration.ofSeconds(Integer.MAX_VALUE);
-        this.acknowledgementsEnabled = consumerConfig.getAcknowledgementsEnabled();
-        this.acknowledgementSetManager = acknowledgementSetManager;
-        this.partitionCommitTrackerMap = new HashMap<>();
-        this.partitionsToReset = Collections.synchronizedSet(new HashSet<>());
-        this.schema = MessageFormat.getByMessageFormatByName(schemaType);
-        Duration bufferTimeout = Duration.ofSeconds(1);
-        this.bufferAccumulator = BufferAccumulator.create(buffer, DEFAULT_NUMBER_OF_RECORDS_TO_ACCUMULATE, bufferTimeout);
-        this.lastCommitTime = System.currentTimeMillis();
-        this.numberOfAcksPending = new AtomicInteger(0);
-        this.errLogRateLimiter = new LogRateLimiter(2, System.currentTimeMillis());
+        this(consumer, shutdownInProgress, buffer, consumerConfig, topicConfig, schemaType, acknowledgementSetManager, byteDecoder, topicMetrics, pauseConsumePredicate, CompressionOption.NONE, false);
     }
 
     KafkaTopicConsumerMetrics getTopicMetrics() {
         return topicMetrics;
+    }
+
+    <T> long getRecordTimeStamp(final ConsumerRecord<String, T> consumerRecord, final long nowMs) {
+        final long timestamp = consumerRecord.timestamp();
+        int partition = consumerRecord.partition();
+        if (timestamp > nowMs) {
+            topicMetrics.getNumberOfInvalidTimeStamps().increment();
+            if (partitionToLastReceivedTimestampMillis.containsKey(partition)) {
+                return partitionToLastReceivedTimestampMillis.get(partition);
+            } else {
+                return nowMs;
+            }
+        } else {
+            partitionToLastReceivedTimestampMillis.put(partition, timestamp);
+            return timestamp;
+        }
     }
 
     private long getCurrentTimeNanos() {
@@ -171,11 +216,12 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
                             });
                         }
                     }
-                }, acknowledgementsTimeout);
+                }, acknowledgementsTimeout, invokeCallbackOnExpiry);
         return acknowledgementSet;
     }
 
     <T> ConsumerRecords<String, T> doPoll() throws Exception {
+            topicMetrics.recordTimeBetweenPolls();
             ConsumerRecords<String, T> records =
                     consumer.poll(Duration.ofMillis(topicConfig.getThreadWaitingTime().toMillis()/2));
             return records;
@@ -184,7 +230,11 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
     <T> void consumeRecords() throws Exception {
         try {
             ConsumerRecords<String, T> records = doPoll();
+            resetAuthBackoff();
+            LOG.debug("Consumed records with count {}", records.count());
             if (Objects.nonNull(records) && !records.isEmpty() && records.count() > 0) {
+                // Time poll() return through buffer handoff, once per non-empty batch.
+                final long processingStartMillis = System.currentTimeMillis();
                 Map<TopicPartition, CommitOffsetRange> offsets = new HashMap<>();
                 AcknowledgementSet acknowledgementSet = null;
                 if (acknowledgementsEnabled) {
@@ -200,11 +250,16 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
                     acknowledgementSet.complete();
                     numberOfAcksPending.incrementAndGet();
                 }
+                topicMetrics.recordProcessingLatency(System.currentTimeMillis() - processingStartMillis);
             }
         } catch (AuthenticationException e) {
-            LOG.warn("Authentication error while doing poll(). Will retry after 10 seconds", e);
+            authFailureAttempts++;
+            long backoffMs = exponentialBackoff.backoff(authFailureAttempts - 1);
             topicMetrics.getNumberOfPollAuthErrors().increment();
-            Thread.sleep(10000);
+            LOG.warn("Authentication error while doing poll() for topic {} (failure count: {}). " +
+                    "Will retry after {} ms. Verify that the IAM role exists and trust policy is correct.",
+                    topicName, authFailureAttempts, backoffMs, e);
+            sleepMillis(backoffMs);
         } catch (RecordDeserializationException e) {
             LOG.warn("Deserialization error - topic {} partition {} offset {}. Error message: {}",
                     e.topicPartition().topic(), e.topicPartition().partition(), e.offset(), e.getMessage());
@@ -226,6 +281,15 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
 
             topicMetrics.getNumberOfDeserializationErrors().increment();
         }
+    }
+
+    private void resetAuthBackoff() {
+        authFailureAttempts = 0;
+    }
+
+    @VisibleForTesting
+    void sleepMillis(long millis) throws InterruptedException {
+        Thread.sleep(millis);
     }
 
     private void addAcknowledgedOffsets(final TopicPartition topicPartition, final Range<Long> offsetRange) {
@@ -316,11 +380,15 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
             offsetsToCommit.forEach(((partition, offset) -> updateCommitCountMetric(partition, offset)));
             try {
                 consumer.commitSync(offsetsToCommit);
+                lastCommitTime = currentTimeMillis;
+            } catch (final RebalanceInProgressException ex) {
+                LOG.error("Failed to commit offsets in topic {} due to rebalance in progress", topicName, ex);
+                return;
             } catch (Exception e) {
                 LOG.error("Failed to commit offsets in topic {}", topicName, e);
             }
+
             offsetsToCommit.clear();
-            lastCommitTime = currentTimeMillis;
         }
     }
 
@@ -346,32 +414,42 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
         });
 
         boolean retryingAfterException = false;
+        long outerRetryAttempts = 0;
         while (!shutdownInProgress.get()) {
+            LOG.debug("Still running Kafka consumer in start of loop");
             try {
                 if (retryingAfterException) {
-                    LOG.debug("Pause consuming from Kafka topic due a previous exception.");
-                    Thread.sleep(10000);
+                    long backoffMs = exponentialBackoff.backoff(outerRetryAttempts - 1);
+                    LOG.debug("Pause consuming from Kafka topic due a previous exception. Backoff: {} ms", backoffMs);
+                    Thread.sleep(backoffMs);
                 } else if (pauseConsumePredicate.pauseConsuming()) {
                     LOG.debug("Pause and skip consuming from Kafka topic due to an external condition: {}", pauseConsumePredicate);
                     paused = true;
                     consumer.pause(consumer.assignment());
-                    Thread.sleep(10000);
+                    doPoll();
+                    Thread.sleep(1000);
                     continue;
                 } else if(paused) {
                     LOG.debug("Resume consuming from Kafka topic.");
                     paused = false;
                     consumer.resume(consumer.assignment());
                 }
+                LOG.debug("Still running Kafka consumer preparing to commit offsets and consume records");
                 synchronized(this) {
                     commitOffsets(false);
                     resetOffsets();
                 }
                 consumeRecords();
+                LOG.debug("Exited consume records");
                 topicMetrics.update(consumer);
+                LOG.debug("Updated consumer metrics");
                 retryingAfterException = false;
+                outerRetryAttempts = 0;
             } catch (Exception exp) {
-                LOG.error("Error while reading the records from the topic {}. Retry after 10 seconds", topicName, exp);
+                long backoffMs = exponentialBackoff.backoff(outerRetryAttempts);
+                LOG.error("Error while reading the records from the topic {}. Retry after {} ms", topicName, backoffMs, exp);
                 retryingAfterException = true;
+                outerRetryAttempts++;
             }
         }
         LOG.info("Shutting down, number of acks pending = {}", numberOfAcksPending.get());
@@ -426,31 +504,36 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
         if (kafkaKeyMode == KafkaKeyMode.INCLUDE_AS_METADATA) {
             eventMetadata.setAttribute("kafka_key", key);
         }
+        Map<String, Object> headerData = KafkaHeadersExtractor.extractMessageHeaders(consumerRecord.headers());
+        if (headerData != null) {
+            eventMetadata.setAttribute("kafka_headers", headerData);
+        }
+        final long receivedTimeStamp = getRecordTimeStamp(consumerRecord, now.toEpochMilli());
+        eventMetadata.setAttribute("kafka_timestamp", receivedTimeStamp);
+        eventMetadata.setAttribute("kafka_timestamp_type", consumerRecord.timestampType().toString());
         eventMetadata.setAttribute("kafka_topic", topicName);
         eventMetadata.setAttribute("kafka_partition", String.valueOf(partition));
+        eventMetadata.setExternalOriginationTime(Instant.ofEpochMilli(receivedTimeStamp));
+        event.getEventHandle().setExternalOriginationTime(Instant.ofEpochMilli(receivedTimeStamp));
 
         return new Record<Event>(event);
     }
 
-    private void processRecord(final AcknowledgementSet acknowledgementSet, final Record<Event> record) {
+    private void processRecords(final AcknowledgementSet acknowledgementSet, final List<Record<Event>> eventRecords) {
         // Always add record to acknowledgementSet before adding to
         // buffer because another thread may take and process
         // buffer contents before the event record is added
         // to acknowledgement set
         if (acknowledgementSet != null) {
-            acknowledgementSet.add(record.getData());
+            eventRecords.forEach(record -> acknowledgementSet.add(record.getData()));
         }
-        long numRetries = 0;
         while (true) {
+            LOG.debug("In while loop for processing records, paused = {}", paused);
             try {
-                if (numRetries == 0) {
-                    bufferAccumulator.add(record);
-                } else {
-                    bufferAccumulator.flush();
-                }
+                buffer.writeAll(eventRecords, BUFFER_WRITE_TIMEOUT);
                 break;
             } catch (Exception e) {
-                if (!paused && numRetries++ > maxRetriesOnException) {
+                if (!paused) {
                     paused = true;
                     consumer.pause(consumer.assignment());
                 }
@@ -461,7 +544,7 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
                 }
                 try {
                     Thread.sleep(RETRY_ON_EXCEPTION_SLEEP_MS);
-                    if (paused) {
+                    if (paused && !shutdownInProgress.get()) {
                         ConsumerRecords<String, ?> records = doPoll();
                         if (records.count() > 0) {
                             LOG.warn("Unexpected records received while the consumer is paused. Resetting the partitions to retry from last read pointer");
@@ -493,27 +576,32 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
             }
 
             List<ConsumerRecord<String, T>> partitionRecords = records.records(topicPartition);
+            final List<Record<Event>> eventRecords = new ArrayList<>();
             for (ConsumerRecord<String, T> consumerRecord : partitionRecords) {
                 if (schema == MessageFormat.BYTES) {
-                    InputStream inputStream = new ByteArrayInputStream((byte[])consumerRecord.value());
+                    InputStream byteInputStream = new ByteArrayInputStream((byte[])consumerRecord.value());
+                    InputStream decompressedInputStream = compressionConfig.getDecompressionEngine().createInputStream(byteInputStream);
+
                     if(byteDecoder != null) {
-                        byteDecoder.parse(inputStream, Instant.ofEpochMilli(consumerRecord.timestamp()), (record) -> {
-                            processRecord(acknowledgementSet, record);
-                        });
+                        final long receivedTimeStamp = getRecordTimeStamp(consumerRecord, Instant.now().toEpochMilli());
+
+                        byteDecoder.parse(decompressedInputStream, Instant.ofEpochMilli(receivedTimeStamp), eventRecords::add);
                     } else {
-                        JsonNode jsonNode = objectMapper.readValue(inputStream, JsonNode.class);
+                        JsonNode jsonNode = objectMapper.readValue(decompressedInputStream, JsonNode.class);
 
                         Event event = JacksonLog.builder().withData(jsonNode).build();
                         Record<Event> record = new Record<>(event);
-                        processRecord(acknowledgementSet, record);
+                        eventRecords.add(record);
                     }
                 } else {
                     Record<Event> record = getRecord(consumerRecord, topicPartition.partition());
                     if (record != null) {
-                        processRecord(acknowledgementSet, record);
+                        eventRecords.add(record);
                     }
                 }
             }
+
+            processRecords(acknowledgementSet, eventRecords);
 
             long lastOffset = partitionRecords.get(partitionRecords.size() - 1).offset();
             long firstOffset = partitionRecords.get(0).offset();
@@ -528,6 +616,7 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
     }
 
     public void closeConsumer(){
+        topicMetrics.deregister(consumer);
         consumer.close();
     }
 
@@ -537,6 +626,8 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
 
     @Override
     public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+        // Monotonic count of assignments; unlike joinRate it cannot miss brief events between scrapes.
+        topicMetrics.getNumberOfRebalances().increment();
         synchronized(this) {
             final long epoch = getCurrentTimeNanos();
 
@@ -557,6 +648,7 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
 
     @Override
     public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+        topicMetrics.getNumberOfPartitionsRevoked().increment(partitions.size());
         synchronized(this) {
             commitOffsets(true);
             for (TopicPartition topicPartition : partitions) {
@@ -567,6 +659,7 @@ public class KafkaCustomConsumer implements Runnable, ConsumerRebalanceListener 
                 LOG.info("Revoked partition {}", topicPartition);
                 ownedPartitionsEpoch.remove(topicPartition);
                 partitionCommitTrackerMap.remove(topicPartition.partition());
+                topicMetrics.clearPartitionLag(topicPartition.partition());
             }
             if (paused) {
                 consumer.pause(consumer.assignment());

@@ -6,24 +6,23 @@
 package org.opensearch.dataprepper.plugins.processor.mutatestring;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import org.opensearch.dataprepper.model.event.EventKey;
 
 import java.util.List;
 
-public class WithKeysConfig implements StringProcessorConfig<String> {
+public abstract class WithKeysConfig implements StringProcessorConfig<EventKey> {
 
     @NotNull
     @NotEmpty
     @JsonProperty("with_keys")
-    private List<String> withKeys;
+    @JsonPropertyDescription("A list of keys to modify.")
+    private List<EventKey> withKeys;
 
     @Override
-    public List<String> getIterativeConfig() {
-        return withKeys;
-    }
-
-    public List<String> getWithKeys() {
+    public List<EventKey> getIterativeConfig() {
         return withKeys;
     }
 }

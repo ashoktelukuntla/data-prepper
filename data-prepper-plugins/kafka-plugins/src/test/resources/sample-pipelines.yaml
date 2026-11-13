@@ -22,11 +22,12 @@ log-pipeline:
           retry_backoff: PT100S
           consumer_max_poll_records: 500
           max_partition_fetch_bytes: "10mb"
+          isolation_level: read_committed
       schema:
         registry_url: http://localhost:8081/
         version: 1
-        schema_registry_api_key: 7QV2UXHRVNOC6AJD
-        schema_registry_api_secret: 6M9xLZDIfmyBN9cqNm2n9GU23mleiaIHJWqQeA5P4JY/LyShaRqPuLJw0XhQQ1pD
+        api_key: 7QV2UXHRVNOC6AJD
+        api_secret: 6M9xLZDIfmyBN9cqNm2n9GU23mleiaIHJWqQeA5P4JY/LyShaRqPuLJw0XhQQ1pD
         basic_auth_credentials_source: USER_INFO
         session_timeout_ms: 45000
       aws:
@@ -41,6 +42,10 @@ log-pipeline:
           plaintext:
             username: 5UH4NID4OENKDIBI
             password: jCmncn77F9asfox3yhgZLCEwQ5fx8pKiXnszMqdt0y1GLrdZO1V1iz95aIe1UubX
+          scram:
+            username: 5UH4NID4OENKDIBI
+            password: jCmncn77F9asfox3yhgZLCEwQ5fx8pKiXnszMqdt0y1GLrdZO1V1iz95aIe1UubX
+            mechanism: SCRAM-SHA-512
           oauth:
             oauth_client_id: 0oa9wc21447Pc5vsV5d7
             oauth_client_secret: aGmOfHqIEvBJGDxXAOOcatiE9PvsPgoEePx8IPPa

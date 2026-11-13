@@ -7,10 +7,12 @@ package org.opensearch.dataprepper.plugins.processor.flatten;
 
 import com.github.wnameless.json.flattener.JsonFlattener;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -26,33 +28,57 @@ import java.util.Map;
 @DataPrepperPlugin(name = "flatten", pluginType = Processor.class, pluginConfigurationType = FlattenProcessorConfig.class)
 public class FlattenProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
     private static final Logger LOG = LoggerFactory.getLogger(FlattenProcessor.class);
-
     private static final String SEPARATOR = "/";
     private final FlattenProcessorConfig config;
     private final ExpressionEvaluator expressionEvaluator;
+    private final Map<String, String> excludeKeysAndJsonPointers = new HashMap<>();
 
     @DataPrepperPluginConstructor
     public FlattenProcessor(final PluginMetrics pluginMetrics, final FlattenProcessorConfig config, final ExpressionEvaluator expressionEvaluator) {
         super(pluginMetrics);
         this.config = config;
         this.expressionEvaluator = expressionEvaluator;
+
+        for (final String key : config.getExcludeKeys()) {
+            excludeKeysAndJsonPointers.put(key, getJsonPointer(config.getSource(), key));
+        }
+
+        if (config.getFlattenWhen() != null &&
+                (!expressionEvaluator.isValidExpressionStatement(config.getFlattenWhen()))) {
+            throw new InvalidPluginConfigurationException(
+                    String.format("flatten_when \"%s\" is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax",
+                            config.getFlattenWhen()));
+        }
     }
 
     @Override
     public Collection<Record<Event>> doExecute(final Collection<Record<Event>> records) {
         for (final Record<Event> record : records) {
             final Event recordEvent = record.getData();
+            final Map<String, Object> excludeMap = new HashMap<>();
 
             try {
                 if (config.getFlattenWhen() != null && !expressionEvaluator.evaluateConditional(config.getFlattenWhen(), recordEvent)) {
                     continue;
                 }
 
+                // remove fields specified in "exclude_keys" from the event temporarily
+                for (final String key : excludeKeysAndJsonPointers.keySet()) {
+                    final String keyInEvent = excludeKeysAndJsonPointers.get(key);
+                    if (recordEvent.containsKey(keyInEvent)) {
+                        excludeMap.put(key, recordEvent.get(keyInEvent, Object.class));
+                        recordEvent.delete(keyInEvent);
+                    }
+                }
+
                 final String sourceJson = recordEvent.getAsJsonString(config.getSource());
 
                 // adds ignoreReservedCharacters() so that dots in keys are ignored during flattening
                 // e.g., {"a.b": {"c": 1}} will be flattened as expected: {"a.b.c": 1}; otherwise, flattened result will be {"[\"a.b\"]c": 1}
-                Map<String, Object> flattenedJson = new JsonFlattener(sourceJson).ignoreReservedCharacters().flattenAsMap();
+                Map<String, Object> flattenedJson = new JsonFlattener(sourceJson)
+                        .ignoreReservedCharacters()
+                        .withSeparator(config.getFlattenSeparator().charAt(0))
+                        .flattenAsMap();
 
                 if (config.isRemoveProcessedFields()) {
                     final Map<String, Object> sourceMap = recordEvent.get(config.getSource(), Map.class);
@@ -67,8 +93,14 @@ public class FlattenProcessor extends AbstractProcessor<Record<Event>, Record<Ev
 
                 updateEvent(recordEvent, flattenedJson);
             } catch (Exception e) {
-                LOG.error("Fail to perform flatten operation", e);
+                LOG.error(NOISY, "Fail to perform flatten operation", e);
                 recordEvent.getMetadata().addTags(config.getTagsOnFailure());
+            } finally {
+                // Add temporarily deleted fields back
+                for (final String key : excludeMap.keySet()) {
+                    final String keyInEvent = excludeKeysAndJsonPointers.get(key);
+                    recordEvent.put(keyInEvent, excludeMap.get(key));
+                }
             }
         }
         return records;
@@ -99,14 +131,15 @@ public class FlattenProcessor extends AbstractProcessor<Record<Event>, Record<Ev
         final Map<String, Object> resultMap = new HashMap<>();
 
         for (final Map.Entry<String, Object> entry : inputMap.entrySet()) {
-            final String keyWithoutIndices = removeListIndices(entry.getKey());
+            final String keyWithoutIndices = removeListIndices(entry.getKey(), config.isRemoveBrackets());
             addFieldsToMapWithMerge(keyWithoutIndices, entry.getValue(), resultMap);
         }
         return resultMap;
     }
 
-    private String removeListIndices(final String key) {
-        return key.replaceAll("\\[\\d+\\]", "[]");
+    private String removeListIndices(final String key, final boolean removeBrackets) {
+        final String replacement = removeBrackets ? "" : "[]";
+        return key.replaceAll("\\[\\d+\\]", replacement);
     }
 
     private void addFieldsToMapWithMerge(String key, Object value, Map<String, Object> map) {

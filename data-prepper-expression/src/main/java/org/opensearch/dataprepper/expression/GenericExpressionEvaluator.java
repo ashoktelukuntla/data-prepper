@@ -11,6 +11,8 @@ import org.opensearch.dataprepper.model.event.JacksonEvent;
 
 import javax.inject.Inject;
 import javax.inject.Named;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Public class that {@link org.opensearch.dataprepper.model.processor.Processor},
@@ -34,11 +36,15 @@ class GenericExpressionEvaluator implements ExpressionEvaluator {
      */
     @Override
     public Object evaluate(final String statement, final Event context) {
+        ParseTree parseTree = null;
         try {
-            final ParseTree parseTree = parser.parse(statement);
-            return evaluator.evaluate(parseTree, context);
+            parseTree = parser.parse(statement);
+        } catch (final Exception exception) {
+            throw new ExpressionParsingException("Unable to parse statement \"" + statement + "\"", exception);
         }
-        catch (final Exception exception) {
+        try {
+            return evaluator.evaluate(parseTree, context);
+        } catch (final Exception exception) {
             throw new ExpressionEvaluationException("Unable to evaluate statement \"" + statement + "\"", exception);
         }
     }
@@ -73,5 +79,58 @@ class GenericExpressionEvaluator implements ExpressionEvaluator {
             fromIndex = endPosition + 1;
         }
         return true;
+    }
+
+    @Override
+    public List<String> extractDynamicKeysFromFormatExpression(final String format) {
+        final List<String> formatExpressionKeys = new ArrayList<>();
+
+        if (format == null) {
+            return formatExpressionKeys;
+        }
+
+        int fromIndex = 0;
+        int position = 0;
+        while ((position = format.indexOf("${", fromIndex)) != -1) {
+            int endPosition = format.indexOf("}", position + 1);
+            if (endPosition == -1) {
+                return formatExpressionKeys;
+            }
+            String name = format.substring(position + 2, endPosition);
+
+            if (JacksonEvent.isValidEventKey(name)) {
+                if (!name.startsWith("/")) {
+                    name = "/" + name;
+                }
+                formatExpressionKeys.add(name);
+            }
+            fromIndex = endPosition + 1;
+        }
+        return formatExpressionKeys;
+    }
+
+    @Override
+    public List<String> extractDynamicExpressionsFromFormatExpression(final String format) {
+        final List<String> dynamicExpressionStatements = new ArrayList<>();
+
+        if (format == null) {
+            return dynamicExpressionStatements;
+        }
+
+        int fromIndex = 0;
+        int position = 0;
+        while ((position = format.indexOf("${", fromIndex)) != -1) {
+            int endPosition = format.indexOf("}", position + 1);
+            if (endPosition == -1) {
+                return dynamicExpressionStatements;
+            }
+            String name = format.substring(position + 2, endPosition);
+
+            if (!JacksonEvent.isValidEventKey(name) && isValidExpressionStatement(name)) {
+                dynamicExpressionStatements.add(name);
+            }
+            fromIndex = endPosition + 1;
+        }
+        return dynamicExpressionStatements;
     }
 }

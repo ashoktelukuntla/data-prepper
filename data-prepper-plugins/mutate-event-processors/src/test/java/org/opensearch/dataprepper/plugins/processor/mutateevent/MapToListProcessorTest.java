@@ -14,10 +14,13 @@ import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.record.Record;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +29,8 @@ import java.util.UUID;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
@@ -51,6 +56,16 @@ class MapToListProcessorTest {
         lenient().when(mockConfig.getRemoveProcessedFields()).thenReturn(false);
         lenient().when(mockConfig.getConvertFieldToList()).thenReturn(false);
         lenient().when(mockConfig.getTagsOnFailure()).thenReturn(new ArrayList<>());
+    }
+
+    @Test
+    void invalid_map_to_list_when_throws_InvalidPluginConfigurationException() {
+        final String mapToListWhen = UUID.randomUUID().toString();
+        when(mockConfig.getMapToListWhen()).thenReturn(mapToListWhen);
+
+        when(expressionEvaluator.isValidExpressionStatement(mapToListWhen)).thenReturn(false);
+
+        assertThrows(InvalidPluginConfigurationException.class, this::createObjectUnderTest);
     }
 
     @Test
@@ -312,6 +327,7 @@ class MapToListProcessorTest {
     public void testEventNotProcessedWhenTheWhenConditionIsFalse() {
         final String whenCondition = UUID.randomUUID().toString();
         when(mockConfig.getMapToListWhen()).thenReturn(whenCondition);
+        when(expressionEvaluator.isValidExpressionStatement(whenCondition)).thenReturn(true);
 
         final MapToListProcessor processor = createObjectUnderTest();
         final Record<Event> testRecord = createTestRecord();
@@ -342,6 +358,51 @@ class MapToListProcessorTest {
         assertThat(resultEvent.containsKey("my-list"), is(false));
         assertSourceMapUnchanged(resultEvent);
         assertThat(resultEvent.getMetadata().getTags(), is(new HashSet<>(testTags)));
+    }
+
+    @Test
+    void testMapToListSuccessWithNullValuesInMap() {
+
+        final MapToListProcessor processor = createObjectUnderTest();
+        final Record<Event> testRecord = createTestRecordWithNullValues();
+        final List<Record<Event>> resultRecord = (List<Record<Event>>) processor.doExecute(Collections.singletonList(testRecord));
+
+        assertThat(resultRecord.size(), is(1));
+
+        final Event resultEvent = resultRecord.get(0).getData();
+        List<Map<String, Object>> resultList = resultEvent.get("my-list", List.class);
+
+        assertThat(resultList.size(), is(2));
+        Map<String, Object> resultMapWithNullValue = new HashMap<>();
+        resultMapWithNullValue.put("key", "key2");
+        resultMapWithNullValue.put("value", null);
+        assertThat(resultList, containsInAnyOrder(
+                Map.of("key", "key1", "value", "value1"),
+                resultMapWithNullValue
+        ));
+        assertThat(resultEvent.containsKey("my-map"), is(true));
+        assertSourceMapUnchangedWithNullValues(resultEvent);
+    }
+
+    @Test
+    public void testConvertFieldToListSuccessWithNullValuesInMap() {
+        when(mockConfig.getConvertFieldToList()).thenReturn(true);
+
+        final MapToListProcessor processor = createObjectUnderTest();
+        final Record<Event> testRecord = createTestRecordWithNullValues();
+        final List<Record<Event>> resultRecord = (List<Record<Event>>) processor.doExecute(Collections.singletonList(testRecord));
+
+        assertThat(resultRecord.size(), is(1));
+
+        final Event resultEvent = resultRecord.get(0).getData();
+        List<List<Object>> resultList = resultEvent.get("my-list", List.class);
+
+        assertThat(resultList.size(), is(2));
+        assertThat(resultList, containsInAnyOrder(
+                Arrays.asList("key1", "value1"),
+                Arrays.asList("key2", null)
+        ));
+        assertSourceMapUnchangedWithNullValues(resultEvent);
     }
 
     private MapToListProcessor createObjectUnderTest() {
@@ -383,6 +444,18 @@ class MapToListProcessorTest {
         return new Record<>(event);
     }
 
+    private Record<Event> createTestRecordWithNullValues() {
+        final Map<String, Object> mapData = new HashMap<>();
+        mapData.put("key1", "value1");
+        mapData.put("key2", null);
+        final Map<String, Map<String, Object>> data = Map.of("my-map", mapData);
+        final Event event = JacksonEvent.builder()
+                .withData(data)
+                .withEventType("event")
+                .build();
+        return new Record<>(event);
+    }
+
     private void assertSourceMapUnchanged(final Event resultEvent) {
         assertThat(resultEvent.containsKey("my-map"), is(true));
         assertThat(resultEvent.get("my-map/key1", String.class), is("value1"));
@@ -394,5 +467,11 @@ class MapToListProcessorTest {
         assertThat(resultEvent.get("key1", String.class), is("value1"));
         assertThat(resultEvent.get("key2", String.class), is("value2"));
         assertThat(resultEvent.get("key3", String.class), is("value3"));
+    }
+
+    private void assertSourceMapUnchangedWithNullValues(final Event resultEvent) {
+        assertThat(resultEvent.containsKey("my-map"), is(true));
+        assertThat(resultEvent.get("my-map/key1", String.class), is("value1"));
+        assertThat(resultEvent.get("my-map/key2", String.class), nullValue());
     }
 }

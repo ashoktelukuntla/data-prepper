@@ -5,13 +5,20 @@
 
 package org.opensearch.dataprepper.plugins.processor;
 
+import com.fasterxml.jackson.annotation.JsonClassDescription;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
+import org.opensearch.dataprepper.model.annotations.ExampleValues;
+import org.opensearch.dataprepper.model.annotations.ExampleValues.Example;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 
 import java.time.Duration;
 import java.util.Collection;
@@ -32,7 +39,7 @@ public class DelayProcessor implements Processor<Record<?>, Record<?>> {
         try {
             Thread.sleep(delayDuration.toMillis());
         } catch (final InterruptedException ex) {
-            LOG.error("Interrupted during delay processor", ex);
+            LOG.error(NOISY, "Interrupted during delay processor", ex);
         }
         return records;
     }
@@ -52,8 +59,17 @@ public class DelayProcessor implements Processor<Record<?>, Record<?>> {
 
     }
 
+    @JsonPropertyOrder
+    @JsonClassDescription("This processor will add a delay into the processor chain. " +
+            "Typically, you should use this only for testing, experimenting, and debugging.")
     public static class Configuration {
         @JsonProperty("for")
+        @JsonPropertyDescription("The duration of time to delay. Defaults to <code>1s</code>.")
+        @ExampleValues({
+                @Example(value = "1s", description = "Delays for 1 second."),
+                @Example(value = "1000ms", description = "Delays for 1,000 milliseconds."),
+                @Example(value = "PT10M", description = "Delays for 10 minutes."),
+        })
         private Duration delayFor = Duration.ofSeconds(1);
 
         public Duration getDelayFor() {

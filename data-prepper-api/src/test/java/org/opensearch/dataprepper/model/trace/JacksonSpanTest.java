@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.trace;
@@ -16,6 +20,7 @@ import org.opensearch.dataprepper.model.event.EventMetadata;
 import org.opensearch.dataprepper.model.event.EventType;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
 import org.opensearch.dataprepper.model.event.DefaultEventHandle;
+import org.json.JSONException;
 
 import java.time.Instant;
 import java.util.Arrays;
@@ -40,21 +45,26 @@ import static org.mockito.Mockito.when;
 public class JacksonSpanTest {
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    private static final String TEST_TRACE_ID =  UUID.randomUUID().toString();
-    private static final String TEST_SPAN_ID =  UUID.randomUUID().toString();
-    private static final String TEST_TRACE_STATE =  UUID.randomUUID().toString();
-    private static final String TEST_PARENT_SPAN_ID =  UUID.randomUUID().toString();
-    private static final String TEST_NAME =  UUID.randomUUID().toString();
-    private static final String TEST_KIND =  UUID.randomUUID().toString();
-    private static final String TEST_START_TIME =  UUID.randomUUID().toString();
-    private static final String TEST_END_TIME =  UUID.randomUUID().toString();
+    protected static final String TEST_TRACE_ID =  UUID.randomUUID().toString();
+    protected static final String TEST_SPAN_ID =  UUID.randomUUID().toString();
+    protected static final String TEST_TRACE_STATE =  UUID.randomUUID().toString();
+    protected static final String TEST_PARENT_SPAN_ID =  UUID.randomUUID().toString();
+    protected static final String TEST_NAME =  UUID.randomUUID().toString();
+    protected static final String TEST_KIND =  UUID.randomUUID().toString();
+    protected static final String TEST_SCHEMA_URL =  UUID.randomUUID().toString();
+    protected static final int TEST_FLAGS = 10;
+    protected static final String TEST_START_TIME =  UUID.randomUUID().toString();
+    protected static final String TEST_END_TIME =  UUID.randomUUID().toString();
     private static final Map<String, Object> TEST_ATTRIBUTES = ImmutableMap.of("key1", new Date().getTime(), "key2", UUID.randomUUID().toString());
-    private static final Integer TEST_DROPPED_ATTRIBUTES_COUNT = 8;
-    private static final Integer TEST_DROPPED_EVENTS_COUNT =  45;
-    private static final Integer TEST_DROPPED_LINKS_COUNT =  21;
-    private static final String TEST_TRACE_GROUP =  UUID.randomUUID().toString();
-    private static final Long TEST_DURATION_IN_NANOS =  537L;
-    private static final String TEST_SERVICE_NAME = UUID.randomUUID().toString();
+    private static final Map<String, Object> TEST_STATUS = ImmutableMap.of("statusKey1", UUID.randomUUID().toString(), "statusKey2", UUID.randomUUID().toString());
+    private static final Map<String, Object> TEST_SCOPE = ImmutableMap.of("name", UUID.randomUUID().toString(), "version", UUID.randomUUID().toString(), "attributes", List.of(Map.of("key", UUID.randomUUID().toString(), "value", UUID.randomUUID().toString())));
+    private static final Map<String, Object> TEST_RESOURCE = ImmutableMap.of("attributes", List.of(Map.of("key", UUID.randomUUID().toString(), "value", UUID.randomUUID().toString())));
+    protected static final Integer TEST_DROPPED_ATTRIBUTES_COUNT = 8;
+    protected static final Integer TEST_DROPPED_EVENTS_COUNT =  45;
+    protected static final Integer TEST_DROPPED_LINKS_COUNT =  21;
+    protected static final String TEST_TRACE_GROUP =  UUID.randomUUID().toString();
+    protected static final Long TEST_DURATION_IN_NANOS =  537L;
+    protected static final String TEST_SERVICE_NAME = UUID.randomUUID().toString();
 
     private JacksonSpan.Builder builder;
     
@@ -96,7 +106,12 @@ public class JacksonSpanTest {
                 .withName(TEST_NAME)
                 .withServiceName(TEST_SERVICE_NAME)
                 .withKind(TEST_KIND)
+                .withFlags(TEST_FLAGS)
+                .withScope(TEST_SCOPE)
+                .withResource(TEST_RESOURCE)
+                .withStatus(TEST_STATUS)
                 .withStartTime(TEST_START_TIME)
+                .withSchemaUrl(TEST_SCHEMA_URL)
                 .withEndTime(TEST_END_TIME)
                 .withAttributes(TEST_ATTRIBUTES)
                 .withDroppedAttributesCount(TEST_DROPPED_ATTRIBUTES_COUNT)
@@ -154,6 +169,18 @@ public class JacksonSpanTest {
     }
 
     @Test
+    public void testGetFlags() {
+        final Integer flags = jacksonSpan.getFlags();
+        assertThat(flags, is(equalTo(TEST_FLAGS)));
+    }
+
+    @Test
+    public void testGetSchemaUrl() {
+        final String schemaUrl = jacksonSpan.getSchemaUrl();
+        assertThat(schemaUrl, is(equalTo(TEST_SCHEMA_URL)));
+    }
+
+    @Test
     public void testGetStartTime() {
         final String GetStartTime = jacksonSpan.getStartTime();
         assertThat(GetStartTime, is(equalTo(TEST_START_TIME)));
@@ -163,6 +190,24 @@ public class JacksonSpanTest {
     public void testGetEndTime() {
         final String endTime = jacksonSpan.getEndTime();
         assertThat(endTime, is(equalTo(TEST_END_TIME)));
+    }
+
+    @Test
+    public void testGetScope() {
+        final Map<String, Object> scope = jacksonSpan.getScope();
+        assertThat(scope, is(equalTo(TEST_SCOPE)));
+    }
+
+    @Test
+    public void testGetResource() {
+        final Map<String, Object> resource = jacksonSpan.getResource();
+        assertThat(resource, is(equalTo(TEST_RESOURCE)));
+    }
+
+    @Test
+    public void testGetStatus() {
+        final Map<String, Object> status = jacksonSpan.getStatus();
+        assertThat(status, is(equalTo(TEST_STATUS)));
     }
 
     @Test
@@ -226,6 +271,16 @@ public class JacksonSpanTest {
     }
 
     @Test
+    public void testSetAndGetServiceName() {
+        String serviceName = jacksonSpan.getServiceName();
+        assertThat(serviceName, is(equalTo(TEST_SERVICE_NAME)));
+        final String testServiceName = "testServiceName";
+        jacksonSpan.setServiceName(testServiceName);
+        serviceName = jacksonSpan.getServiceName();
+        assertThat(serviceName, is(equalTo(testServiceName)));
+    }
+
+    @Test
     public void testSetAndGetTraceGroup() {
         final String testTraceGroup = "testTraceGroup";
         jacksonSpan.setTraceGroup(testTraceGroup);
@@ -247,7 +302,21 @@ public class JacksonSpanTest {
     }
 
     @Test
-    public void testToJsonStringAllParameters() throws JsonProcessingException {
+    public void testSetAndGetTraceGroupFieldsInMetadata() {
+        final TraceGroupFields testTraceGroupFields = DefaultTraceGroupFields.builder()
+                .withDurationInNanos(200L)
+                .withStatusCode(404)
+                .withEndTime("Different end time")
+                .build();
+        jacksonSpan.getMetadata().setAttribute(JacksonSpan.TRACE_GROUP_FIELDS_KEY, new DefaultTraceGroupFields());
+        jacksonSpan.setTraceGroupFields(testTraceGroupFields);
+        final TraceGroupFields traceGroupFields = jacksonSpan.getTraceGroupFields();
+        assertThat(traceGroupFields, is(equalTo(traceGroupFields)));
+        assertThat(traceGroupFields, is(equalTo(testTraceGroupFields)));
+    }
+
+    @Test
+    public void testToJsonStringAllParameters() throws JsonProcessingException, JSONException {
         final String jsonResult = jacksonSpan.toJsonString();
         final Map<String, Object> resultMap = mapper.readValue(jsonResult, new TypeReference<Map<String, Object>>() {});
 

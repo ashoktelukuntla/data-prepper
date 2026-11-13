@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.processor.aggregate;
 
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventHandle;
 
 import java.util.Collections;
 
@@ -30,6 +35,14 @@ public interface AggregateAction {
     }
 
     /**
+     * indicates if the action holds the events or not
+     * @return returns if events are held by the processor or not
+     */
+    default boolean holdsEvents() {
+        return false;
+    }
+
+    /**
      * Concludes a group of Events
      *
      * @param aggregateActionInput The {@link AggregateActionInput} from previous calls to handleEvent
@@ -38,6 +51,12 @@ public interface AggregateAction {
      * @since 1.3
      */
     default AggregateActionOutput concludeGroup(final AggregateActionInput aggregateActionInput) {
+        if (aggregateActionInput != null) {
+            EventHandle eventHandle = aggregateActionInput.getEventHandle();
+            if (eventHandle != null) {
+                eventHandle.release(true);
+            }
+        }
         return new AggregateActionOutput(Collections.emptyList());
     }
 

@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.event;
@@ -9,12 +13,19 @@ import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.exc.StreamConstraintsException;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.model.event.exceptions.EventKeyNotFoundException;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -22,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import static org.hamcrest.CoreMatchers.containsStringIgnoringCase;
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -29,6 +41,7 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -70,6 +83,53 @@ public class JacksonEventTest {
         assertThat(result, is(equalTo(value)));
     }
 
+    @Test
+    public void testPutAndGet_withRandomString_eventKey() {
+        final EventKey key = new JacksonEventKey("aRandomKey" + UUID.randomUUID());
+        final UUID value = UUID.randomUUID();
+
+        event.put(key, value);
+        final UUID result = event.get(key, UUID.class);
+
+        assertThat(result, is(notNullValue()));
+        assertThat(result, is(equalTo(value)));
+    }
+
+    @Test
+    public void testPutAndGet_withRandomString_eventKey_multiple_events() {
+        final EventKey key = new JacksonEventKey("aRandomKey" + UUID.randomUUID());
+        final UUID value = UUID.randomUUID();
+
+        for(int i = 0; i < 10; i++) {
+            event = JacksonEvent.builder()
+                    .withEventType(eventType)
+                    .build();
+
+            event.put(key, value);
+            final UUID result = event.get(key, UUID.class);
+
+            assertThat(result, is(notNullValue()));
+            assertThat(result, is(equalTo(value)));
+        }
+    }
+
+    @Test
+    public void testPutAndGet_eventKey_with_non_JacksonEventKey_throws() {
+        final EventKey key = mock(EventKey.class);
+        final UUID value = UUID.randomUUID();
+
+        assertThrows(IllegalArgumentException.class, () -> event.put(key, value));
+        assertThrows(IllegalArgumentException.class, () -> event.get(key, UUID.class));
+    }
+
+    @Test
+    public void testPut_eventKey_with_immutable_action() {
+        final EventKey key = new JacksonEventKey("aRandomKey" + UUID.randomUUID(), EventKeyFactory.EventAction.GET);
+        final UUID value = UUID.randomUUID();
+
+        assertThrows(IllegalArgumentException.class, () -> event.put(key, value));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"/", "foo", "foo-bar", "foo_bar", "foo.bar", "/foo", "/foo/", "a1K.k3-01_02", "keyWithBrackets[]"})
     void testPutAndGet_withStrings(final String key) {
@@ -82,14 +142,194 @@ public class JacksonEventTest {
         assertThat(result, is(equalTo(value)));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"/", "foo", "foo-bar", "foo_bar", "foo.bar", "/foo", "/foo/", "a1K.k3-01_02", "keyWithBrackets[]"})
+    void testPutAndGet_withStrings_eventKey(final String key) {
+        final UUID value = UUID.randomUUID();
+
+        final EventKey eventKey = new JacksonEventKey(key);
+        event.put(eventKey, value);
+        final UUID result = event.get(eventKey, UUID.class);
+
+        assertThat(result, is(notNullValue()));
+        assertThat(result, is(equalTo(value)));
+    }
+
+    @Test
+    void testPutAndGet_withArrays_eventKey() {
+
+        final String key = "list-key/0/foo";
+        final String newValue = UUID.randomUUID().toString();
+
+        final List<Map<String, Object>> listValue = new ArrayList<>();
+        final Map<String, Object> mapValue = Map.of("foo", "bar", "foo-2", "bar-2");
+        listValue.add(mapValue);
+
+        final String listKey = "list-key";
+        final EventKey eventKey = new JacksonEventKey(listKey);
+        event.put(eventKey, listValue);
+
+        final Map<String, Object> expectedMap = new HashMap<>();
+        expectedMap.put(listKey, listValue);
+
+        assertThat(event.toMap(), equalTo(expectedMap));
+
+        final EventKey eventNestedKey = new JacksonEventKey(key);
+        event.put(eventNestedKey, newValue);
+
+        final List<Map<String, Object>> newlistValue = new ArrayList<>();
+        final Map<String, Object> newMapValue = Map.of("foo", newValue, "foo-2", "bar-2");
+        newlistValue.add(newMapValue);
+
+        expectedMap.put(listKey, newlistValue);
+
+        assertThat(event.toMap(), equalTo(expectedMap));
+
+
+        final List<Map<String, Object>> result = event.get(listKey, List.class);
+        assertThat(result, equalTo(newlistValue));
+
+        final String resultValue = event.get(key, String.class);
+        assertThat(resultValue, equalTo(newValue));
+    }
+
+    @Test
+    void testUpdateFailureMetadata() {
+        Object failureMetadata = event.updateFailureMetadata();
+        assertThat(failureMetadata, instanceOf(JacksonEvent.DefaultEventFailureMetadata.class));
+        assertThat(event.get(JacksonEvent.DefaultEventFailureMetadata.FAILURE_METADATA, Map.class), is(nullValue()));
+        ((EventFailureMetadata)failureMetadata).with("key", "value");
+        assertThat(event.get(JacksonEvent.DefaultEventFailureMetadata.FAILURE_METADATA, Map.class), is(notNullValue()));
+    }
+
+    @Test
+    public void testDefaultEventFailureMetadata() {
+        String eventType = UUID.randomUUID().toString();
+        String pluginId = UUID.randomUUID().toString();
+        String pluginName = UUID.randomUUID().toString();
+        String pipelineName = UUID.randomUUID().toString();
+        String errorMessage = UUID.randomUUID().toString();
+        Event event = JacksonEvent.builder()
+                .withEventType(eventType)
+                .build();
+
+        EventFailureMetadata eventFailureMetadata = event.updateFailureMetadata();
+        eventFailureMetadata.with("key1", "value1").with("key2", 2);
+        eventFailureMetadata.withPluginId(pluginId);
+        eventFailureMetadata.withPluginName(pluginName);
+        eventFailureMetadata.withPipelineName(pipelineName);
+        eventFailureMetadata.withErrorMessage(errorMessage);
+        String base = JacksonEvent.DefaultEventFailureMetadata.FAILURE_METADATA + "/";
+        assertThat(event.get(base + "key1", String.class), equalTo("value1"));
+        assertThat(event.get(base + "key2", Integer.class), equalTo(2));
+        assertThat(event.get(base + JacksonEvent.DefaultEventFailureMetadata.PLUGIN_ID, String.class), equalTo(pluginId));
+        assertThat(event.get(base + JacksonEvent.DefaultEventFailureMetadata.PLUGIN_NAME, String.class), equalTo(pluginName));
+        assertThat(event.get(base + JacksonEvent.DefaultEventFailureMetadata.PIPELINE_NAME, String.class), equalTo(pipelineName));
+        assertThat(event.get(base + JacksonEvent.DefaultEventFailureMetadata.ERROR_MESSAGE, String.class), equalTo(errorMessage));
+
+    }
+
+    @Test
+    void testPutAndGet_withArrays_out_of_bounds_on_end_of_list_creates_new_element() {
+
+        final String key = "list-key/1/foo";
+        final String fooValue = UUID.randomUUID().toString();
+
+        final List<Map<String, Object>> listValue = new ArrayList<>();
+        final Map<String, Object> mapValue = Map.of("foo", "bar", "foo-2", "bar-2");
+        listValue.add(mapValue);
+
+        final String listKey = "list-key";
+        final EventKey eventKey = new JacksonEventKey(listKey);
+        event.put(eventKey, listValue);
+
+        event.put(key, fooValue);
+
+        final String resultValue = event.get(key, String.class);
+        assertThat(resultValue, equalTo(fooValue));
+    }
+
+    @Test
+    void testPutAndGet_withArrays_out_of_bounds_throws_IndexOutOfBoundsException() {
+
+        final String key = "list-key/3/foo";
+        final String fooValue = UUID.randomUUID().toString();
+
+        final List<Map<String, Object>> listValue = new ArrayList<>();
+        final Map<String, Object> mapValue = Map.of("foo", "bar", "foo-2", "bar-2");
+        listValue.add(mapValue);
+
+        final String listKey = "list-key";
+        final EventKey eventKey = new JacksonEventKey(listKey);
+        event.put(eventKey, listValue);
+
+        assertThrows(IndexOutOfBoundsException.class, () -> event.put(key, fooValue));
+    }
+
     @Test
     public void testPutKeyCannotBeEmptyString() {
         Throwable exception = assertThrows(IllegalArgumentException.class, () -> event.put("", "value"));
         assertThat(exception.getMessage(), containsStringIgnoringCase("key cannot be an empty string"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"key&1", "key^1", "key%1", "key_1"})
+    public void testReplaceInvalidKeyChars(final String key) {
+        assertThat(JacksonEvent.replaceInvalidKeyChars(key), equalTo("key_1"));
+        assertThat(JacksonEvent.replaceInvalidKeyChars(key.substring(0,3)), equalTo("key"));
+        assertThat(JacksonEvent.replaceInvalidKeyChars(null), equalTo(null));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"key&1", "key^1", "key%1", "key_1"})
+    public void testPutWithReplaceInvalidKeyChars(final String key) {
+        final String value = UUID.randomUUID().toString();
+
+        event.put(key, value, true);
+        assertThat(event.get("key_1", String.class), equalTo(value));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"key&1", "key^1", "key%1", "key_1"})
+    public void testPutWithReplaceInvalidKeyChars_for_map(final String key) {
+        final String value = UUID.randomUUID().toString();
+        final Map<String, String> mapToPut = Map.of(key, value);
+
+        event.put("myMap", mapToPut, true);
+        assertThat(event.get("myMap/key_1", String.class), equalTo(value));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"key&1", "key^1", "key%1", "key_1"})
+    public void testPutEventKeyWithReplaceInvalidKeyChars_for_map(final String key) {
+        final String value = UUID.randomUUID().toString();
+        final Map<String, String> mapToPut = Map.of(key, value);
+
+        final EventKey eventKey = new JacksonEventKey("myMap");
+        event.put(eventKey, mapToPut, true);
+        assertThat(event.get("myMap/key_1", String.class), equalTo(value));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"key&1", "key^1", "key%1", "key_1"})
+    public void testPutEventKeyWithReplaceInvalidKeyCharsFalse_for_map(final String key) {
+        final String value = UUID.randomUUID().toString();
+        final Map<String, String> mapToPut = Map.of(key, value);
+
+        final EventKey eventKey = new JacksonEventKey("myMap");
+        event.put(eventKey, mapToPut, false);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"key&1", "key^1", "key%1"})
+    public void testPutWithoutReplaceInvalidKeyChars(final String key) {
+        final String value = UUID.randomUUID().toString();
+
+        assertThrows(IllegalArgumentException.class, () -> event.put(key, value, false));
+    }
+
     @Test
-    public void testPutAndGet_withMultLevelKey() {
+    public void testPutAndGet_withMultiLevelKey() {
         final String key = "foo/bar";
         final UUID value = UUID.randomUUID();
 
@@ -98,6 +338,49 @@ public class JacksonEventTest {
 
         assertThat(result, is(notNullValue()));
         assertThat(result, is(equalTo(value)));
+    }
+
+    @Test
+    public void testPutAndGet_withMultiLevelKey_eventKey() {
+        final EventKey key = new JacksonEventKey("foo/bar");
+        final UUID value = UUID.randomUUID();
+
+        event.put(key, value);
+        final UUID result = event.get(key, UUID.class);
+
+        assertThat(result, is(notNullValue()));
+        assertThat(result, is(equalTo(value)));
+    }
+
+    @Test
+    public void testPutAndGet_withMultiLevelInvalidValues() {
+        final Map<String, Object> data1 = new HashMap<>();
+        final Map<String, Object> data2 = new HashMap<>();
+        final Map<String, Object> data3 = new HashMap<>();
+        data3.put("key^5", "value5");
+        data2.put("key^3", 3);
+        data2.put("key%4", data3);
+        data1.put("key&2", data2);
+
+        event.put("foo", data1, true);
+        assertThat(event.get("foo/key_2/key_3", Integer.class), equalTo(3));
+        assertThat(event.get("foo/key_2/key_4/key_5", String.class), equalTo("value5"));
+    }
+
+    @Test
+    public void testPutAndGet_withMultiLevelInvalidValues_eventKey() {
+        final EventKey key = new JacksonEventKey("foo");
+        final Map<String, Object> data1 = new HashMap<>();
+        final Map<String, Object> data2 = new HashMap<>();
+        final Map<String, Object> data3 = new HashMap<>();
+        data3.put("key^5", "value5");
+        data2.put("key^3", 3);
+        data2.put("key%4", data3);
+        data1.put("key&2", data2);
+
+        event.put(key, data1, true);
+        assertThat(event.get("foo/key_2/key_3", Integer.class), equalTo(3));
+        assertThat(event.get("foo/key_2/key_4/key_5", String.class), equalTo("value5"));
     }
 
     @Test
@@ -122,6 +405,27 @@ public class JacksonEventTest {
     }
 
     @Test
+    public void testPutAndGet_withMultiLevelKeyTwice_eventKey() {
+        final EventKey key = new JacksonEventKey("foo/bar");
+        final UUID value = UUID.randomUUID();
+
+        event.put(key, value);
+        final UUID result = event.get(key, UUID.class);
+
+        assertThat(result, is(notNullValue()));
+        assertThat(result, is(equalTo(value)));
+
+        final EventKey key2 = new JacksonEventKey("foo/fizz");
+        final UUID value2 = UUID.randomUUID();
+
+        event.put(key2, value2);
+        final UUID result2 = event.get(key2, UUID.class);
+
+        assertThat(result2, is(notNullValue()));
+        assertThat(result2, is(equalTo(value2)));
+    }
+
+    @Test
     public void testPutAndGet_withMultiLevelKeyWithADash() {
         final String key = "foo/bar-bar";
         final UUID value = UUID.randomUUID();
@@ -131,6 +435,69 @@ public class JacksonEventTest {
 
         assertThat(result, is(notNullValue()));
         assertThat(result, is(equalTo(value)));
+    }
+
+    @Test
+    public void testPutAndGet_withMultiLevelKeyWithADash_eventKey() {
+        final EventKey key = new JacksonEventKey("foo/bar-bar");
+        final UUID value = UUID.randomUUID();
+
+        event.put(key, value);
+        final UUID result = event.get(key, UUID.class);
+
+        assertThat(result, is(notNullValue()));
+        assertThat(result, is(equalTo(value)));
+    }
+    @Test
+    public void testPut_withJsonPointerEscapedSlash_storesLiteralKeyName() {
+        // z~1y is JSON Pointer encoding for the literal key name "z/y"
+        // put("z~1y", value) must store a single field whose name is "z/y", not nest under "z"
+        final String value = "some_value";
+
+        event.put("z~1y", value);
+
+        final Map<String, Object> map = event.toMap();
+        assertThat("literal key 'z/y' should exist", map.containsKey("z/y"), is(true));
+        assertThat("escaped key 'z~1y' must NOT be stored literally", map.containsKey("z~1y"), is(false));
+        assertThat("must not create a nested object under 'z'", map.containsKey("z"), is(false));
+    }
+
+    @Test
+    public void testPut_withJsonPointerEscapedTilde_storesLiteralKeyName() {
+        // a~0b is JSON Pointer encoding for the literal key name "a~b"
+        final String value = "some_value";
+
+        event.put("a~0b", value);
+
+        final Map<String, Object> map = event.toMap();
+        assertThat("literal key 'a~b' should exist", map.containsKey("a~b"), is(true));
+        assertThat("escaped key 'a~0b' must NOT be stored literally", map.containsKey("a~0b"), is(false));
+    }
+
+    @Test
+    public void testPut_withJsonPointerEscapedSlash_inNestedPath_storesLiteralFieldName() {
+        // parent/z~1y — the intermediate segment "parent" is plain, leaf "z~1y" → "z/y"
+        final String value = "some_value";
+
+        event.put("parent/z~1y", value);
+
+        final Map<String, Object> map = event.toMap();
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> parent = (Map<String, Object>) map.get("parent");
+        assertThat("parent node must exist", parent, is(notNullValue()));
+        assertThat("literal key 'z/y' should exist under parent", parent.containsKey("z/y"), is(true));
+        assertThat("escaped key 'z~1y' must NOT be stored literally", parent.containsKey("z~1y"), is(false));
+    }
+
+    @Test
+    public void testDelete_withJsonPointerEscapedSlash_deletesLiteralKeyName() {
+        // z~1y is JSON Pointer encoding for the literal key name "z/y"; delete("z~1y") must target that field
+        final String value = "some_value";
+        ((ObjectNode) event.getJsonNode()).put("z/y", value);
+
+        event.delete("z~1y");
+
+        assertThat(event.get("z~1y", String.class), is(nullValue()));
     }
 
     @ParameterizedTest
@@ -145,12 +512,34 @@ public class JacksonEventTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"foo", "/foo", "/foo/", "foo/"})
+    void testGetAtRootLevel_eventKey(final String key) {
+        final String value = UUID.randomUUID().toString();
+
+        event.put(new JacksonEventKey(key), value);
+        final Map<String, String> result = event.get(new JacksonEventKey("", EventKeyFactory.EventAction.GET), Map.class);
+
+        assertThat(result, is(Map.of("foo", value)));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"/foo/bar", "foo/bar", "foo/bar/"})
     void testGetAtRootLevelWithMultiLevelKey(final String key) {
         final String value = UUID.randomUUID().toString();
 
         event.put(key, value);
         final Map<String, String> result = event.get("", Map.class);
+
+        assertThat(result, is(Map.of("foo", Map.of("bar", value))));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/foo/bar", "foo/bar", "foo/bar/"})
+    void testGetAtRootLevelWithMultiLevelKey_eventKey(final String key) {
+        final String value = UUID.randomUUID().toString();
+
+        event.put(new JacksonEventKey(key), value);
+        final Map<String, String> result = event.get( new JacksonEventKey("", EventKeyFactory.EventAction.GET), Map.class);
 
         assertThat(result, is(Map.of("foo", Map.of("bar", value))));
     }
@@ -290,6 +679,14 @@ public class JacksonEventTest {
     }
 
     @Test
+    public void testDelete_eventKey_with_immutable_action() {
+        final EventKey key = new JacksonEventKey("aRandomKey" + UUID.randomUUID(), EventKeyFactory.EventAction.GET);
+        final UUID value = UUID.randomUUID();
+
+        assertThrows(IllegalArgumentException.class, () -> event.delete(key));
+    }
+
+    @Test
     public void testClear() {
         event.put("key1", UUID.randomUUID());
         event.put("key2", UUID.randomUUID());
@@ -304,6 +701,128 @@ public class JacksonEventTest {
         result = event.get("key3/key4", UUID.class);
         assertThat(result, is(nullValue()));
         assertThat(event.toMap().size(), equalTo(0));
+    }
+
+    @Test
+    void merge_with_non_JacksonEvent_throws() {
+        final Event otherEvent = mock(Event.class);
+        assertThrows(IllegalArgumentException.class, () -> event.merge(otherEvent));
+    }
+
+    @Test
+    void merge_with_array_JsonNode_throws() {
+        final JacksonEvent otherEvent = (JacksonEvent) event;
+        event = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(List.of(UUID.randomUUID().toString())).build();
+        assertThrows(UnsupportedOperationException.class, () -> event.merge(otherEvent));
+    }
+
+    @Test
+    void merge_with_array_JsonNode_in_other_throws() {
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(List.of(UUID.randomUUID().toString())).build();
+        assertThrows(IllegalArgumentException.class, () -> event.merge(otherEvent));
+    }
+
+    @Test
+    void merge_sets_all_values() {
+        final String jsonString = "{\"a\": \"alpha\", \"info\": {\"ids\": {\"id\":\"idx\"}}}";
+        event.put("b", "original");
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(jsonString).build();
+        event.merge(otherEvent);
+
+        assertThat(event.get("b", Object.class), equalTo("original"));
+        assertThat(event.get("a", Object.class), equalTo("alpha"));
+        assertThat(event.containsKey("info"), equalTo(true));
+        assertThat(event.get("info/ids/id", String.class), equalTo("idx"));
+    }
+
+    @Test
+    void merge_overrides_existing_values() {
+        final String jsonString = "{\"a\": \"alpha\", \"info\": {\"ids\": {\"id\":\"idx\"}}}";
+        event.put("a", "original");
+        event.put("b", "original");
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(jsonString).build();
+        event.merge(otherEvent);
+
+        assertThat(event.get("b", Object.class), equalTo("original"));
+        assertThat(event.get("a", Object.class), equalTo("alpha"));
+        assertThat(event.containsKey("info"), equalTo(true));
+        assertThat(event.get("info/ids/id", String.class), equalTo("idx"));
+    }
+
+    @Test
+    void merge_with_keys_only_copies_specified_keys() {
+        final String jsonString = "{\"a\": \"alpha\", \"b\": \"beta\", \"c\": \"gamma\"}";
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(jsonString).build();
+        event.merge(otherEvent, List.of("a", "b"));
+
+        assertThat(event.get("a", Object.class), equalTo("alpha"));
+        assertThat(event.get("b", Object.class), equalTo("beta"));
+        assertThat(event.containsKey("c"), equalTo(false));
+    }
+
+    @Test
+    void merge_with_keys_overwrites_existing_values() {
+        event.put("a", "original");
+        final String jsonString = "{\"a\": \"updated\", \"b\": \"beta\"}";
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(jsonString).build();
+        event.merge(otherEvent, List.of("a"));
+
+        assertThat(event.get("a", Object.class), equalTo("updated"));
+        assertThat(event.containsKey("b"), equalTo(false));
+    }
+
+    @Test
+    void merge_with_keys_overwrites_existing_value_with_null() {
+        event.put("a", "original");
+        final String jsonString = "{\"a\": null}";
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(jsonString).build();
+        event.merge(otherEvent, List.of("a"));
+
+        assertThat(event.containsKey("a"), equalTo(true));
+        assertThat(event.get("a", Object.class), equalTo(null));
+    }
+
+    @Test
+    void merge_with_keys_skips_missing_keys_in_other() {
+        event.put("existing", "value");
+        final String jsonString = "{\"a\": \"alpha\"}";
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData(jsonString).build();
+        event.merge(otherEvent, List.of("a", "nonexistent"));
+
+        assertThat(event.get("a", Object.class), equalTo("alpha"));
+        assertThat(event.get("existing", Object.class), equalTo("value"));
+        assertThat(event.containsKey("nonexistent"), equalTo(false));
+    }
+
+    @Test
+    void merge_with_keys_throws_when_keys_list_is_null() {
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData("{}").build();
+        assertThrows(IllegalArgumentException.class, () -> event.merge(otherEvent, null));
+    }
+
+    @Test
+    void merge_with_keys_throws_when_keys_list_is_empty() {
+        Event otherEvent = JacksonEvent.builder().withEventType(EventType.DOCUMENT.toString()).withData("{}").build();
+        assertThrows(IllegalArgumentException.class, () -> event.merge(otherEvent, List.of()));
+    }
+
+    @Test
+    void merge_with_keys_throws_when_other_is_not_JacksonEvent() {
+        final Event otherEvent = mock(Event.class);
+        assertThrows(IllegalArgumentException.class, () -> event.merge(otherEvent, List.of("a")));
+    }
+
+    @Test
+    void merge_with_keys_throws_when_current_event_has_array_data() {
+        final JacksonEvent arrayEvent = JacksonEvent.builder()
+                .withEventType(EventType.DOCUMENT.toString())
+                .withData("[1, 2, 3]")
+                .build();
+        final Event otherEvent = JacksonEvent.builder()
+                .withEventType(EventType.DOCUMENT.toString())
+                .withData("{\"a\": \"alpha\"}")
+                .build();
+        assertThrows(UnsupportedOperationException.class, () -> arrayEvent.merge(otherEvent, List.of("a")));
     }
 
     @ParameterizedTest
@@ -386,7 +905,6 @@ public class JacksonEventTest {
     private <T extends Throwable> void assertThrowsForKeyCheck(final Class<T> expectedThrowable, final String key) {
         assertThrows(expectedThrowable, () -> event.put(key, UUID.randomUUID()));
         assertThrows(expectedThrowable, () -> event.get(key, String.class));
-        assertThrows(expectedThrowable, () -> event.delete(key));
     }
 
     @Test
@@ -439,6 +957,20 @@ public class JacksonEventTest {
     }
 
     @Test
+    public void testBuild_withEventHandle() {
+        final Instant now = Instant.now();
+
+        EventHandle eventHandle = new DefaultEventHandle(now);
+        event = JacksonEvent.builder()
+                .withEventType(eventType)
+                .withEventHandle(eventHandle)
+                .build();
+
+        assertThat(event.getEventHandle(), is(eventHandle));
+        assertThat(event.getEventHandle().getInternalOriginationTime(), is(equalTo(now)));
+    }
+
+    @Test
     public void testBuild_withTimeReceived() {
 
         final Instant now = Instant.now();
@@ -485,6 +1017,7 @@ public class JacksonEventTest {
     public void testBuild_withAllMetadataFields() {
 
         final Instant now = Instant.now().minusSeconds(1);
+        final Instant extTime = Instant.now().minusSeconds(10);
         final Map<String, Object> testAttributes = new HashMap<>();
         testAttributes.put(UUID.randomUUID().toString(), UUID.randomUUID());
         testAttributes.put(UUID.randomUUID().toString(), UUID.randomUUID().toString());
@@ -492,6 +1025,7 @@ public class JacksonEventTest {
 
         final EventMetadata metadata = DefaultEventMetadata.builder()
                 .withEventType(emEventType)
+                .withExternalOriginationTime(extTime)
                 .build();
 
         event = JacksonEvent.builder()
@@ -504,6 +1038,8 @@ public class JacksonEventTest {
         assertThat(event.getMetadata().getAttributes(), is(not(equalTo(testAttributes))));
         assertThat(event.getMetadata().getTimeReceived(), is(not(equalTo(now))));
         assertThat(event.getMetadata().getEventType(), is(equalTo(emEventType)));
+        assertThat(event.getMetadata().getExternalOriginationTime(), is(equalTo(extTime)));
+        assertThat(event.getEventHandle().getExternalOriginationTime(), is(equalTo(extTime)));
     }
 
     @Test
@@ -663,6 +1199,21 @@ public class JacksonEventTest {
     }
 
     @Test
+    public void testBuild_withFormatStringWithValueNotFound_and_defaultValue_for_missing_keys() {
+
+        final String defaultValueForMissingKey = UUID.randomUUID().toString();
+        final String jsonString = "{\"foo\": \"bar\", \"info\": {\"ids\": {\"id\":\"idx\"}}}";
+        final ExpressionEvaluator expressionEvaluator = mock(ExpressionEvaluator.class);
+        event = JacksonEvent.builder()
+                .withEventType(eventType)
+                .withData(jsonString)
+                .getThis()
+                .build();
+        final String result = event.formatString("test-${boo}-string", expressionEvaluator, defaultValueForMissingKey);
+        assertThat(result, equalTo("test-" + defaultValueForMissingKey + "-string"));
+    }
+
+    @Test
     public void testBuild_withFormatStringWithInvalidFormat() {
 
         final String jsonString = "{\"foo\": \"bar\", \"info\": {\"ids\": {\"id\":\"idx\"}}}";
@@ -702,6 +1253,7 @@ public class JacksonEventTest {
         assertThat(createdEvent, notNullValue());
         assertThat(createdEvent, not(sameInstance(originalEvent)));
         assertThat(event.getEventHandle(), is(notNullValue()));
+        assertThat(event.getEventHandle(), instanceOf(DefaultEventHandle.class));
         assertThat(event.getEventHandle().getInternalOriginationTime(), is(notNullValue()));
 
         assertThat(createdEvent.toMap(), equalTo(dataObject));
@@ -758,6 +1310,13 @@ public class JacksonEventTest {
                 .build();
 
         // Include Keys must start with / and also ordered, This is pre-processed in SinkModel
+        List<String> includeNullKey = null;
+        assertThat(event.jsonBuilder().rootKey(null).includeKeys(includeNullKey).toJsonString(), equalTo(jsonString));
+
+        List<String> includeEmptyKey = List.of();
+        assertThat(event.jsonBuilder().rootKey(null).includeKeys(includeEmptyKey).toJsonString(), equalTo(jsonString));
+
+        // Include Keys must start with / and also ordered, This is pre-processed in SinkModel
         List<String> includeKeys1 = Arrays.asList("foo", "info");
         final String expectedJsonString1 = "{\"foo\":\"bar\",\"info\":{\"name\":\"hello\",\"foo\":\"bar\"}}";
         assertThat(event.jsonBuilder().rootKey(null).includeKeys(includeKeys1).toJsonString(), equalTo(expectedJsonString1));
@@ -794,7 +1353,7 @@ public class JacksonEventTest {
 
 
     }
-    
+
     @Test
     void testJsonStringBuilderWithExcludeKeys() {
         final String jsonString = "{\"id\":1,\"foo\":\"bar\",\"info\":{\"name\":\"hello\",\"foo\":\"bar\"},\"tags\":[{\"key\":\"a\",\"value\":\"b\"},{\"key\":\"c\",\"value\":\"d\"}]}";
@@ -842,7 +1401,15 @@ public class JacksonEventTest {
     }
 
     @ParameterizedTest
-    @CsvSource(value = {"test_key, true", "/test_key, true", "inv(alid, false", "getMetadata(\"test_key\"), false"})
+    @CsvSource(value = {"test_key, true",
+            "/test_key, true",
+            "getMetadata(\"test_key\"), false",
+            "key.with.dot, true",
+            "key-with-hyphen, true",
+            "key_with_underscore, true",
+            "key@with@at, true",
+            "key[with]brackets, true"
+    })
     void isValidEventKey_returns_expected_result(final String key, final boolean isValid) {
         assertThat(JacksonEvent.isValidEventKey(key), equalTo(isValid));
     }
@@ -863,4 +1430,73 @@ public class JacksonEventTest {
         return dataObject;
     }
 
+    @ParameterizedTest
+    @MethodSource("getBigDecimalPutTestData")
+    void testPutAndGet_withBigDecimal(final String value) {
+        final String key = "bigDecimalKey";
+        event.put(key, new BigDecimal(value));
+        final Object result = event.get(key, Object.class);
+        assertThat(result, is(notNullValue()));
+        assertThat(result.toString(), is(equalTo(value)));
+    }
+
+    private static Stream<Arguments> getBigDecimalPutTestData() {
+        return Stream.of(
+                Arguments.of("702062202420"),
+                Arguments.of("1.23345E+9"),
+                Arguments.of("1.2345E+60"),
+                Arguments.of("1.2345E+6"),
+                Arguments.of("1.000")
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {32, 64})
+    void build_withData_containing_a_string_value_within_the_raised_limit_succeeds(final int valueSizeInMB) {
+        final String largeValue = buildStringOfSize(valueSizeInMB * 1024 * 1024);
+        final String jsonString = "{\"largeField\":\"" + largeValue + "\"}";
+
+        final Event event = JacksonEvent.builder()
+                .withEventType(eventType)
+                .withData(jsonString)
+                .build();
+
+        assertThat(event.get("largeField", String.class), is(equalTo(largeValue)));
+    }
+
+    @Test
+    void build_withData_containing_a_string_value_exceeding_the_raised_limit_throws_with_preserved_cause() {
+        final String tooLargeValue = buildStringOfSize(65 * 1024 * 1024);
+        final String jsonString = "{\"largeField\":\"" + tooLargeValue + "\"}";
+
+        final IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> JacksonEvent.builder()
+                        .withEventType(eventType)
+                        .withData(jsonString)
+                        .build());
+
+        assertThat(exception.getCause(), is(instanceOf(StreamConstraintsException.class)));
+    }
+
+    @Test
+    void build_withData_that_is_not_valid_json_throws_IllegalArgumentException_that_preserves_the_cause() {
+        final String invalidJson = "{\"key\": not-valid}";
+
+        final IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> JacksonEvent.builder()
+                        .withEventType(eventType)
+                        .withData(invalidJson)
+                        .build());
+
+        assertThat(exception.getCause(), is(notNullValue()));
+        assertThat(exception.getCause(), is(instanceOf(JsonProcessingException.class)));
+    }
+
+    private static String buildStringOfSize(final int length) {
+        final StringBuilder builder = new StringBuilder(length);
+        while (builder.length() < length) {
+            builder.append('a');
+        }
+        return builder.toString();
+    }
 }

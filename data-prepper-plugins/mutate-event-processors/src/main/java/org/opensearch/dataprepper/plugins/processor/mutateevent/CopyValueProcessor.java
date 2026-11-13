@@ -6,10 +6,13 @@
 package org.opensearch.dataprepper.plugins.processor.mutateevent;
 
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -22,8 +25,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-
-import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
 
 @DataPrepperPlugin(name = "copy_values", pluginType = Processor.class, pluginConfigurationType = CopyValueProcessorConfig.class)
 public class CopyValueProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
@@ -38,6 +39,14 @@ public class CopyValueProcessor extends AbstractProcessor<Record<Event>, Record<
         this.config = config;
         this.entries = config.getEntries();
         this.expressionEvaluator = expressionEvaluator;
+
+        config.getEntries().forEach(entry -> {
+            if (entry.getCopyWhen() != null
+                    && !expressionEvaluator.isValidExpressionStatement(entry.getCopyWhen())) {
+                throw new InvalidPluginConfigurationException(
+                        String.format("copy_when %s is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax", entry.getCopyWhen()));
+            }
+        });
     }
 
     @Override
@@ -84,7 +93,13 @@ public class CopyValueProcessor extends AbstractProcessor<Record<Event>, Record<
                     }
                 }
             } catch (final Exception e) {
-                LOG.error(EVENT, "There was an exception while processing Event [{}]", recordEvent, e);
+                LOG.atError()
+                        .addMarker(EVENT)
+                        .addMarker(NOISY)
+                        .setMessage("There was an exception while processing Event [{}]")
+                        .addArgument(recordEvent)
+                        .setCause(e)
+                        .log();
             }
         }
 

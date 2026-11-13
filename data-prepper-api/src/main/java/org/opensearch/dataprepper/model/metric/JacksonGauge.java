@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.metric;
 
 import org.opensearch.dataprepper.model.event.EventType;
+import org.opensearch.dataprepper.model.validation.ParameterValidator;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -31,6 +36,8 @@ public class JacksonGauge extends JacksonMetric implements Gauge {
 
     protected JacksonGauge(Builder builder, boolean flattenAttributes) {
         super(builder, flattenAttributes);
+        checkAndSetDefaultValues();
+        new ParameterValidator().validate(REQUIRED_KEYS, REQUIRED_NON_EMPTY_KEYS, REQUIRED_NON_NULL_KEYS, (HashMap<String, Object>)toMap());
         checkArgument(this.getMetadata().getEventType().equals(EventType.METRIC.toString()), "eventType must be of type Metric");
     }
 
@@ -63,7 +70,7 @@ public class JacksonGauge extends JacksonMetric implements Gauge {
          */
         public Builder withValue(final Double value) {
             if (value != null) {
-                data.put(VALUE_KEY, value);
+                put(VALUE_KEY, value);
             }
             return this;
         }
@@ -96,16 +103,9 @@ public class JacksonGauge extends JacksonMetric implements Gauge {
          * @since 2.1
          */
         public JacksonGauge build(boolean flattenAttributes) {
-            this.withEventKind(Metric.KIND.GAUGE.toString());
-            this.withData(data);
-            this.withEventType(EventType.METRIC.toString());
-            checkAndSetDefaultValues();
-            new ParameterValidator().validate(REQUIRED_KEYS, REQUIRED_NON_EMPTY_KEYS, REQUIRED_NON_NULL_KEYS, data);
+            populateEvent(KIND.GAUGE.toString());
             return new JacksonGauge(this, flattenAttributes);
         }
 
-        private void checkAndSetDefaultValues() {
-            data.computeIfAbsent(ATTRIBUTES_KEY, k -> new HashMap<>());
-        }
     }
 }

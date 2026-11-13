@@ -1,11 +1,16 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.metric;
 
 import org.opensearch.dataprepper.model.event.EventType;
+import org.opensearch.dataprepper.model.validation.ParameterValidator;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -32,6 +37,8 @@ public class JacksonSum extends JacksonMetric implements Sum {
 
     protected JacksonSum(JacksonSum.Builder builder, boolean flattenAttributes) {
         super(builder, flattenAttributes);
+        checkAndSetDefaultValues();
+        new ParameterValidator().validate(REQUIRED_KEYS, REQUIRED_NON_EMPTY_KEYS, REQUIRED_NON_NULL_KEYS, (HashMap<String, Object>)toMap());
 
         checkArgument(this.getMetadata().getEventType().equals(EventType.METRIC.toString()), "eventType must be of type Metric");
     }
@@ -75,7 +82,7 @@ public class JacksonSum extends JacksonMetric implements Sum {
          */
         public Builder withValue(final Double value) {
             if (value != null) {
-                data.put(VALUE_KEY, value);
+                put(VALUE_KEY, value);
             }
             return this;
         }
@@ -87,7 +94,7 @@ public class JacksonSum extends JacksonMetric implements Sum {
          * @since 1.4
          */
         public Builder withAggregationTemporality(String aggregationTemporality) {
-            data.put(AGGREGATION_TEMPORALITY_KEY, aggregationTemporality);
+            put(AGGREGATION_TEMPORALITY_KEY, aggregationTemporality);
             return this;
         }
 
@@ -98,7 +105,7 @@ public class JacksonSum extends JacksonMetric implements Sum {
          * @since 1.4
          */
         public Builder withIsMonotonic(final boolean isMonotonic) {
-            data.put(IS_MONOTONIC_KEY, isMonotonic);
+            put(IS_MONOTONIC_KEY, isMonotonic);
             return this;
         }
 
@@ -130,18 +137,11 @@ public class JacksonSum extends JacksonMetric implements Sum {
          * @since 2.1
          */
         public JacksonSum build(boolean flattenAttributes) {
-            this.withData(data);
-            this.withEventType(EventType.METRIC.toString());
-            this.withEventKind(Metric.KIND.SUM.toString());
+            populateEvent(KIND.SUM.toString());
 
-            checkAndSetDefaultValues();
-            new ParameterValidator().validate(REQUIRED_KEYS, REQUIRED_NON_EMPTY_KEYS, REQUIRED_NON_NULL_KEYS, data);
             return new JacksonSum(this, flattenAttributes);
         }
 
-        private void checkAndSetDefaultValues() {
-            data.computeIfAbsent(ATTRIBUTES_KEY, k -> new HashMap<>());
-        }
 
     }
 }

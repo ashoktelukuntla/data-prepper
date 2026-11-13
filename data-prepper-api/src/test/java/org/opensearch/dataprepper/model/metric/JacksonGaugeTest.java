@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.metric;
@@ -12,6 +16,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.opensearch.dataprepper.model.event.TestObject;
 import org.opensearch.dataprepper.model.event.DefaultEventHandle;
+import org.opensearch.dataprepper.model.event.EventHandle;
+import org.opensearch.dataprepper.model.event.AggregateEventHandle;
 import org.skyscreamer.jsonassert.JSONAssert;
 
 import java.time.Instant;
@@ -21,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -30,23 +37,26 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JacksonGaugeTest {
 
-    private static final String TEST_KEY2 = UUID.randomUUID().toString();
-    private static final Long TEST_TIME_KEY1 = new Date().getTime();
-    private static final Map<String, Object> TEST_ATTRIBUTES = ImmutableMap.of(
+    protected static final String TEST_KEY2 = UUID.randomUUID().toString();
+    protected static final Long TEST_TIME_KEY1 = new Date().getTime();
+    protected static final Map<String, Object> TEST_ATTRIBUTES = ImmutableMap.of(
             "key1", TEST_TIME_KEY1,
             "key2", TEST_KEY2);
-    private static final String TEST_SERVICE_NAME = "service";
-    private static final String TEST_NAME = "name";
-    private static final String TEST_DESCRIPTION = "description";
-    private static final String TEST_UNIT_NAME = "unit";
-    private static final String TEST_START_TIME = "2022-01-01T00:00:00Z";
-    private static final String TEST_TIME = "2022-01-02T00:00:00Z";
-    private static final String TEST_EVENT_KIND = Metric.KIND.GAUGE.name();
-    private static final Double TEST_VALUE = 1D;
-    private static final String TEST_SCHEMA_URL = "schema";
-    private static final Integer TEST_FLAGS = 1;
+    protected static final Map<String, Object> TEST_SCOPE = ImmutableMap.of("name", UUID.randomUUID().toString(), "version", UUID.randomUUID().toString(), "attributes", List.of(Map.of("key", UUID.randomUUID().toString(), "value", UUID.randomUUID().toString())));
+    protected static final Map<String, Object> TEST_RESOURCE = ImmutableMap.of("attributes", List.of(Map.of("key", UUID.randomUUID().toString(), "value", UUID.randomUUID().toString())));
+    protected static final Map<String, Object> TEST_METADATA = ImmutableMap.of("metadataKey1", UUID.randomUUID().toString(), "metadataKey2", UUID.randomUUID().toString(), "metadataKey3", UUID.randomUUID().toString());
+    protected static final String TEST_SERVICE_NAME = "service";
+    protected static final String TEST_NAME = "name";
+    protected static final String TEST_DESCRIPTION = "description";
+    protected static final String TEST_UNIT_NAME = "unit";
+    protected static final String TEST_START_TIME = "2022-01-01T00:00:00Z";
+    protected static final String TEST_TIME = "2022-01-02T00:00:00Z";
+    protected static final String TEST_EVENT_KIND = Metric.KIND.GAUGE.name();
+    protected static final Double TEST_VALUE = 1D;
+    protected static final String TEST_SCHEMA_URL = "schema";
+    protected static final Integer TEST_FLAGS = 1;
 
-    private static final List<Exemplar> TEST_EXEMPLARS = Arrays.asList(
+    protected static final List<Exemplar> TEST_EXEMPLARS = Arrays.asList(
             new DefaultExemplar("1970-01-01T00:00:00Z", 2.0, "xsdf", "abcd", Map.of("test", "value")),
             new DefaultExemplar("1971-01-01T00:00:00Z", 5.0, "xsdt", "asdf", Map.of("test", "value"))
     );
@@ -65,6 +75,9 @@ class JacksonGaugeTest {
                 .withStartTime(TEST_START_TIME)
                 .withTime(TEST_TIME)
                 .withUnit(TEST_UNIT_NAME)
+                .withScope(TEST_SCOPE)
+                .withResource(TEST_RESOURCE)
+                .withMetricMetadata(TEST_METADATA)
                 .withValue(TEST_VALUE)
                 .withServiceName(TEST_SERVICE_NAME)
                 .withExemplars(TEST_EXEMPLARS)
@@ -89,6 +102,24 @@ class JacksonGaugeTest {
     public void testGetName() {
         final String name = gauge.getName();
         assertThat(name, is(equalTo(TEST_NAME)));
+    }
+
+    @Test
+    public void testGetDefaultEventHandle() {
+        EventHandle eventHandle = new DefaultEventHandle(Instant.now());
+        builder.withEventHandle(eventHandle);
+        JacksonGauge gauge = builder.build();
+        final EventHandle handle = gauge.getEventHandle();
+        assertThat(handle, is(sameInstance(eventHandle)));
+    }
+
+    @Test
+    public void testGetAggregateEventHandle() {
+        EventHandle eventHandle = new AggregateEventHandle(Instant.now());
+        builder.withEventHandle(eventHandle);
+        JacksonGauge gauge = builder.build();
+        final EventHandle handle = gauge.getEventHandle();
+        assertThat(handle, is(sameInstance(eventHandle)));
     }
 
     @Test
@@ -121,6 +152,24 @@ class JacksonGaugeTest {
     public void testGetStartTime() {
         final String GetStartTime = gauge.getStartTime();
         assertThat(GetStartTime, is(equalTo(TEST_START_TIME)));
+    }
+
+    @Test
+    public void testGetScope() {
+        final Map<String, Object> scope = gauge.getScope();
+        assertThat(scope, is(equalTo(TEST_SCOPE)));
+    }
+
+    @Test
+    public void testGetResource() {
+        final Map<String, Object> resource = gauge.getResource();
+        assertThat(resource, is(equalTo(TEST_RESOURCE)));
+    }
+
+    @Test
+    public void testGetMetricMetadata() {
+        final Map<String, Object> metadata = gauge.getMetricMetadata();
+        assertThat(metadata, is(equalTo(TEST_METADATA)));
     }
 
     @Test
@@ -173,7 +222,7 @@ class JacksonGaugeTest {
     }
 
     @Test
-    public void testGaugeToJsonString() throws JSONException {
+    public void testGaugeToJsonString() throws Exception {
         gauge.put("foo", "bar");
         final String value = UUID.randomUUID().toString();
         gauge.put("testObject", new TestObject(value));

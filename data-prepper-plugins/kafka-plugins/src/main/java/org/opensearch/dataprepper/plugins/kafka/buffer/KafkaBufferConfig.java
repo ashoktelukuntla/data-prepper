@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.plugins.kafka.buffer;
@@ -21,6 +25,7 @@ import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerConfi
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerProperties;
 import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaConfig;
 
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -28,6 +33,9 @@ import java.util.Optional;
 
 class KafkaBufferConfig implements KafkaProducerConfig, KafkaConsumerConfig {
     private static final Duration DEFAULT_DRAIN_TIMEOUT = Duration.ofSeconds(30);
+    static final Duration DEFAULT_ACKNOWLEDGEMENTS_TIMEOUT = Duration.ofHours(Integer.MAX_VALUE);
+    static final int DEFAULT_BOUNDED_BUFFER_SIZE = 1000000;
+    static final int DEFAULT_BOUNDED_BATCH_SIZE = 250000;
 
     @JsonProperty("bootstrap_servers")
     private List<String> bootstrapServers;
@@ -54,9 +62,17 @@ class KafkaBufferConfig implements KafkaProducerConfig, KafkaConsumerConfig {
     @JsonProperty("drain_timeout")
     private Duration drainTimeout = DEFAULT_DRAIN_TIMEOUT;
 
+    @JsonProperty("acknowledgements_timeout")
+    private Duration acknowledgementsTimeout = DEFAULT_ACKNOWLEDGEMENTS_TIMEOUT;
+
     @JsonProperty("custom_metric_prefix")
     private String customMetricPrefix;
 
+    @JsonProperty("bounded_buffer_size")
+    private int boundedBufferSize = DEFAULT_BOUNDED_BUFFER_SIZE;
+
+    @JsonProperty("bounded_batch_size")
+    private int boundedBatchSize = DEFAULT_BOUNDED_BATCH_SIZE;
 
     public List<String> getBootstrapServers() {
         if (Objects.nonNull(bootstrapServers)) {
@@ -144,8 +160,23 @@ class KafkaBufferConfig implements KafkaProducerConfig, KafkaConsumerConfig {
         return drainTimeout;
     }
 
+    @Override
+    @JsonIgnore
+    public Duration getAcknowledgementsTimeout() {
+        return acknowledgementsTimeout;
+    }
+
     @JsonIgnore
     public Optional<String> getCustomMetricPrefix() {
         return Optional.ofNullable(customMetricPrefix);
     }
+
+    public int getBoundedBufferSize() {
+        return boundedBufferSize;
+    }
+
+    public int getBoundedBatchSize() {
+        return boundedBatchSize;
+    }
+
 }

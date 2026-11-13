@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.metrics;
@@ -86,4 +90,9 @@ public class MetricNames {
      * Delimiter used to separate path components in metric names.
      */
     public static final String DELIMITER = ".";
+
+    /**
+     * Metric representing buffer read latency
+     */
+    public static final String READ_LATENCY = "readLatency";
 }

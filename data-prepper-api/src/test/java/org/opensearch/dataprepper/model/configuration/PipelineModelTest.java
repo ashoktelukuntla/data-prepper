@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.configuration;
@@ -105,23 +109,6 @@ class PipelineModelTest {
         );
 
         assertEquals(expectedPreppersPluginModel, pipelineModel.getProcessors());
-    }
-
-    @Test
-    void testPipelineModelWithNullSourceThrowsException() {
-        final Exception exception = assertThrows(IllegalArgumentException.class, () -> new PipelineModel(
-                null,
-                validBufferPluginModel(),
-                validPreppersPluginModel(),
-                validPipelineRouter(),
-                validSinksPluginModel(),
-                TEST_WORKERS,
-                TEST_READ_BATCH_DELAY
-        ));
-
-        final String expected = "Source must not be null";
-
-        assertTrue(exception.getMessage().contains(expected));
     }
 
     @Test

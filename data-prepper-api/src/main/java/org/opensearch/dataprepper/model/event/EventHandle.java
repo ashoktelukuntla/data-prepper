@@ -1,6 +1,10 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.model.event;
@@ -14,9 +18,10 @@ public interface EventHandle {
      *
      * @param result result to be used while releasing. This indicates if
      *               the operation on the event handle is success or not
+     * @return returns true if the event handle is released successful, false otherwise
      * @since 2.2
      */
-    void release(boolean result);
+    boolean release(boolean result);
 
     /**
      * sets external origination time

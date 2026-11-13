@@ -14,23 +14,27 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
-import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.plugins.sink.opensearch.DistributionVersion;
+import org.opensearch.dataprepper.plugins.sink.opensearch.configuration.OpenSearchSinkConfig;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.apache.commons.io.FileUtils.ONE_MB;
@@ -43,15 +47,20 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.AWS_OPTION;
+import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.COMPONENT_TEMPLATES;
+import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.COMPOSED_OF;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.DISTRIBUTION_VERSION;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.DOCUMENT_ROOT_KEY;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.DOCUMENT_VERSION_EXPRESSION;
+import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.ROUTING;
+import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.ROUTING_FIELD;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.SERVERLESS;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConfiguration.TEMPLATE_TYPE;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.index.IndexConstants.RAW_DEFAULT_TEMPLATE_FILE;
@@ -64,6 +73,8 @@ public class IndexConfigurationTests {
 
     private static final String DEFAULT_TEMPLATE_FILE = "test-template-withshards.json";
     private static final String TEST_CUSTOM_INDEX_POLICY_FILE = "test-custom-index-policy-file.json";
+
+    ObjectMapper objectMapper;
 
     @Test
     public void testRawAPMSpan() {
@@ -120,6 +131,77 @@ public class IndexConfigurationTests {
         assertThat(dynamicTemplates.get(1), hasKey("span_attributes_map"));
     }
 
+    @ParameterizedTest
+    @EnumSource(value = TemplateType.class)
+    public void testRawAPMSpanPlainV2AlwaysUsesComposedIndexTemplate(final TemplateType templateType) throws IOException {
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexType(IndexType.TRACE_ANALYTICS_RAW_PLAIN_V2.getValue())
+                .withTemplateType(templateType.getTypeName())
+                .build();
+        assertThat(indexConfiguration.getTemplateType(), equalTo(TemplateType.INDEX_TEMPLATE));
+        assertThat(indexConfiguration.getIndexAlias(), equalTo("otel-v2-apm-span"));
+        assertThat(indexConfiguration.getDocumentId(), equalTo("${traceId}/${spanId}"));
+
+        final Map<String, Object> indexTemplate = indexConfiguration.getIndexTemplate();
+        assertThat(indexTemplate.get(COMPOSED_OF), equalTo(List.of("otel-v2-apm-span-plain", "otel-v2-apm-span-nested-keyword")));
+        assertThat(indexTemplate.get("template"), equalTo(Map.of("settings", Map.of("index.append_only.enabled", false))));
+
+        final Map<String, Map<String, Object>> componentTemplates = indexConfiguration.getManagedComponentTemplates();
+        assertThat(new ArrayList<>(componentTemplates.keySet()), equalTo(indexTemplate.get(COMPOSED_OF)));
+
+        // The plain component carries the plain span template's mappings and version unchanged.
+        final Map<String, Object> plainTemplate = new ObjectMapper().readValue(
+                getClass().getClassLoader().getResource("index-template/" + IndexConstants.RAW_STANDARD_TEMPLATE_FILE),
+                new TypeReference<Map<String, Object>>() {});
+        assertThat(componentTemplates.get("otel-v2-apm-span-plain"), equalTo(plainTemplate));
+
+        final Map<String, Object> nestedKeyword = componentTemplates.get("otel-v2-apm-span-nested-keyword");
+        assertThat(nestedKeyword.get("version"), equalTo(1));
+        final Map<String, Object> mappings = (Map<String, Object>) ((Map<String, Object>) nestedKeyword.get("template")).get("mappings");
+        final List<Map<String, Object>> dynamicTemplates = (List<Map<String, Object>>) mappings.get("dynamic_templates");
+        assertThat(dynamicTemplates.size(), equalTo(2));
+        for (final String nestedField : List.of("events", "links")) {
+            final Map<String, Object> dynamicTemplate = dynamicTemplates.stream()
+                    .filter(entry -> entry.containsKey("string_" + nestedField + "_attributes"))
+                    .map(entry -> (Map<String, Object>) entry.get("string_" + nestedField + "_attributes"))
+                    .findFirst()
+                    .orElseThrow();
+            assertThat(dynamicTemplate.get("path_match"), equalTo(nestedField + ".attributes.*"));
+            assertThat(dynamicTemplate.get("match_mapping_type"), equalTo("string"));
+            assertThat(dynamicTemplate.get("mapping"), equalTo(Map.of("type", "keyword", "ignore_above", 256)));
+        }
+    }
+
+    @Test
+    public void testRawAPMSpanPlainV2AppendsConfiguredComponentTemplates() {
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexType(IndexType.TRACE_ANALYTICS_RAW_PLAIN_V2.getValue())
+                .withComponentTemplates(List.of("parquet-settings"))
+                .build();
+        assertThat(indexConfiguration.getIndexTemplate().get(COMPOSED_OF),
+                equalTo(List.of("otel-v2-apm-span-plain", "otel-v2-apm-span-nested-keyword", "parquet-settings")));
+        assertThat(indexConfiguration.getManagedComponentTemplates().keySet(),
+                equalTo(Set.of("otel-v2-apm-span-plain", "otel-v2-apm-span-nested-keyword")));
+    }
+
+    @Test
+    public void testRawAPMSpanPlainV2RejectsEs6() {
+        final IndexConfiguration.Builder builder = new IndexConfiguration.Builder()
+                .withIndexType(IndexType.TRACE_ANALYTICS_RAW_PLAIN_V2.getValue())
+                .withDistributionVersion(DistributionVersion.ES6.getVersion());
+        assertThrows(InvalidPluginConfigurationException.class, builder::build);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = IndexType.class, names = {"TRACE_ANALYTICS_RAW_PLAIN_V2"}, mode = EnumSource.Mode.EXCLUDE)
+    public void testOtherIndexTypesHaveNoManagedComponentTemplates(final IndexType indexType) {
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexType(indexType.getValue())
+                .withIndexAlias("my-index")
+                .build();
+        assertThat(indexConfiguration.getManagedComponentTemplates(), anEmptyMap());
+    }
+
     @Test
     public void testServiceMapWithIndexTemplates() {
         final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
@@ -138,6 +220,112 @@ public class IndexConfigurationTests {
 
         assertThat(dynamicTemplates.size(), equalTo(1));
         assertThat(dynamicTemplates.get(0), hasKey("strings_as_keyword"));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = IndexType.class, names = {"TRACE_ANALYTICS_RAW_PLAIN", "LOG_ANALYTICS_PLAIN", "OTEL_APM_SERVICE_MAP"})
+    public void testBuiltInIndexTypeWithComponentTemplates(final IndexType indexType) {
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexType(indexType.getValue())
+                .withTemplateType(TemplateType.INDEX_TEMPLATE.getTypeName())
+                .withComponentTemplates(List.of("parquet-settings", "compression-settings"))
+                .build();
+        assertThat(indexConfiguration.getIndexTemplate(), hasKey("template"));
+        assertThat(indexConfiguration.getIndexTemplate().get(COMPOSED_OF),
+                equalTo(List.of("parquet-settings", "compression-settings")));
+    }
+
+    @Test
+    public void testCustomWithComponentTemplatesOnly() throws JsonProcessingException {
+        final Map<String, Object> metadata = initializeConfigMetaData(
+                null, "my-index", null, null, null, null, null);
+        metadata.put(TEMPLATE_TYPE, TemplateType.INDEX_TEMPLATE.getTypeName());
+        metadata.put(COMPONENT_TEMPLATES, List.of("parquet-settings"));
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(getOpenSearchSinkConfig(metadata));
+        assertThat(indexConfiguration.getIndexTemplate(), equalTo(Map.of(COMPOSED_OF, List.of("parquet-settings"))));
+    }
+
+    @Test
+    public void testComponentTemplatesAppendToComposedOfInTemplateContent() throws JsonProcessingException {
+        final String templateContent = "{\"composed_of\": [\"from-file\", \"shared\"], \"template\": {}}";
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexAlias("my-index")
+                .withTemplateType(TemplateType.INDEX_TEMPLATE.getTypeName())
+                .withTemplateContent(templateContent)
+                .withComponentTemplates(List.of("shared", "from-config"))
+                .build();
+        assertThat(indexConfiguration.getIndexTemplate().get(COMPOSED_OF),
+                equalTo(List.of("from-file", "shared", "from-config")));
+    }
+
+    @Test
+    public void testComponentTemplatesRequireIndexTemplateType() {
+        final IndexConfiguration.Builder builder = new IndexConfiguration.Builder()
+                .withIndexType(IndexType.TRACE_ANALYTICS_RAW_PLAIN.getValue())
+                .withTemplateType(TemplateType.V1.getTypeName())
+                .withComponentTemplates(List.of("parquet-settings"));
+        assertThrows(InvalidPluginConfigurationException.class, builder::build);
+    }
+
+    @Test
+    public void testComponentTemplatesRejectedWhenManagementDisabled() {
+        final IndexConfiguration.Builder builder = new IndexConfiguration.Builder()
+                .withIndexAlias("my-index")
+                .withIndexType(IndexType.MANAGEMENT_DISABLED.getValue())
+                .withTemplateType(TemplateType.INDEX_TEMPLATE.getTypeName())
+                .withComponentTemplates(List.of("parquet-settings"));
+        assertThrows(InvalidPluginConfigurationException.class, builder::build);
+    }
+
+    @Test
+    public void testComponentTemplatesRejectEmptyName() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new IndexConfiguration.Builder().withComponentTemplates(List.of("")));
+    }
+
+    @Test
+    public void testNoComponentTemplatesLeavesTemplateUnchanged() {
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexType(IndexType.TRACE_ANALYTICS_RAW_PLAIN.getValue())
+                .withTemplateType(TemplateType.INDEX_TEMPLATE.getTypeName())
+                .build();
+        assertThat(indexConfiguration.getIndexTemplate(), not(hasKey(COMPOSED_OF)));
+    }
+
+    @Test
+    public void testOTelAPMServiceMap_dependencyAttributesMappedAsKeywordWithKeywordSubField() {
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder().withIndexType(
+                IndexType.OTEL_APM_SERVICE_MAP.getValue()).build();
+        final Map<String, Object> indexTemplate = indexConfiguration.getIndexTemplate();
+        assertThat(indexTemplate.get("version"), equalTo(1));
+        assertDependencyAttributesMapping((Map<String, Object>) indexTemplate.get("mappings"));
+    }
+
+    @Test
+    public void testOTelAPMServiceMapWithIndexTemplates_dependencyAttributesMappedAsKeywordWithKeywordSubField() {
+        final IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexType(IndexType.OTEL_APM_SERVICE_MAP.getValue())
+                .withTemplateType(TemplateType.INDEX_TEMPLATE.getTypeName())
+                .build();
+        final Map<String, Object> indexTemplate = indexConfiguration.getIndexTemplate();
+        assertThat(indexTemplate.get("version"), equalTo(1));
+        final Map<String, Object> template = (Map<String, Object>) indexTemplate.get("template");
+        assertDependencyAttributesMapping((Map<String, Object>) template.get("mappings"));
+    }
+
+    private void assertDependencyAttributesMapping(final Map<String, Object> mappings) {
+        final List<Map<String, Object>> dynamicTemplates = (List<Map<String, Object>>) mappings.get("dynamic_templates");
+        final Map<String, Object> dependencyAttributesTemplate = dynamicTemplates.stream()
+                .filter(dynamicTemplate -> dynamicTemplate.containsKey("string_dependency_attributes"))
+                .map(dynamicTemplate -> (Map<String, Object>) dynamicTemplate.get("string_dependency_attributes"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(dependencyAttributesTemplate.get("path_match"), equalTo("*.dependencyAttributes.*"));
+        assertThat(dependencyAttributesTemplate.get("match_mapping_type"), equalTo("string"));
+        final Map<String, Object> mapping = (Map<String, Object>) dependencyAttributesTemplate.get("mapping");
+        assertThat(mapping.get("type"), equalTo("keyword"));
+        final Map<String, Object> fields = (Map<String, Object>) mapping.get("fields");
+        assertThat(fields, equalTo(Map.of("keyword", Map.of("type", "keyword"))));
     }
 
     @Test
@@ -159,6 +347,10 @@ public class IndexConfigurationTests {
         assertEquals(10, indexConfiguration.getBulkSize());
         assertEquals(50, indexConfiguration.getFlushTimeout());
         assertFalse(indexConfiguration.getIndexTemplate().isEmpty());
+        assertNull(indexConfiguration.getQueryTerm());
+        assertNull(indexConfiguration.getQueryWhen());
+        assertNull(indexConfiguration.getQueryDuration());
+        assertFalse(indexConfiguration.getQueryOnBulkFailures());
 
         indexConfiguration = new IndexConfiguration.Builder()
                 .withIndexAlias(testIndexAlias)
@@ -291,9 +483,9 @@ public class IndexConfigurationTests {
 
     @Test
     public void readIndexConfigWithTemplateFileAndTemplateContentUsesTemplateContent() throws JsonProcessingException {
-        final PluginSetting pluginSetting = generatePluginSetting("custom", "test", "test-file", createTemplateContent(), null, null, null);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig("custom", "test", "test-file", createTemplateContent(), null, null, null);
 
-        final IndexConfiguration objectUnderTest = IndexConfiguration.readIndexConfig(pluginSetting);
+        final IndexConfiguration objectUnderTest = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
 
         assertThat(objectUnderTest, notNullValue());
         assertThat(objectUnderTest.getIndexTemplate(), notNullValue());
@@ -301,12 +493,12 @@ public class IndexConfigurationTests {
     }
 
     @Test
-    public void invalidTemplateContentThrowsInvalidPluginConfigurationException() {
+    public void invalidTemplateContentThrowsInvalidPluginConfigurationException() throws JsonProcessingException {
         final String invalidTemplateContent = UUID.randomUUID().toString();
 
-        final PluginSetting pluginSetting = generatePluginSetting("custom", null, null, invalidTemplateContent, null, null, null);
+        final OpenSearchSinkConfig openSearchSinkConfig = generateOpenSearchSinkConfig("custom", null, null, invalidTemplateContent, null, null, null);
 
-        assertThrows(InvalidPluginConfigurationException.class, () -> IndexConfiguration.readIndexConfig(pluginSetting));
+        assertThrows(InvalidPluginConfigurationException.class, () -> IndexConfiguration.readIndexConfig(openSearchSinkConfig));
 
     }
 
@@ -319,11 +511,11 @@ public class IndexConfigurationTests {
     }
 
     @Test
-    public void testReadIndexConfig_RawIndexType() {
+    public void testReadIndexConfig_RawIndexType() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
                 IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null, null, null, null, null);
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         final URL expTemplateFile = indexConfiguration
                 .getClass().getClassLoader().getResource(RAW_DEFAULT_TEMPLATE_FILE);
         assertEquals(IndexType.TRACE_ANALYTICS_RAW, indexConfiguration.getIndexType());
@@ -333,23 +525,23 @@ public class IndexConfigurationTests {
         assertEquals(60_000L, indexConfiguration.getFlushTimeout());
         assertEquals(false, indexConfiguration.isEstimateBulkSizeUsingCompression());
         assertEquals(2, indexConfiguration.getMaxLocalCompressionsForEstimation());
-        assertEquals("${spanId}", indexConfiguration.getDocumentId());
+        assertEquals("${traceId}/${spanId}", indexConfiguration.getDocumentId());
     }
 
     @Test
-    public void testReadIndexConfig_InvalidIndexTypeValueString() {
+    public void testReadIndexConfig_InvalidIndexTypeValueString() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
                 "i-am-an-illegitimate-index-type", null, null, null, null, null, null);
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        assertThrows(IllegalArgumentException.class, () -> IndexConfiguration.readIndexConfig(pluginSetting));
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        assertThrows(IllegalArgumentException.class, () -> IndexConfiguration.readIndexConfig(openSearchSinkConfig));
     }
 
     @Test
-    public void testReadIndexConfig_ServiceMapIndexType() {
+    public void testReadIndexConfig_ServiceMapIndexType() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
                 IndexType.TRACE_ANALYTICS_SERVICE_MAP.getValue(), null, null, null, null, null, null);
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         final URL expTemplateFile = indexConfiguration
                 .getClass().getClassLoader().getResource(SERVICE_MAP_DEFAULT_TEMPLATE_FILE);
         assertEquals(IndexType.TRACE_ANALYTICS_SERVICE_MAP, indexConfiguration.getIndexType());
@@ -363,18 +555,19 @@ public class IndexConfigurationTests {
     }
 
     @Test
-    public void testReadIndexConfigCustom() {
+    public void testReadIndexConfigCustom() throws JsonProcessingException {
         final String defaultTemplateFilePath = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(DEFAULT_TEMPLATE_FILE)).getFile();
         final String testIndexAlias = "foo";
         final long testBulkSize = 10L;
         final long testFlushTimeout = 30_000L;
         final String testIdField = "someId";
-        final PluginSetting pluginSetting = generatePluginSetting(
+        final Map<String,Object> metaData = initializeConfigMetaData(
                 null, testIndexAlias, defaultTemplateFilePath, null, testBulkSize, testFlushTimeout, testIdField);
-        pluginSetting.getSettings().put(IndexConfiguration.ESTIMATE_BULK_SIZE_USING_COMPRESSION, true);
-        pluginSetting.getSettings().put(IndexConfiguration.MAX_LOCAL_COMPRESSIONS_FOR_ESTIMATION, 5);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        metaData.put(IndexConfiguration.ESTIMATE_BULK_SIZE_USING_COMPRESSION, true);
+        metaData.put(IndexConfiguration.MAX_LOCAL_COMPRESSIONS_FOR_ESTIMATION, 5);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metaData);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertEquals(IndexType.CUSTOM, indexConfiguration.getIndexType());
         assertEquals(testIndexAlias, indexConfiguration.getIndexAlias());
         assertFalse(indexConfiguration.getIndexTemplate().isEmpty());
@@ -386,8 +579,46 @@ public class IndexConfigurationTests {
     }
 
     @Test
-    public void testReadIndexConfig_ExplicitCustomIndexType() {
+    public void testValidCustomWithQueryManager() {
         final String defaultTemplateFilePath = Objects.requireNonNull(
+                getClass().getClassLoader().getResource(DEFAULT_TEMPLATE_FILE)).getFile();
+
+        final Duration queryDuration = Duration.ofMinutes(3);
+        final String queryTerm = UUID.randomUUID().toString();
+        final String testIndexAlias = "foo";
+        final String queryWhen = UUID.randomUUID().toString();
+        IndexConfiguration indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexAlias(testIndexAlias)
+                .withTemplateFile(defaultTemplateFilePath)
+                .withIsmPolicyFile(TEST_CUSTOM_INDEX_POLICY_FILE)
+                .withBulkSize(10)
+                .withFlushTimeout(50)
+                .withQueryOnIndexingFailure(true)
+                .withQueryDuration(queryDuration)
+                .withQueryTerm(queryTerm)
+                .withQueryWhen(queryWhen)
+                .build();
+
+        assertEquals(IndexType.CUSTOM, indexConfiguration.getIndexType());
+        assertEquals(testIndexAlias, indexConfiguration.getIndexAlias());
+        assertEquals(10, indexConfiguration.getBulkSize());
+        assertEquals(50, indexConfiguration.getFlushTimeout());
+        assertFalse(indexConfiguration.getIndexTemplate().isEmpty());
+        assertEquals(queryTerm, indexConfiguration.getQueryTerm());
+        assertEquals(queryWhen, indexConfiguration.getQueryWhen());
+        assertEquals(queryDuration, indexConfiguration.getQueryDuration());
+        assertTrue(indexConfiguration.getQueryOnBulkFailures());
+
+        indexConfiguration = new IndexConfiguration.Builder()
+                .withIndexAlias(testIndexAlias)
+                .withBulkSize(-1)
+                .build();
+        assertEquals(-1, indexConfiguration.getBulkSize());
+    }
+
+    @Test
+    public void testReadIndexConfig_ExplicitCustomIndexType() throws JsonProcessingException {
+         final String defaultTemplateFilePath = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(DEFAULT_TEMPLATE_FILE)).getFile();
         final String testIndexType = IndexType.CUSTOM.getValue();
         final String testIndexAlias = "foo";
@@ -396,8 +627,8 @@ public class IndexConfigurationTests {
         final String testIdField = "someId";
         final Map<String, Object> metadata = initializeConfigMetaData(
                 testIndexType, testIndexAlias, defaultTemplateFilePath, null, testBulkSize, testFlushTimeout, testIdField);
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertEquals(IndexType.CUSTOM, indexConfiguration.getIndexType());
         assertEquals(testIndexAlias, indexConfiguration.getIndexAlias());
         assertFalse(indexConfiguration.getIndexTemplate().isEmpty());
@@ -407,27 +638,27 @@ public class IndexConfigurationTests {
     }
 
     @Test
-    public void testReadIndexConfig_awsOptionServerlessDefault() {
+    public void testReadIndexConfig_awsOptionServerlessDefault() throws JsonProcessingException {
         final String testIndexAlias = "foo";
         final Map<String, Object> metadata = initializeConfigMetaData(
                 null, testIndexAlias, null, null, null, null, null);
         metadata.put(AWS_OPTION, Map.of(SERVERLESS, true));
         metadata.put(TEMPLATE_TYPE, TemplateType.V1.getTypeName());
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertEquals(IndexType.MANAGEMENT_DISABLED, indexConfiguration.getIndexType());
         assertEquals(testIndexAlias, indexConfiguration.getIndexAlias());
     }
 
     @Test
-    public void testReadIndexConfig_awsServerlessIndexTypeOverride() {
+    public void testReadIndexConfig_awsServerlessIndexTypeOverride() throws JsonProcessingException {
         final String testIndexAlias = "foo";
         final Map<String, Object> metadata = initializeConfigMetaData(
                 IndexType.CUSTOM.getValue(), testIndexAlias, null, null, null, null, null);
         metadata.put(AWS_OPTION, Map.of(SERVERLESS, true));
         metadata.put(TEMPLATE_TYPE, TemplateType.V1.getTypeName());
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertEquals(IndexType.CUSTOM, indexConfiguration.getIndexType());
         assertEquals(testIndexAlias, indexConfiguration.getIndexAlias());
         assertEquals(TemplateType.INDEX_TEMPLATE, indexConfiguration.getTemplateType());
@@ -435,50 +666,72 @@ public class IndexConfigurationTests {
     }
 
     @Test
-    public void testReadIndexConfig_distributionVersionDefault() {
+    public void testReadIndexConfig_distributionVersionDefault() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
                 null, "foo", null,null, null, null, null);
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertEquals(indexConfiguration.getDistributionVersion(), DistributionVersion.DEFAULT);
     }
 
     @Test
-    public void testReadIndexConfig_es6Override() {
+    public void testReadIndexConfig_es6Override() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
                 null, "foo", null, null, null, null, null);
         metadata.put(DISTRIBUTION_VERSION, "es6");
         metadata.put(TEMPLATE_TYPE, TemplateType.INDEX_TEMPLATE.getTypeName());
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertEquals(indexConfiguration.getDistributionVersion(), DistributionVersion.ES6);
         assertEquals(TemplateType.V1, indexConfiguration.getTemplateType());
         assertEquals(IndexType.CUSTOM, indexConfiguration.getIndexType());
     }
 
     @Test
-    public void testReadIndexConfig_documentRootKey() {
+    public void testReadIndexConfig_documentRootKey() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
             IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
         final String expectedRootKey = UUID.randomUUID().toString();
         metadata.put(DOCUMENT_ROOT_KEY, expectedRootKey);
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertEquals(expectedRootKey, indexConfiguration.getDocumentRootKey());
     }
 
     @Test
-    public void testReadIndexConfig_emptyDocumentRootKey() {
+    public void testReadIndexConfig_emptyDocumentRootKey() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
             IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
         metadata.put(DOCUMENT_ROOT_KEY, "");
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        assertThrows(IllegalArgumentException.class, () -> IndexConfiguration.readIndexConfig(pluginSetting));
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        assertThrows(IllegalArgumentException.class, () -> IndexConfiguration.readIndexConfig(openSearchSinkConfig));
+    }
+
+    @Test
+    public void testReadIndexConfig_routing() throws JsonProcessingException {
+        final Map<String, Object> metadata = initializeConfigMetaData(
+                IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
+        final String expectedRoutingValue = UUID.randomUUID().toString();
+        metadata.put(ROUTING, expectedRoutingValue);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
+        assertEquals(expectedRoutingValue, indexConfiguration.getRouting());
+    }
+
+    @Test
+    public void testReadIndexConfig_routingField() throws JsonProcessingException {
+        final Map<String, Object> metadata = initializeConfigMetaData(
+                IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
+        final String expectedRoutingFieldValue = UUID.randomUUID().toString();
+        metadata.put(ROUTING_FIELD, expectedRoutingFieldValue);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
+        assertEquals(expectedRoutingFieldValue, indexConfiguration.getRoutingField());
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"${key}", "${getMetadata(\"key\")}"})
-    public void testReadIndexConfig_withValidDocumentVersionExpression(final String versionExpression) {
+    public void testReadIndexConfig_withValidDocumentVersionExpression(final String versionExpression) throws JsonProcessingException {
 
         final ExpressionEvaluator expressionEvaluator = mock(ExpressionEvaluator.class);
         when(expressionEvaluator.isValidFormatExpression(versionExpression)).thenReturn(true);
@@ -487,16 +740,16 @@ public class IndexConfigurationTests {
                 IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
         metadata.put(DOCUMENT_VERSION_EXPRESSION, versionExpression);
 
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
 
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting, expressionEvaluator);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig, expressionEvaluator);
 
         assertThat(indexConfiguration, notNullValue());
         assertThat(indexConfiguration.getVersionExpression(), equalTo(versionExpression));
     }
 
     @Test
-    public void testReadIndexConfig_withInvalidDocumentVersionExpression_throws_InvalidPluginConfigurationException() {
+    public void testReadIndexConfig_withInvalidDocumentVersionExpression_throws_InvalidPluginConfigurationException() throws JsonProcessingException {
         final String versionExpression = UUID.randomUUID().toString();
 
         final ExpressionEvaluator expressionEvaluator = mock(ExpressionEvaluator.class);
@@ -506,40 +759,44 @@ public class IndexConfigurationTests {
                 IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
         metadata.put(DOCUMENT_VERSION_EXPRESSION, versionExpression);
 
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
 
-        assertThrows(InvalidPluginConfigurationException.class, () -> IndexConfiguration.readIndexConfig(pluginSetting, expressionEvaluator));
+        assertThrows(InvalidPluginConfigurationException.class, () -> IndexConfiguration.readIndexConfig(openSearchSinkConfig, expressionEvaluator));
     }
 
     @Test
-    void getTemplateType_defaults_to_V1() {
+    void getTemplateType_defaults_to_V1() throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
                 IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertThat(indexConfiguration.getTemplateType(), equalTo(TemplateType.V1));
     }
 
     @ParameterizedTest
     @EnumSource(TemplateType.class)
-    void getTemplateType_with_configured_templateType(final TemplateType templateType) {
+    void getTemplateType_with_configured_templateType(final TemplateType templateType) throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(
                 IndexType.CUSTOM.getValue(), "foo", null, null, null, null, null);
         metadata.put(TEMPLATE_TYPE, templateType.getTypeName());
-        final PluginSetting pluginSetting = getPluginSetting(metadata);
-        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(pluginSetting);
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration indexConfiguration = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
         assertThat(indexConfiguration.getTemplateType(), equalTo(templateType));
     }
 
-    private PluginSetting generatePluginSetting(
+    private OpenSearchSinkConfig generateOpenSearchSinkConfig(
             final String indexType, final String indexAlias, final String templateFilePath, final String templateContent,
-            final Long bulkSize, final Long flushTimeout, final String documentIdField) {
+            final Long bulkSize, final Long flushTimeout, final String documentIdField) throws JsonProcessingException {
         final Map<String, Object> metadata = initializeConfigMetaData(indexType, indexAlias, templateFilePath, templateContent, bulkSize, flushTimeout, documentIdField);
-        return getPluginSetting(metadata);
+        return getOpenSearchSinkConfig(metadata);
     }
 
-    private PluginSetting getPluginSetting(Map<String, Object> metadata) {
-        return new PluginSetting("opensearch", metadata);
+    private OpenSearchSinkConfig getOpenSearchSinkConfig(Map<String, Object> metadata) throws JsonProcessingException {
+        objectMapper = new ObjectMapper();
+        String json = new ObjectMapper().writeValueAsString(metadata);
+        OpenSearchSinkConfig openSearchSinkConfig = objectMapper.readValue(json, OpenSearchSinkConfig.class);
+
+        return openSearchSinkConfig;
     }
 
     private Map<String, Object> initializeConfigMetaData(
@@ -577,5 +834,27 @@ public class IndexConfigurationTests {
                 "\"settings\":{\"number_of_shards\":5,\"number_of_replicas\":2,\"refresh_interval\":-1}," +
                 "\"mappings\":{\"properties\":{\"timestamp\":{\"type\":\"date\",\"format\":\"yyyy-MM-ddHH:mm:ss||yyyy-MM-dd||epoch_millis\"}," +
                 "\"value\":{\"type\":\"double\"}}}}}";
+    }
+
+    @Test
+    public void testReadIndexConfig_withExternalVersionAndScript_throws_InvalidPluginConfigurationException() throws JsonProcessingException {
+        final Map<String, Object> metadata = new HashMap<>();
+        metadata.put("index_type", "custom");
+        metadata.put("index", "test-index");
+        metadata.put("document_version_type", "external");
+        metadata.put("script", Map.of("source", "ctx._source.counter += 1"));
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        assertThrows(InvalidPluginConfigurationException.class, () -> IndexConfiguration.readIndexConfig(openSearchSinkConfig));
+    }
+
+    @Test
+    public void testReadIndexConfig_withScriptAndNoExternalVersion_doesNotThrow() throws JsonProcessingException {
+        final Map<String, Object> metadata = new HashMap<>();
+        metadata.put("index_type", "custom");
+        metadata.put("index", "test-index");
+        metadata.put("script", Map.of("source", "ctx._source.counter += 1"));
+        final OpenSearchSinkConfig openSearchSinkConfig = getOpenSearchSinkConfig(metadata);
+        final IndexConfiguration config = IndexConfiguration.readIndexConfig(openSearchSinkConfig);
+        assertThat(config.getScriptConfiguration(), notNullValue());
     }
 }

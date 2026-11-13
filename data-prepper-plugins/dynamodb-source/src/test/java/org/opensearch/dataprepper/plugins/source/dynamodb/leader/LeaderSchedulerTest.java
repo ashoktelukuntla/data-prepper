@@ -3,10 +3,12 @@ package org.opensearch.dataprepper.plugins.source.dynamodb.leader;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.model.source.coordinator.enhanced.EnhancedSourceCoordinator;
 import org.opensearch.dataprepper.model.source.coordinator.enhanced.EnhancedSourcePartition;
+import org.opensearch.dataprepper.model.source.coordinator.exceptions.PartitionUpdateException;
 import org.opensearch.dataprepper.plugins.source.dynamodb.DynamoDBSourceConfig;
 import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.ExportConfig;
 import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.StreamConfig;
@@ -15,6 +17,7 @@ import org.opensearch.dataprepper.plugins.source.dynamodb.configuration.TableCon
 import org.opensearch.dataprepper.plugins.source.dynamodb.coordination.partition.LeaderPartition;
 import org.opensearch.dataprepper.plugins.source.dynamodb.coordination.partition.StreamPartition;
 import org.opensearch.dataprepper.plugins.source.dynamodb.coordination.state.StreamProgressState;
+import org.opensearch.dataprepper.test.helper.ReflectivelySetField;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.ContinuousBackupsDescription;
 import software.amazon.awssdk.services.dynamodb.model.ContinuousBackupsStatus;
@@ -54,6 +57,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -188,7 +192,13 @@ class LeaderSchedulerTest {
         leaderPartition = new LeaderPartition();
         leaderPartition.getProgressState().get().setInitialized(true);
         leaderPartition.getProgressState().get().setStreamArns(List.of(streamArn));
+
+        final String expectedEndingSequenceNumber = UUID.randomUUID().toString();
+        when(shardManager.getEndingSequenceNumber(anyString())).thenReturn(expectedEndingSequenceNumber);
         given(coordinator.acquireAvailablePartition(LeaderPartition.PARTITION_TYPE)).willReturn(Optional.of(leaderPartition));
+
+        final ArgumentCaptor<StreamPartition> createdPartitionCaptor = ArgumentCaptor.forClass(StreamPartition.class);
+        when(coordinator.createPartition(createdPartitionCaptor.capture())).thenReturn(true);
 
         ExecutorService executorService = Executors.newSingleThreadExecutor();
         executorService.submit(() -> leaderScheduler.run());
@@ -206,6 +216,10 @@ class LeaderSchedulerTest {
 
         verify(coordinator).saveProgressStateForPartition(eq(leaderPartition), any(Duration.class));
 
+        final List<StreamPartition> createdPartitions = createdPartitionCaptor.getAllValues();
+        createdPartitions.forEach(streamPartition -> {
+            assertThat(streamPartition.getProgressState().get().getEndingSequenceNumber(), equalTo(expectedEndingSequenceNumber));
+        });
     }
 
     @Test
@@ -223,7 +237,10 @@ class LeaderSchedulerTest {
 
 
         // Should call describe table to get basic table info
-        verify(dynamoDbClient).describeTable(any(DescribeTableRequest.class));
+        ArgumentCaptor<DescribeTableRequest> describeTableRequestArgumentCaptor = ArgumentCaptor.forClass(DescribeTableRequest.class);
+        verify(dynamoDbClient).describeTable(describeTableRequestArgumentCaptor.capture());
+        DescribeTableRequest actualDescribeTableRequest = describeTableRequestArgumentCaptor.getValue();
+        assertThat(actualDescribeTableRequest.tableName(), equalTo(tableArn));
         // Should check PITR enabled or not
         verify(dynamoDbClient).describeContinuousBackups(any(DescribeContinuousBackupsRequest.class));
         // Acquire the init partition
@@ -252,7 +269,11 @@ class LeaderSchedulerTest {
         executorService.shutdownNow();
 
         // Should call describe table to get basic table info
-        verify(dynamoDbClient).describeTable(any(DescribeTableRequest.class));
+        ArgumentCaptor<DescribeTableRequest> describeTableRequestArgumentCaptor = ArgumentCaptor.forClass(DescribeTableRequest.class);
+        verify(dynamoDbClient).describeTable(describeTableRequestArgumentCaptor.capture());
+        DescribeTableRequest actualDescribeTableRequest = describeTableRequestArgumentCaptor.getValue();
+        assertThat(actualDescribeTableRequest.tableName(), equalTo(tableArn));
+
         // Should check PITR enabled or not
         verify(dynamoDbClient).describeContinuousBackups(any(DescribeContinuousBackupsRequest.class));
 
@@ -277,7 +298,11 @@ class LeaderSchedulerTest {
         executorService.shutdownNow();
 
         // Should call describe table to get basic table info
-        verify(dynamoDbClient).describeTable(any(DescribeTableRequest.class));
+        ArgumentCaptor<DescribeTableRequest> describeTableRequestArgumentCaptor = ArgumentCaptor.forClass(DescribeTableRequest.class);
+        verify(dynamoDbClient).describeTable(describeTableRequestArgumentCaptor.capture());
+        DescribeTableRequest actualDescribeTableRequest = describeTableRequestArgumentCaptor.getValue();
+        assertThat(actualDescribeTableRequest.tableName(), equalTo(tableArn));
+
         // Should check PITR enabled or not
         verify(dynamoDbClient).describeContinuousBackups(any(DescribeContinuousBackupsRequest.class));
 
@@ -306,6 +331,55 @@ class LeaderSchedulerTest {
 
         verify(coordinator, atLeast(3)).acquireAvailablePartition(LeaderPartition.PARTITION_TYPE);
         verify(coordinator, never()).saveProgressStateForPartition(isNull(), any(Duration.class));
+    }
+
+    @Test
+    void test_custom_lease_interval_controls_discovery_cadence() {
+        // A short interval should drive multiple shard-discovery passes in a small window,
+        // demonstrating that the configurable interval controls the leader loop cadence.
+        final Duration leaseInterval = Duration.ofMillis(100);
+        leaderScheduler = new LeaderScheduler(coordinator, dynamoDbClient, shardManager, List.of(tableConfig), leaseInterval);
+        leaderPartition = new LeaderPartition();
+        leaderPartition.getProgressState().get().setInitialized(true);
+        leaderPartition.getProgressState().get().setStreamArns(List.of(streamArn));
+        given(coordinator.acquireAvailablePartition(LeaderPartition.PARTITION_TYPE)).willReturn(Optional.of(leaderPartition));
+
+        final ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(() -> leaderScheduler.run());
+
+        await().atMost(leaseInterval.multipliedBy(20))
+                .untilAsserted(() -> verify(coordinator, atLeast(3))
+                        .queryCompletedPartitions(eq(StreamPartition.PARTITION_TYPE), any(Instant.class)));
+        executorService.shutdownNow();
+    }
+
+    @Test
+    void test_shardDiscovery_with_failure_to_save_partition_state_reacquires_partition() throws InterruptedException, NoSuchFieldException, IllegalAccessException {
+        leaderScheduler = new LeaderScheduler(coordinator, dynamoDbClient, shardManager, List.of(tableConfig));
+        leaderPartition = new LeaderPartition();
+        leaderPartition.getProgressState().get().setInitialized(true);
+        leaderPartition.getProgressState().get().setStreamArns(List.of(streamArn));
+        given(coordinator.acquireAvailablePartition(LeaderPartition.PARTITION_TYPE)).willReturn(Optional.of(leaderPartition));
+        doThrow(PartitionUpdateException.class).when(coordinator).saveProgressStateForPartition(eq(leaderPartition), any(Duration.class));
+
+        ReflectivelySetField.setField(LeaderScheduler.class, leaderScheduler, "leaseInterval", Duration.ofMillis(40));
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService.submit(() -> leaderScheduler.run());
+
+        Thread.sleep(100);
+        executorService.shutdownNow();
+        // Already init
+        verifyNoInteractions(dynamoDbClient);
+
+        // Should check the completed partitions
+        verify(coordinator, atLeast(2)).queryCompletedPartitions(eq(StreamPartition.PARTITION_TYPE), any(Instant.class));
+
+        // Should create 3 stream partitions for child shards found
+        verify(coordinator, atLeast(3)).createPartition(any(EnhancedSourcePartition.class));
+
+        verify(coordinator, atLeast(2)).saveProgressStateForPartition(eq(leaderPartition), any(Duration.class));
+        verify(coordinator, atLeast(2)).acquireAvailablePartition(LeaderPartition.PARTITION_TYPE);
     }
 
 

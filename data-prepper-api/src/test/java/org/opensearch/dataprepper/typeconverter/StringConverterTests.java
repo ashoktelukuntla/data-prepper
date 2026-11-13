@@ -1,18 +1,27 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.typeconverter;
 
-import org.junit.jupiter.api.Test;
-
-import java.util.Collections;
-import java.util.Map;
-
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import java.math.BigDecimal;
+import java.util.Collections;
+import java.util.Map;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 public class StringConverterTests {
     @Test
@@ -20,6 +29,7 @@ public class StringConverterTests {
         StringConverter converter = new StringConverter();
         final Long longConstant = (long)100000000 * (long)10000000;
         assertThat(converter.convert(longConstant), equalTo(longConstant.toString()));
+        assertThat(converter.convert(longConstant, () -> 0), equalTo(longConstant.toString()));
     }
     @Test
     void testDoubleToStringConversion() {
@@ -63,7 +73,27 @@ public class StringConverterTests {
         final String strConstant = "testString";
         assertThat(converter.convert(strConstant), equalTo(strConstant));
     }
-
+    @ParameterizedTest
+    @MethodSource("BigDecimalValueProvider")
+    void testBigDecimalToDoubleConversion(BigDecimal bigDecimalConstant, String expectedstringValue) {
+        StringConverter converter = new StringConverter();
+        assertThat(converter.convert(bigDecimalConstant), equalTo(expectedstringValue));
+    }
+    private static Stream<Arguments> BigDecimalValueProvider() {
+        return Stream.of(
+            Arguments.of(new BigDecimal ("0"), "0"),
+            Arguments.of(new BigDecimal ("0.0"), "0.0"),
+            Arguments.of(new BigDecimal ("0.00000000000000000000000"), "0E-23"),
+            Arguments.of(BigDecimal.ZERO, "0"),
+            Arguments.of(new BigDecimal ("1"), "1"),
+            Arguments.of(new BigDecimal ("1703908514.045833"), "1703908514.045833"),
+            Arguments.of(new BigDecimal ("1.00000000000000000000000"), "1.00000000000000000000000"),
+            Arguments.of(new BigDecimal ("-12345678912.12345"), "-12345678912.12345"),
+            Arguments.of(BigDecimal.ONE, "1"),
+            Arguments.of(new BigDecimal("1.7976931348623157E+308"), "1.7976931348623157E+308"),
+            Arguments.of(new BigDecimal(Long.MAX_VALUE), "9223372036854775807")
+        );
+    }
     @Test
     void testInvalidStringConversion() {
         StringConverter converter = new StringConverter();

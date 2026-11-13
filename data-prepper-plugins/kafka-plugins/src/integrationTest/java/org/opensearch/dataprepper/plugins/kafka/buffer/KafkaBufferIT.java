@@ -25,8 +25,8 @@ import org.opensearch.dataprepper.model.codec.JsonDecoder;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
-import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.plugins.encryption.EncryptionSupplier;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerProperties;
 import org.opensearch.dataprepper.plugins.kafka.util.TestConsumer;
 import org.opensearch.dataprepper.plugins.kafka.util.TestProducer;
@@ -63,6 +63,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.opensearch.dataprepper.plugins.kafka.buffer.ReadBufferHelper.awaitRead;
 import static org.opensearch.dataprepper.test.helper.ReflectivelySetField.setField;
 
 @ExtendWith(MockitoExtension.class)
@@ -72,12 +73,13 @@ public class KafkaBufferIT {
     private PluginSetting pluginSetting;
 
     private KafkaBufferConfig kafkaBufferConfig;
-    @Mock
-    private PluginFactory pluginFactory;
+    private KafkaBufferConfig kafkaBufferCompressionConfig;
     @Mock
     private AcknowledgementSetManager acknowledgementSetManager;
     @Mock
     private AcknowledgementSet acknowledgementSet;
+    @Mock
+    private EncryptionSupplier encryptionSupplier;
 
     private Random random;
 
@@ -94,9 +96,7 @@ public class KafkaBufferIT {
         random = new Random();
         acknowledgementSetManager = mock(AcknowledgementSetManager.class);
         acknowledgementSet = mock(AcknowledgementSet.class);
-        lenient().doAnswer((a) -> {
-            return null;
-        }).when(acknowledgementSet).complete();
+        lenient().doAnswer((a) -> null).when(acknowledgementSet).complete();
         lenient().when(acknowledgementSetManager.create(any(), any(Duration.class))).thenReturn(acknowledgementSet);
         objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
@@ -112,6 +112,13 @@ public class KafkaBufferIT {
 
         topicConfig = objectMapper.convertValue(topicConfigMap, BufferTopicConfig.class);
 
+        final Map<String, Object> topicConfigMapCompression = Map.of(
+                "name", topicName,
+                "group_id", "buffergroup-" + RandomStringUtils.randomAlphabetic(6),
+                "create_topic", true,
+                "encryption_key", "6fib8P/ML7Lh7lUEHCFYCt+bschigjNwmEZUctkP5dw=" // sample key
+        );
+
         bootstrapServersCommaDelimited = System.getProperty("tests.kafka.bootstrap_servers");
 
         LOG.info("Using Kafka bootstrap servers: {}", bootstrapServersCommaDelimited);
@@ -123,11 +130,28 @@ public class KafkaBufferIT {
         );
         kafkaBufferConfig = objectMapper.convertValue(bufferConfigMap, KafkaBufferConfig.class);
 
+        final Map<String, Object> bufferCompressionConfigMap = Map.of(
+                "topics", List.of(topicConfigMapCompression),
+                "bootstrap_servers", List.of(bootstrapServersCommaDelimited),
+                "encryption", Map.of("type", "none"),
+                "producer_properties", Map.of("compression_type", "zstd")
+        );
+
+        kafkaBufferCompressionConfig = objectMapper.convertValue(bufferCompressionConfigMap, KafkaBufferConfig.class);
+
         byteDecoder = null;
     }
 
+    private KafkaBuffer createObjectUnderTestWithJsonDecoder() {
+        return new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, new JsonDecoder(), null, null, encryptionSupplier);
+    }
+
     private KafkaBuffer createObjectUnderTest() {
-        return new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, null, null, null);
+        return new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, null, null, null, encryptionSupplier);
+    }
+
+    private KafkaBuffer createObjectUnderTestWithCompression() {
+        return new KafkaBuffer(pluginSetting, kafkaBufferCompressionConfig, acknowledgementSetManager, null, null, null, encryptionSupplier);
     }
 
     @Test
@@ -137,7 +161,34 @@ public class KafkaBufferIT {
         Record<Event> record = createRecord();
         objectUnderTest.write(record, 1_000);
 
-        Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = objectUnderTest.read(10_000);
+        final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
+
+        assertThat(readResult, notNullValue());
+        assertThat(readResult.getKey(), notNullValue());
+        assertThat(readResult.getKey().size(), equalTo(1));
+
+        Record<Event> onlyResult = readResult.getKey().stream().iterator().next();
+
+        assertThat(onlyResult, notNullValue());
+        assertThat(onlyResult.getData(), notNullValue());
+        // TODO: The metadata is not included. It needs to be included in the Buffer, though not in the Sink. This may be something we make configurable in the consumer/producer - whether to serialize the metadata or not.
+        //assertThat(onlyResult.getData().getMetadata(), equalTo(record.getData().getMetadata()));
+        assertThat(onlyResult.getData().toMap(), equalTo(record.getData().toMap()));
+        assertThat(objectUnderTest.getRecordsInFlight(), equalTo(0));
+        assertThat(objectUnderTest.getInnerBufferRecordsInFlight(), equalTo(1));
+        objectUnderTest.checkpoint(readResult.getValue());
+        assertThat(objectUnderTest.getRecordsInFlight(), equalTo(0));
+        assertThat(objectUnderTest.getInnerBufferRecordsInFlight(), equalTo(0));
+    }
+
+    @Test
+    void write_and_read_compression() throws TimeoutException {
+        KafkaBuffer objectUnderTest = createObjectUnderTestWithCompression();
+
+        Record<Event> record = createRecord();
+        objectUnderTest.write(record, 1_000);
+
+        final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
 
         assertThat(readResult, notNullValue());
         assertThat(readResult.getKey(), notNullValue());
@@ -178,7 +229,7 @@ public class KafkaBufferIT {
         Record<Event> record = createLargeRecord();
         objectUnderTest.write(record, 1_000);
 
-        Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = objectUnderTest.read(10_000);
+        Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
 
         assertThat(readResult, notNullValue());
         assertThat(readResult.getKey(), notNullValue());
@@ -194,6 +245,70 @@ public class KafkaBufferIT {
     }
 
     @Test
+    void writeBigJson_and_read() throws Exception {
+        final KafkaBuffer objectUnderTest = createObjectUnderTestWithJsonDecoder();
+
+        String inputJson = "[";
+        final int numRecords = 10;
+        for (int i = 0; i < numRecords; i++) {
+            String boolString = (i % 2 == 0) ? "true" : "false";
+            if (i != 0)
+                inputJson += ",";
+            inputJson += "{\"key"+i+"\": \"value"+i+"\", \"key"+(10+i)+"\": "+(50+i)+", \"key"+(20+i)+"\": "+boolString+"}";
+        }
+        inputJson += "]";
+        objectUnderTest.writeBytes(inputJson.getBytes(), null, 1_000);
+
+        final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
+
+        assertThat(readResult, notNullValue());
+        assertThat(readResult.getKey(), notNullValue());
+        assertThat(readResult.getKey().size(), equalTo(numRecords));
+
+        Object[] outputRecords = readResult.getKey().toArray();
+        for (int i = 0; i < numRecords; i++) {
+            Record<Event> receivedRecord = (Record<Event>)outputRecords[i];
+            assertThat(receivedRecord, notNullValue());
+            assertThat(receivedRecord.getData(), notNullValue());
+            Map<String, Object> receivedMap = receivedRecord.getData().toMap();
+            assertThat(receivedMap.get("key"+i), equalTo("value"+i));
+            assertThat(receivedMap.get("key"+(10+i)), equalTo(50+i));
+            boolean expectedBoolString = (i % 2 == 0) ? true : false;
+            assertThat(receivedMap.get("key"+(20+i)), equalTo(expectedBoolString));
+        }
+    }
+
+    @Test
+    void writeMultipleSmallJson_and_read() throws Exception {
+        final KafkaBuffer objectUnderTest = createObjectUnderTestWithJsonDecoder();
+
+        final int numRecords = 10;
+        for (int i = 0; i < numRecords; i++) {
+            String boolString = (i % 2 == 0) ? "true" : "false";
+            String inputJson = "[{\"key"+i+"\": \"value"+i+"\", \"key"+(10+i)+"\": "+(50+i)+", \"key"+(20+i)+"\": "+boolString+"}]";
+            objectUnderTest.writeBytes(inputJson.getBytes(), null, 1_000);
+        }
+
+        final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
+
+        assertThat(readResult, notNullValue());
+        assertThat(readResult.getKey(), notNullValue());
+        assertThat(readResult.getKey().size(), equalTo(numRecords));
+
+        Object[] outputRecords = readResult.getKey().toArray();
+        for (int i = 0; i < numRecords; i++) {
+            Record<Event> receivedRecord = (Record<Event>)outputRecords[i];
+            assertThat(receivedRecord, notNullValue());
+            assertThat(receivedRecord.getData(), notNullValue());
+            Map<String, Object> receivedMap = receivedRecord.getData().toMap();
+            assertThat(receivedMap.get("key"+i), equalTo("value"+i));
+            assertThat(receivedMap.get("key"+(10+i)), equalTo(50+i));
+            boolean expectedBoolString = (i % 2 == 0) ? true : false;
+            assertThat(receivedMap.get("key"+(20+i)), equalTo(expectedBoolString));
+        }
+    }
+
+    @Test
     void writeBytes_and_read() throws Exception {
         byteDecoder = new JsonDecoder();
 
@@ -204,7 +319,33 @@ public class KafkaBufferIT {
         final String key = UUID.randomUUID().toString();
         objectUnderTest.writeBytes(bytes, key, 1_000);
 
-        Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = objectUnderTest.read(10_000);
+        final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
+
+        assertThat(readResult, notNullValue());
+        assertThat(readResult.getKey(), notNullValue());
+        assertThat(readResult.getKey().size(), equalTo(1));
+
+        Record<Event> onlyResult = readResult.getKey().stream().iterator().next();
+
+        assertThat(onlyResult, notNullValue());
+        assertThat(onlyResult.getData(), notNullValue());
+        // TODO: The metadata is not included. It needs to be included in the Buffer, though not in the Sink. This may be something we make configurable in the consumer/producer - whether to serialize the metadata or not.
+        //assertThat(onlyResult.getData().getMetadata(), equalTo(record.getData().getMetadata()));
+        assertThat(onlyResult.getData().toMap(), equalTo(inputDataMap));
+    }
+
+    @Test
+    void writeBytes_and_read_with_compression() throws Exception {
+        byteDecoder = new JsonDecoder();
+
+        final KafkaBuffer objectUnderTest = createObjectUnderTestWithCompression();
+
+        final Map<String, String> inputDataMap = Map.of(UUID.randomUUID().toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString());
+        final byte[] bytes = objectMapper.writeValueAsBytes(inputDataMap);
+        final String key = UUID.randomUUID().toString();
+        objectUnderTest.writeBytes(bytes, key, 1_000);
+
+        final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
 
         assertThat(readResult, notNullValue());
         assertThat(readResult.getKey(), notNullValue());
@@ -304,6 +445,31 @@ public class KafkaBufferIT {
 
         @BeforeEach
         void setUp() throws NoSuchAlgorithmException, InvalidKeyException, NoSuchPaddingException {
+            random = new Random();
+            acknowledgementSetManager = mock(AcknowledgementSetManager.class);
+            acknowledgementSet = mock(AcknowledgementSet.class);
+            lenient().doAnswer((a) -> null).when(acknowledgementSet).complete();
+            lenient().when(acknowledgementSetManager.create(any(), any(Duration.class))).thenReturn(acknowledgementSet);
+            objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+
+            when(pluginSetting.getPipelineName()).thenReturn(UUID.randomUUID().toString());
+
+            topicName = "buffer-" + RandomStringUtils.randomAlphabetic(5);
+
+            Map<String, Object> topicConfigMap = new java.util.HashMap<>(Map.of(
+                    "name", topicName,
+                    "group_id", "buffergroup-" + RandomStringUtils.randomAlphabetic(6),
+                    "create_topic", true
+            ));
+
+            topicConfig = objectMapper.convertValue(topicConfigMap, BufferTopicConfig.class);
+
+            final Map<String, Object> bufferConfigMap = new java.util.HashMap<>(Map.of(
+                    "topics", List.of(topicConfigMap),
+                    "bootstrap_servers", List.of(bootstrapServersCommaDelimited),
+                    "encryption", Map.of("type", "none")
+            ));
+
             final KeyGenerator aesKeyGenerator = KeyGenerator.getInstance("AES");
             aesKeyGenerator.init(256);
             final SecretKey secretKey = aesKeyGenerator.generateKey();
@@ -315,11 +481,11 @@ public class KafkaBufferIT {
             final byte[] base64Bytes = Base64.getEncoder().encode(secretKey.getEncoded());
             aesKey = new String(base64Bytes);
 
-            final Map<String, Object> topicConfigMap = objectMapper.convertValue(topicConfig, Map.class);
             topicConfigMap.put("encryption_key", aesKey);
-            final Map<String, Object> bufferConfigMap = objectMapper.convertValue(kafkaBufferConfig, Map.class);
             bufferConfigMap.put("topics", List.of(topicConfigMap));
             kafkaBufferConfig = objectMapper.convertValue(bufferConfigMap, KafkaBufferConfig.class);
+
+            byteDecoder = null;
         }
 
         @Test
@@ -329,7 +495,7 @@ public class KafkaBufferIT {
             Record<Event> record = createRecord();
             objectUnderTest.write(record, 1_000);
 
-            Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = objectUnderTest.read(10_000);
+            final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
 
             assertThat(readResult, notNullValue());
             assertThat(readResult.getKey(), notNullValue());
@@ -457,7 +623,7 @@ public class KafkaBufferIT {
 
             testProducer.publishRecord(keyData.toByteArray(), bufferedData.toByteArray());
 
-            final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = objectUnderTest.read(10_000);
+            final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
 
             assertThat(readResult, notNullValue());
             assertThat(readResult.getKey(), notNullValue());
@@ -486,4 +652,5 @@ public class KafkaBufferIT {
         Event event = JacksonEvent.fromMessage(UUID.randomUUID().toString());
         return new Record<>(event);
     }
+
 }

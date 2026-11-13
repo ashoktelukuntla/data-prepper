@@ -1,11 +1,18 @@
 /*
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
  */
 
 package org.opensearch.dataprepper.aws.api;
 
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+
+import java.util.Optional;
 
 /**
  * An interface available to plugins via the AWS Plugin Extension which supplies
@@ -19,4 +26,24 @@ public interface AwsCredentialsSupplier {
      * @return An {@link AwsCredentialsProvider} to use.
      */
     AwsCredentialsProvider getProvider(AwsCredentialsOptions options);
+
+    /**
+     * Gets an AWS SDK {@link AwsCredentialsProvider} resolved from a named configuration
+     * defined in the extensions.aws.configurations block.
+     * @param configurationName The name of the configuration (e.g. "ecs_task_role")
+     * @return An {@link AwsCredentialsProvider} to use.
+     */
+    AwsCredentialsProvider getProvider(String configurationName);
+
+    /**
+     * Gets the default region if it is configured. Otherwise returns null
+     * @return Default {@link Region}
+     */
+    Optional<Region> getDefaultRegion();
+
+    /**
+     * Gets the default STS role ARN if it is configured. Otherwise returns empty Optional
+     * @return Default STS role ARN as String
+     */
+    Optional<String> getDefaultStsRoleArn();
 }
